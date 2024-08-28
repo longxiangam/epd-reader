@@ -1,0 +1,4 @@
+[toolchain]
+targets = ["riscv32imc-unknown-none-elf"]
+#channel = "nightly-2024-06-12" # works
+#channel = "nightly-2024-06-13" # broken

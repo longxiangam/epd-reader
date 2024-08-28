@@ -1,0 +1,63 @@
+[package]
+name = "sdcard"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+esp-hal = { package = "esp-hal", version = "0.19.0", default-features = false  ,features = ["esp32c3","async"]}
+#esp-hal = { package = "esp-hal", version = "0.19.0" ,git="https://github.com/esp-rs/esp-hal", default-features = false  ,features = ["esp32c3","async"]}
+esp-backtrace = { version = "0.13.0", features = ["esp32c3", "panic-handler", "exception-handler","println"] }
+esp-println       = { version = "0.10.0", features = ["esp32c3","log"] }
+esp-wifi = {version = "0.7.0", features = ["esp32c3", "async", "wifi","embassy-net","tcp","udp"] }
+esp-storage ={version = "0.3.0",features = ["esp32c3","storage"]}
+esp-hal-embassy = { git = "https://github.com/esp-rs/esp-hal", version = "0.2.0",features = ["esp32c3"]}
+
+embedded-storage = {version = "0.3.1"}
+embedded-graphics = {version= "0.8",features = ["fixed"] }
+embedded-layout = { version = "0.4", default-features = false }
+embedded-text ={version = "0.7.2"}
+u8g2-fonts = { version="0.4.0",features = ["embedded_graphics_textstyle"] }
+
+
+static_cell = { version = "2.0.0",features = ["nightly"] }
+futures = {version = "0.3.30",default-features = false,features = ["alloc"]}
+
+embassy-executor = { version = "0.6.0",features = ["nightly", "integrated-timers", "arch-riscv32"]}
+embassy-time = { version = "0.3",features = [] }
+embassy-net = { version = "0.4",features = ["dhcpv4","udp","tcp","dns"] }
+embassy-futures = { version = "0.1" }
+embassy-sync = {version = "0.6.0" }
+
+
+
+embedded-hal = { version = "1", default-features = false }
+embedded-io-async = {version = "0.6"}
+embedded-hal-async={version = "1.0"}
+embedded-hal-bus ={version = "0.1",features = ["async"]}
+embedded-alloc = { version = "0.5"}
+time = { version = "0.3", default-features = false , features = ["alloc","rand","macros","parsing","serde"]}
+log = "0.4.21"
+heapless = { version = "0.8",default-features = false,features = ["serde"]}
+reqwless = { version = "0.11", default-features = false ,features = ["embedded-tls"]}
+embedded-tls={version = "0.17"  , default-features = false}
+sntpc = {version = "0.3",features = ["async"] , default-features = false}
+rand_core = { version = "0.6.4" , default-features = false ,features = ["alloc"]}
+micromath = {version = "2.1.0"}
+
+
+
+wavv = { version = "0.1.4" }
+
+eg-seven-segment ={version = "0.2"}
+
+qrcodegen-no-heap ={version = "1.8"}
+dhcparse ={version = "1.0.0",default-features = false}
+httparse ={version = "1.9.3",default-features = false}
+embedded-sdmmc = {version = "0.8.0"}
+epd-waveshare = {path="../../lcd_drivers/epd-waveshare-modify"}
+
+[patch.crates-io]
+#embassy-executor-macros = { git = 'https://github.com/embassy-rs/embassy' }
+esp-hal = { git = 'https://github.com/esp-rs/esp-hal' }
+esp-hal-embassy = { git = "https://github.com/esp-rs/esp-hal"}
+esp-wifi = {git = 'https://github.com/esp-rs/esp-hal' }

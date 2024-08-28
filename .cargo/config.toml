@@ -1,0 +1,21 @@
+[target.riscv32imc-unknown-none-elf]
+runner = "espflash flash --baud 115200 --monitor "
+#runner = "probe-rs run --chip  esp32c3"
+
+
+[build]
+rustflags = [
+  "-C", "link-arg=-Tlinkall.x",
+  "-C", "link-arg=-Trom_functions.x",
+  "-C", "force-frame-pointers",
+]
+#"--cfg", "portable_atomic_unsafe_assume_single_core"
+target = "riscv32imc-unknown-none-elf"
+
+[env]
+CC = "riscv32-esp-elf-gcc"
+AR = "riscv32-esp-elf-ar"
+
+
+[net]
+git-fetch-with-cli = true
