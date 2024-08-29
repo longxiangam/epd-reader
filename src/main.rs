@@ -6,6 +6,8 @@
 #![feature(round_char_boundary)]
 #![allow(static_mut_refs)]
 
+mod txt_reader;
+
 extern crate alloc;
 use alloc::{format, vec};
 use core::{borrow::BorrowMut, cell::RefCell};
@@ -49,6 +51,7 @@ use log::{debug, error, trace};
 use reqwless::request::RequestBody;
 use core::str::FromStr;
 use embedded_layout::View;
+use crate::txt_reader::TxtReader;
 
 #[macro_export]
 macro_rules! make_static {
@@ -63,6 +66,7 @@ macro_rules! make_static {
 // This is just a placeholder TimeSource. In a real world application
 // one would probably use the RTC to provide time.
 pub struct TimeSource;
+
 
 impl embedded_sdmmc::TimeSource for TimeSource {
     fn get_timestamp(&self) -> embedded_sdmmc::Timestamp {
@@ -147,100 +151,14 @@ async fn main(spawner: Spawner) {
     let mut volume0 = volume_mgr.open_volume(embedded_sdmmc::VolumeIdx(0));
     match volume0 {
         Ok(mut v) => {
-            match v.open_root_dir() {
+            let root_result = v.open_root_dir();
+            match root_result {
                 Ok(mut root) => {
-                    println!("open finish");
-                    let mut my_file = root.open_file_in_dir("reader.txt", embedded_sdmmc::Mode::ReadOnly).unwrap();
 
-                    let mut utf8_buf:Vec<u8,600> = Vec::new();//完整的utf8 缓存
-                    let mut txt_str:String<8000> = String::new();//保存utf8转换的字符串，大于一定长度后进行分页计算
-                    let mut begin_position = 0;//txt_str开始字节在文件中的位置
-                    let mut end_position = 0;//txt_str结束字节在文件中的位置
-                    let mut all_page_position_vec:Vec<u16,500> = Vec::new();
-
-                    const BEGIN_PAGE_LEN:usize = 7000;
-
-                    const buffer_len:usize = 500;
-
-                    let mut file_length = my_file.length();
-                    println!("文件大小：{}", file_length);
-
-                    while !my_file.is_eof() {
-                        let mut buffer = [0u8; buffer_len];
-                        let num_read = my_file.read(&mut buffer).unwrap();
-                        debug!("buffer num:{}",num_read);
-                        debug!("buffer : {:?}",buffer );
-
-                        let mut cut_buffer = cut_full_utf8(&buffer,num_read,buffer_len);
-                        for b in &buffer[0..cut_buffer.len()] {
-                            utf8_buf.push(*b).unwrap();
-                        }
-
-                        debug!("cut_buffer : {:?}",cut_buffer );
-
-                        end_position += utf8_buf.as_slice().len();
-                        // 检查当前缓冲区中的字节是否形成了有效的UTF-8字符
-                        if let Ok(s) = String::from_utf8(utf8_buf.clone()) {
-                            txt_str.push_str(s.as_str());
-                            // 有效的UTF-8字符，可以打印或处理
-                            debug!("read 字符：{}", s);
-                            debug!("字符：{}", txt_str);
-                            utf8_buf.clear(); // 清空缓冲区，准备下一批字节
-                        } else {
-                            debug!("Invalid UTF-8 sequence");
-                            utf8_buf.clear();
-                        }
-                        if cut_buffer.len() != num_read {
-                            for b in &buffer[cut_buffer.len()..num_read] {
-                                utf8_buf.push(*b);
-                            }
-                        }
-
-                        if(txt_str.len() > BEGIN_PAGE_LEN){
-                            let (lost_str,pages) =  compute_pages(txt_str.as_str(),begin_position);
-
-                            //结束位置减掉剩余的长度是新的开始位置，剩余的字符串会重新加入到txt_str开始位置
-                            begin_position = end_position - lost_str.len();
-                            txt_str =String::from_str(lost_str).expect("lost_str error");
-
-                            //计算进度
-                            let percent =  begin_position as f32 / file_length as f32 * 100.0;
-                            println!("完成：{}%", percent);
-
-
-                            all_page_position_vec.extend_from_slice(&pages);
-
-                        }
-
-                    }
-
-                    //结束时最后计算
-                    let (lost_str,pages) =  compute_pages(txt_str.as_str(),begin_position);
-                    all_page_position_vec.extend_from_slice(&pages);
-
-                    debug!("txt_str:{}",txt_str);
-                    debug!("pages:{:?}",all_page_position_vec);
-
-
-                    for i in 0..all_page_position_vec.len() {
-                        let (start_position,end_position) = get_page_content(i+1,&all_page_position_vec);
-
-                        my_file.seek_from_start(start_position as u32);
-
-                        let mut buffer = [0u8; BEGIN_PAGE_LEN];
-                        let num_read = my_file.read(&mut buffer).unwrap();
-
-                        let len = end_position - start_position ;
-                        let len = len as usize;
-                        let vec:Vec<u8,500> = Vec::from_slice(&buffer[0..len]).expect("REASON");
-                        if let Ok(screen_txt) = String::from_utf8(vec) {
-                            println!("page : {} screen_txt:{}",(i+1),screen_txt);
-                        }
-
-                    }
-
-
-
+                        println!("open finish");
+                        let mut my_file = root.open_file_in_dir("abc.txt", embedded_sdmmc::Mode::ReadOnly).unwrap();
+                        TxtReader::generate_pages(&mut my_file);
+                        my_file.close();
 
                 },
                 Err(er) => {
