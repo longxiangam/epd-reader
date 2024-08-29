@@ -152,15 +152,15 @@ async fn main(spawner: Spawner) {
                     println!("open finish");
                     let mut my_file = root.open_file_in_dir("reader.txt", embedded_sdmmc::Mode::ReadOnly).unwrap();
 
-                    let mut utf8_buf:Vec<u8,50> = Vec::new();//完整的utf8 缓存
-                    let mut txt_str:String<800> = String::new();//保存utf8转换的字符串，大于一定长度后进行分页计算
+                    let mut utf8_buf:Vec<u8,600> = Vec::new();//完整的utf8 缓存
+                    let mut txt_str:String<8000> = String::new();//保存utf8转换的字符串，大于一定长度后进行分页计算
                     let mut begin_position = 0;//txt_str开始字节在文件中的位置
                     let mut end_position = 0;//txt_str结束字节在文件中的位置
                     let mut all_page_position_vec:Vec<u16,500> = Vec::new();
 
-                    const BEGIN_PAGE_LEN:usize = 500;
+                    const BEGIN_PAGE_LEN:usize = 7000;
 
-                    const buffer_len:usize = 32;
+                    const buffer_len:usize = 500;
 
                     let mut file_length = my_file.length();
                     println!("文件大小：{}", file_length);
@@ -204,7 +204,7 @@ async fn main(spawner: Spawner) {
                             txt_str =String::from_str(lost_str).expect("lost_str error");
 
                             //计算进度
-                            let percent =  (begin_position as f32 / file_length as f32 * 100.0) as u32;
+                            let percent =  begin_position as f32 / file_length as f32 * 100.0;
                             println!("完成：{}%", percent);
 
 
@@ -300,11 +300,11 @@ fn cut_full_utf8(buffer:&[u8],len:usize,full_len:usize)->&[u8]{
     }
 }
 
-fn compute_pages(txt_str:&str,begin_position:usize)->(&str,Vec<u16,10>){
+fn compute_pages(txt_str:&str,begin_position:usize)->(&str,Vec<u16,50>){
 
     //position 是对应文件中的下标
     let mut real_position = begin_position as u16;
-    let mut page_positions:Vec<u16,10> = Vec::new();
+    let mut page_positions:Vec<u16,50> = Vec::new();
 
 
     //index 对应切片的下标
@@ -329,7 +329,7 @@ fn compute_pages(txt_str:&str,begin_position:usize)->(&str,Vec<u16,10>){
 
 //计算整屏的文本，返回字符串切片，及是否为完整一屏
 fn compute_page(txt_str:&str)->(&str,bool){
-    const LOW_WORD:usize = 200;//起步的字符数量
+    const LOW_WORD:usize = 300;//起步的字符数量
     if txt_str.len() > LOW_WORD {
 
         let mut end = txt_str.ceil_char_boundary(LOW_WORD);
