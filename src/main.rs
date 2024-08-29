@@ -14,11 +14,11 @@ use core::{borrow::BorrowMut, cell::RefCell};
 use esp_hal::riscv::_export::critical_section::Mutex;
 
 use embassy_executor::Spawner;
-use embassy_time::{Duration, Timer};
+use embassy_time::{Duration, Instant, Timer};
 use embedded_graphics::Drawable;
 use embedded_graphics::mono_font::MonoTextStyleBuilder;
 use embedded_graphics::prelude::Point;
-use embedded_graphics::text::{Baseline, Text, TextStyleBuilder};
+use embedded_graphics::text::{Baseline, LineHeight, Text, TextStyleBuilder};
 use embedded_sdmmc::{sdcard::AcquireOpts, SdCard, VolumeManager};
 use esp_backtrace as _;
 use esp_hal::{
@@ -52,6 +52,16 @@ use reqwless::request::RequestBody;
 use core::str::FromStr;
 use embedded_layout::View;
 use crate::txt_reader::TxtReader;
+use u8g2_fonts::U8g2TextStyle;
+use u8g2_fonts::fonts;
+use embedded_graphics::primitives::Rectangle;
+use embedded_graphics::prelude::Size;
+use embedded_text::TextBox;
+use embedded_graphics::geometry::Dimensions;
+use embedded_graphics::draw_target::DrawTargetExt;
+use embedded_graphics::text::renderer::TextRenderer;
+use embedded_text::alignment::{HorizontalAlignment, VerticalAlignment};
+use embedded_text::style::{HeightMode, TextBoxStyle, TextBoxStyleBuilder, VerticalOverdraw};
 
 #[macro_export]
 macro_rules! make_static {
@@ -155,11 +165,15 @@ async fn main(spawner: Spawner) {
             match root_result {
                 Ok(mut root) => {
 
-                        println!("open finish");
-                        let mut my_file = root.open_file_in_dir("abc.txt", embedded_sdmmc::Mode::ReadOnly).unwrap();
-                        TxtReader::generate_pages(&mut my_file);
-                        my_file.close();
+                    let begin_secs = Instant::now().as_secs();
+                    println!("begin_time:{}",begin_secs);
 
+                    let mut my_file = root.open_file_in_dir("abc.txt", embedded_sdmmc::Mode::ReadOnly).unwrap();
+                    TxtReader::generate_pages_nostring(&mut my_file);
+                    my_file.close();
+
+                    println!("end_time:{}",Instant::now().as_secs());
+                    println!("cost_time:{}",Instant::now().as_secs() - begin_secs);
                 },
                 Err(er) => {
                     println!("open volume:{:?}",er);
@@ -175,13 +189,50 @@ async fn main(spawner: Spawner) {
 
     println!("read end");
 
-    /*let mut epd = Epd2in9::new(&mut spi_bus_2, epd_cs_ph , epd_busy, epd_dc, epd_rst, &mut delay).unwrap();
+    let mut epd = Epd2in9::new(&mut spi_bus_2, epd_cs_ph , epd_busy, epd_dc, epd_rst, &mut delay).unwrap();
 
     let mut display: Display2in9 = Display2in9::default();
-    draw_text(&mut display, "hello world!", 5, 50);
-    epd.update_and_display_frame(&mut spi_bus_2,display.buffer(),&mut delay );
-    epd.sleep(&mut spi_bus_2, &mut delay);*/
+    //draw_text(&mut display, "hello world!", 5, 50);
 
+
+
+    let style =
+        U8g2TextStyle::new(fonts::u8g2_font_wqy12_t_gb2312b, Black);
+
+
+
+
+
+    let clipping_area = Rectangle::new(Point::new(5, 5)
+                                       , Size::new(display.bounding_box().size.width - 10,display.bounding_box().size.height - 10));
+    let mut clipped_display = display.clipped(&clipping_area);
+    let mut textBoxyStyle =  TextBoxStyleBuilder::new()
+        .height_mode(HeightMode::FitToText)
+        .alignment(HorizontalAlignment::Justified)
+        .paragraph_spacing(6)
+        .build();
+    let str =  "中年男子狐疑的看向了杨凌问道：“这……都是你干的？”
+此时的杨凌已经回过神来，拥有了系统的他，整个人都自信了起来。
+他微微笑道：“运气好而已……”
+中年男子瞪大了眼睛，脸上露出了难以置信之色。
+他看向了前方的群众，得到了肯定的回答之后，用力拍了拍杨凌的肩膀道：“好小子有你的！”
+“你是哪个部门的，叫什么名字！”
+杨凌一个立正：“报告，我是新入队的，叫杨凌。”
+这端正的态度，这不卑不吭的语气让中年男子微微点头，他笑道：“杨凌是吧，好，我记下你";
+
+    let mut textBox = TextBox::with_textbox_style(
+        str,
+        display.bounding_box(),
+        style.clone(),
+        textBoxyStyle
+    );
+
+
+
+
+        textBox.draw(&mut display);
+    epd.update_and_display_frame(&mut spi_bus_2,display.buffer(),&mut delay );
+    epd.sleep(&mut spi_bus_2, &mut delay);
     println!("render end");
     loop{
         Timer::after_secs(1).await;
