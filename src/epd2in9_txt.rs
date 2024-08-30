@@ -30,13 +30,13 @@ pub struct TxtReader;
 const ZH_WIDTH:u32 = 16;
 type FileObject<'a,'b,CS: esp_hal::gpio::OutputPin> = File<'b,SdCard<&'a mut CriticalSectionDevice<'a,Spi<'a,SPI2, FullDuplexMode>, Output<'a,CS>, Delay>, Delay>, TimeSource, 4, 4, 1>;
 impl TxtReader {
-    pub fn generate_pages<CS: esp_hal::gpio::OutputPin>(my_file: &mut FileObject<CS>) ->Vec<u16, 500>   {
+    pub fn generate_pages<CS: esp_hal::gpio::OutputPin>(my_file: &mut FileObject<CS>) ->Vec<u32, 2000>   {
 
 
 
-        let mut begin_position :u16= 0; //每一屏在文件中的开始位置
-        let mut end_position:u16 = 0; //每一屏在文件中的结束位置
-        let mut all_page_position_vec: Vec<u16, 500> = Vec::new();
+        let mut begin_position :u32= 0; //每一屏在文件中的开始位置
+        let mut end_position:u32 = 0; //每一屏在文件中的结束位置
+        let mut all_page_position_vec: Vec<u32, 2000> = Vec::new();
         let mut line_width = 0;//当前行宽 用于换行
         let mut lines_num = 0;//当前行数 用于换屏
         let mut last_borrow_chars = 0;//上一次缓存结束时最后一个字符有字节未读取到时，算到上一个分页中，这里需要减去后再开始，
@@ -87,7 +87,7 @@ impl TxtReader {
                 //println!("byte_num:{}",byte_num);
                 //步进一个字符的字节数
                 if byte_num > 0 {
-                    end_position += byte_num as u16;
+                    end_position += byte_num as u32;
                     i += byte_num as usize;
                 }
                 println!("end_position:{}",end_position);
@@ -124,7 +124,7 @@ impl TxtReader {
         return all_page_position_vec;
     }
 
-    pub fn get_page_content<CS: esp_hal::gpio::OutputPin>(my_file: &mut FileObject<CS>,page_num:usize,pages_vec:&Vec<u16,500>)->String<1000>{
+    pub fn get_page_content<CS: esp_hal::gpio::OutputPin>(my_file: &mut FileObject<CS>,page_num:usize,pages_vec:&Vec<u32,2000>)->String<1000>{
         let mut  start_position = 0;
         let mut  end_position = 0;
         let mut line_width = 0;//当前行宽 用于换行

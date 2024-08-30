@@ -44,9 +44,9 @@ use esp_hal::spi::SpiMode;
 use embedded_hal::spi::*;
 use esp_hal::spi::master::*;
 use embedded_hal_bus::spi::{CriticalSectionDevice, ExclusiveDevice};
-use epd_waveshare::color::{Black, White};
+use epd_waveshare::color::{Black, Color, White};
 use epd_waveshare::epd2in9::{Display2in9, Epd2in9};
-use epd_waveshare::prelude::{Display, WaveshareDisplay};
+use epd_waveshare::prelude::{Display, RefreshLut, WaveshareDisplay};
 use heapless::{String, Vec};
 use log::{debug, error, trace};
 use reqwless::request::RequestBody;
@@ -153,7 +153,7 @@ async fn main(spawner: Spawner) {
 
 
     display.set_rotation(DisplayRotation::Rotate90);
-    let font: FontRenderer = FontRenderer::new::<fonts::u8g2_font_wqy15_t_gb2312b>();
+    let font: FontRenderer = FontRenderer::new::<fonts::u8g2_font_wqy15_t_gb2312>();
     let mut font = font.with_ignore_unknown_chars(true);
 
     let sdcard = SdCard::new_with_options(&mut spi_bus,  delay,AcquireOpts{use_crc:false,acquire_retries:50});
@@ -181,6 +181,9 @@ async fn main(spawner: Spawner) {
         println!("else if ch ==  '{}' {{ {} }}",c,dims.bounding_box.unwrap().size.width);
     }
 
+
+
+    let mut key_boot = Input::new(io.pins.gpio9,Pull::Up);
     let mut volume0 = volume_mgr.open_volume(embedded_sdmmc::VolumeIdx(0));
     match volume0 {
         Ok(mut v) => {
@@ -197,10 +200,7 @@ async fn main(spawner: Spawner) {
 
                     for i in 0..pages_vec.len() {
                         let content = TxtReader::get_page_content(&mut my_file,i + 1, &pages_vec);
-                        display.set_rotation(DisplayRotation::Rotate0);
-                        display.clear(White);
-                        println!("page {}:{:?}",i,content);
-                        display.set_rotation(DisplayRotation::Rotate90);
+                        display.clear_buffer(Color::White);
                         let _ = font.render_aligned(
                             content.as_str(),
                             Point::new(0,2),
@@ -209,11 +209,22 @@ async fn main(spawner: Spawner) {
                             FontColor::Transparent(Black),
                             &mut display,
                         );
-                        epd.update_and_display_frame(&mut spi_bus_2,display.buffer(),&mut delay );
-                        epd.sleep(&mut spi_bus_2, &mut delay);
-                        delay.delay_ms(5000);
-                    }
 
+                        if i % 5 == 0{
+                            epd.set_lut(&mut spi_bus_2,Some(RefreshLut::Full));
+                        }else if i % 5 == 1{
+                            epd.set_lut(&mut spi_bus_2,Some(RefreshLut::Quick));
+                        }
+                        epd.update_and_display_frame(&mut spi_bus_2,display.buffer(),&mut delay );
+                       /* epd.set_lut(Some(RefreshLut::Quick));
+                        epd.update_partial_frame(&mut spi_bus_2,display.buffer(),0,0,display.bounding_box().size.width,display.bounding_box().size.height );
+                        epd.display_frame(&mut spi_bus_2,&mut delay );*/
+
+
+
+                        key_boot.wait_for_rising_edge().await;
+                    }
+                    epd.sleep(&mut spi_bus_2, &mut delay);
 
                     my_file.close();
 
