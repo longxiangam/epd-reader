@@ -1,4 +1,6 @@
+use alloc::vec;
 use core::iter::once;
+use embassy_time::Instant;
 use embedded_graphics::prelude::Point;
 use embedded_hal_bus::spi::CriticalSectionDevice;
 use embedded_sdmmc::{File, SdCard};
@@ -24,19 +26,20 @@ use crate::TimeSource;
 const LINES_NUM:u32 = 7;//行数
 pub const WIDTH: u32 =296;
 pub const HEIGHT: u32 =128;
-const BUFFER_LEN: usize = 2000;
+const BUFFER_LEN: usize = 200;
+const PAGES_VEC_MAX:usize = 26_000;
 pub struct TxtReader;
 
 const ZH_WIDTH:u32 = 16;
 type FileObject<'a,'b,CS: esp_hal::gpio::OutputPin> = File<'b,SdCard<&'a mut CriticalSectionDevice<'a,Spi<'a,SPI2, FullDuplexMode>, Output<'a,CS>, Delay>, Delay>, TimeSource, 4, 4, 1>;
 impl TxtReader {
-    pub fn generate_pages<CS: esp_hal::gpio::OutputPin>(my_file: &mut FileObject<CS>) ->Vec<u32, 2000>   {
+    pub fn generate_pages<CS: esp_hal::gpio::OutputPin>(my_file: &mut FileObject<CS>) ->Vec<u32, PAGES_VEC_MAX>   {
 
 
 
         let mut begin_position :u32= 0; //每一屏在文件中的开始位置
         let mut end_position:u32 = 0; //每一屏在文件中的结束位置
-        let mut all_page_position_vec: Vec<u32, 2000> = Vec::new();
+        let mut all_page_position_vec: Vec<u32, PAGES_VEC_MAX> = Vec::new();
         let mut line_width = 0;//当前行宽 用于换行
         let mut lines_num = 0;//当前行数 用于换屏
         let mut last_borrow_chars = 0;//上一次缓存结束时最后一个字符有字节未读取到时，算到上一个分页中，这里需要减去后再开始，
@@ -47,6 +50,7 @@ impl TxtReader {
         let mut file_length = my_file.length();
         println!("文件大小：{}", file_length);
 
+        let begin_sec = Instant::now().as_secs();
         while !my_file.is_eof() {
             let mut buffer = [0u8; BUFFER_LEN];
             let num_read = my_file.read(&mut buffer).unwrap();
@@ -57,6 +61,7 @@ impl TxtReader {
             if last_borrow_chars > 0 {
                 i += last_borrow_chars;
             }
+
             while  i < num_read {
                 let byte = buffer[i];
                 let (char_type,byte_num) = char_type_width(byte);
@@ -90,7 +95,7 @@ impl TxtReader {
                     end_position += byte_num as u32;
                     i += byte_num as usize;
                 }
-                println!("end_position:{}",end_position);
+
 
                 //换行
                 if line_width > WIDTH && line_width - WIDTH > 2{
@@ -107,13 +112,20 @@ impl TxtReader {
 
                     lines_num = 0;
                     line_width = 0;
-                }
 
-                //记录超出
-                if i > buffer.len() {
-                    last_borrow_chars = i - buffer.len();
-                }
 
+                    if  Instant::now().as_secs() % 5 == 0 {
+                        let percent = (end_position as f32 / file_length as f32) * 100.0;
+                        println!("进度：{} %",percent);
+                    }
+
+                }
+            }
+            //记录超出
+            if i > num_read {
+                last_borrow_chars = i - num_read ;
+            }else{
+                last_borrow_chars = 0;
             }
         }
         if end_position != begin_position {
@@ -121,10 +133,11 @@ impl TxtReader {
         }
 
         println!("pages:{:?}",all_page_position_vec);
+        println!("pages len:{}",all_page_position_vec.len());
         return all_page_position_vec;
     }
 
-    pub fn get_page_content<CS: esp_hal::gpio::OutputPin>(my_file: &mut FileObject<CS>,page_num:usize,pages_vec:&Vec<u32,2000>)->String<1000>{
+    pub fn get_page_content<CS: esp_hal::gpio::OutputPin>(my_file: &mut FileObject<CS>,page_num:usize,pages_vec:&Vec<u32,PAGES_VEC_MAX>)->String<1000>{
         let mut  start_position = 0;
         let mut  end_position = 0;
         let mut line_width = 0;//当前行宽 用于换行
@@ -204,6 +217,47 @@ impl TxtReader {
         String::from_utf8(txt).unwrap()
 
     }
+
+
+
+    pub fn save_pages<CS: esp_hal::gpio::OutputPin>(my_file: &mut FileObject<CS>,pages_vec:&Vec<u32, PAGES_VEC_MAX> ){
+        const LEN:usize = PAGES_VEC_MAX * 4;
+        let mut buffer:Vec<u8, LEN> = Vec::new() ;
+
+        for i in 0..pages_vec.len() {
+            let value = pages_vec[i];
+            buffer.push((value >> 24) as u8);
+            buffer.push( (value >> 16) as u8);
+            buffer.push((value >> 8) as u8);
+            buffer.push( value as u8);
+        }
+
+        my_file.write(&buffer);
+
+    }
+    pub fn read_pages<CS: esp_hal::gpio::OutputPin>(my_file: &mut FileObject<CS> )->Vec<u32, PAGES_VEC_MAX> {
+        println!(" begin read pages");
+        //读索引
+
+        let mut buffer = [0u8; PAGES_VEC_MAX * 4];
+        let mut num_read = 0;
+        while !my_file.is_eof() {
+            num_read = my_file.read(&mut buffer).unwrap();
+            println!("times");
+        }
+
+        let mut pages_vec = Vec::new();
+        for i in (0..num_read).step_by(4) {
+
+            let value = ((buffer[i] as u32) << 24) | ((buffer[i + 1] as u32) << 16) | ((buffer[i + 2] as u32) << 8) | buffer[i + 3] as u32;
+            pages_vec.push(value);
+
+        }
+
+
+        pages_vec
+    }
+
 }
 #[derive(Debug)]
 enum CharType{
@@ -212,6 +266,10 @@ enum CharType{
     Other,
     Tail,
 }
+
+
+
+
 
 //字符类型，ascii ,zh及数量
 fn char_type_width(byte:u8) ->(CharType, u8){

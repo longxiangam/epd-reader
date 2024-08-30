@@ -193,40 +193,91 @@ async fn main(spawner: Spawner) {
 
                     let begin_secs = Instant::now().as_secs();
                     println!("begin_time:{}",begin_secs);
+                    let mut pages_vec = None;
 
-                    let mut my_file = root.open_file_in_dir("abc.txt", embedded_sdmmc::Mode::ReadOnly).unwrap();
-                    let mut pages_vec = TxtReader::generate_pages(&mut my_file);
+                    let mut need_index = false;
+                    let mut file_len =  0;
 
+                    let file_name = "xcb.txt";
+                    let index_name = "xcb.idx";
 
-                    for i in 0..pages_vec.len() {
-                        let content = TxtReader::get_page_content(&mut my_file,i + 1, &pages_vec);
-                        display.clear_buffer(Color::White);
-                        let _ = font.render_aligned(
-                            content.as_str(),
-                            Point::new(0,2),
-                            VerticalPosition::Top,
-                            HorizontalAlignment::Left,
-                            FontColor::Transparent(Black),
-                            &mut display,
-                        );
+                    {
+                        let mut my_file = root.open_file_in_dir(file_name, embedded_sdmmc::Mode::ReadOnly).unwrap();
+                        file_len = my_file.length();
+                        my_file.close();
+                    }
+                    println!("file len:{}",file_len);
+                    {
+                        let mut my_file_index = root.open_file_in_dir(index_name, embedded_sdmmc::Mode::ReadOnly);
+                        if let Ok(mut mfi) = my_file_index {
+                            println!("idx len:{}",mfi.length());
+                            if(mfi.length() == 0){
+                                need_index  = true;
+                            }else{
+                                println!("entry read pages");
+                                //读索引
+                                pages_vec  = Some(crate::epd2in9_txt::TxtReader::read_pages(&mut mfi));
+                                if let Some(ref p_vec) = pages_vec{
+                                    if p_vec.len() ==  0  {
+                                        need_index  = true;
+                                    } else if p_vec[p_vec.len() - 1] != file_len{
+                                        println!("end_width :{},{}",p_vec[p_vec.len() - 1],file_len);
+                                        need_index  = true;
+                                    }
+                                }
 
-                        if i % 5 == 0{
-                            epd.set_lut(&mut spi_bus_2,Some(RefreshLut::Full));
-                        }else if i % 5 == 1{
-                            epd.set_lut(&mut spi_bus_2,Some(RefreshLut::Quick));
+                            }
+                            mfi.close();
+                        }else {
+                            need_index  = true;
                         }
-                        epd.update_and_display_frame(&mut spi_bus_2,display.buffer(),&mut delay );
-                       /* epd.set_lut(Some(RefreshLut::Quick));
-                        epd.update_partial_frame(&mut spi_bus_2,display.buffer(),0,0,display.bounding_box().size.width,display.bounding_box().size.height );
-                        epd.display_frame(&mut spi_bus_2,&mut delay );*/
+                    }
+
+                    if need_index {
+                        {
+                            let mut my_file = root.open_file_in_dir(file_name, embedded_sdmmc::Mode::ReadOnly).unwrap();
+                            pages_vec = Some(TxtReader::generate_pages(&mut my_file));
+                        }
+
+                        //写索引
+                        let mut my_file_index = root.open_file_in_dir(index_name, embedded_sdmmc::Mode::ReadWriteCreateOrTruncate);
+
+                        if let Ok(mut mfi) = my_file_index {
+                            if let Some(ref p_vec) = pages_vec {
+                                crate::epd2in9_txt::TxtReader::save_pages(&mut mfi, p_vec);
+                            }
+                        }
+
+                    }
 
 
+                    if let Some(ref p_vec) = pages_vec {
+                        let mut my_file = root.open_file_in_dir(file_name, embedded_sdmmc::Mode::ReadOnly).unwrap();
+                        for i in 0..p_vec.len() {
+                            let content = TxtReader::get_page_content(&mut my_file, i + 1, &p_vec);
+                            display.clear_buffer(Color::White);
+                            let _ = font.render_aligned(
+                                content.as_str(),
+                                Point::new(0, 2),
+                                VerticalPosition::Top,
+                                HorizontalAlignment::Left,
+                                FontColor::Transparent(Black),
+                                &mut display,
+                            );
 
-                        key_boot.wait_for_rising_edge().await;
+                            if i % 5 == 0 {
+                                epd.set_lut(&mut spi_bus_2, Some(RefreshLut::Full));
+                            } else if i % 5 == 1 {
+                                epd.set_lut(&mut spi_bus_2, Some(RefreshLut::Quick));
+                            }
+                            epd.update_and_display_frame(&mut spi_bus_2, display.buffer(), &mut delay);
+                            key_boot.wait_for_rising_edge().await;
+                        }
+                        my_file.close();
                     }
                     epd.sleep(&mut spi_bus_2, &mut delay);
 
-                    my_file.close();
+
 
                     println!("end_time:{}",Instant::now().as_secs());
                     println!("cost_time:{}",Instant::now().as_secs() - begin_secs);
@@ -399,7 +450,7 @@ async fn main_loop(){
 
 fn alloc(){
     // -------- Setup Allocator --------
-    const HEAP_SIZE: usize = 60 * 1024;
+    const HEAP_SIZE: usize = 2 * 1024;
     static mut HEAP: [u8; HEAP_SIZE] = [0; HEAP_SIZE];
     #[global_allocator]
     static ALLOCATOR: embedded_alloc::Heap = embedded_alloc::Heap::empty();
