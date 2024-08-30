@@ -7,6 +7,7 @@
 #![allow(static_mut_refs)]
 
 mod txt_reader;
+mod epd2in9_txt;
 
 extern crate alloc;
 use alloc::{format, vec};
@@ -51,17 +52,24 @@ use log::{debug, error, trace};
 use reqwless::request::RequestBody;
 use core::str::FromStr;
 use embedded_layout::View;
-use crate::txt_reader::TxtReader;
+use crate::epd2in9_txt::TxtReader;
+use u8g2_fonts::types::VerticalPosition;
+use u8g2_fonts::{Content, FontRenderer};
 use u8g2_fonts::U8g2TextStyle;
 use u8g2_fonts::fonts;
+use u8g2_fonts::types::FontColor;
+use u8g2_fonts::types::HorizontalAlignment;
+
 use embedded_graphics::primitives::Rectangle;
 use embedded_graphics::prelude::Size;
 use embedded_text::TextBox;
 use embedded_graphics::geometry::Dimensions;
 use embedded_graphics::draw_target::DrawTargetExt;
 use embedded_graphics::text::renderer::TextRenderer;
-use embedded_text::alignment::{HorizontalAlignment, VerticalAlignment};
-use embedded_text::style::{HeightMode, TextBoxStyle, TextBoxStyleBuilder, VerticalOverdraw};
+use embedded_hal::delay::DelayNs;
+use epd_waveshare::graphics::DisplayRotation;
+/*use embedded_text::alignment::{HorizontalAlignment, VerticalAlignment};*/
+/*use embedded_text::style::{HeightMode, TextBoxStyle, TextBoxStyleBuilder, VerticalOverdraw};*/
 
 #[macro_export]
 macro_rules! make_static {
@@ -138,7 +146,15 @@ async fn main(spawner: Spawner) {
 
     //init_logger(log::LevelFilter::Trace);
     trace!("test trace");
+    let mut epd = Epd2in9::new(&mut spi_bus_2, epd_cs_ph , epd_busy, epd_dc, epd_rst, &mut delay).unwrap();
 
+    let mut display: Display2in9 = Display2in9::default();
+    use embedded_graphics::draw_target::DrawTarget;
+
+
+    display.set_rotation(DisplayRotation::Rotate90);
+    let font: FontRenderer = FontRenderer::new::<fonts::u8g2_font_wqy15_t_gb2312b>();
+    let mut font = font.with_ignore_unknown_chars(true);
 
     let sdcard = SdCard::new_with_options(&mut spi_bus,  delay,AcquireOpts{use_crc:false,acquire_retries:50});
 
@@ -158,6 +174,13 @@ async fn main(spawner: Spawner) {
     }
 
 
+    for i in 0x32u8..=0x32 {
+        let c = char::from(i);
+        let mut dims = font.get_rendered_dimensions(c,Point::new(0,0),VerticalPosition::Baseline).unwrap();
+
+        println!("else if ch ==  '{}' {{ {} }}",c,dims.bounding_box.unwrap().size.width);
+    }
+
     let mut volume0 = volume_mgr.open_volume(embedded_sdmmc::VolumeIdx(0));
     match volume0 {
         Ok(mut v) => {
@@ -169,7 +192,29 @@ async fn main(spawner: Spawner) {
                     println!("begin_time:{}",begin_secs);
 
                     let mut my_file = root.open_file_in_dir("abc.txt", embedded_sdmmc::Mode::ReadOnly).unwrap();
-                    TxtReader::generate_pages_nostring(&mut my_file);
+                    let mut pages_vec = TxtReader::generate_pages(&mut my_file);
+
+
+                    for i in 0..pages_vec.len() {
+                        let content = TxtReader::get_page_content(&mut my_file,i + 1, &pages_vec);
+                        display.set_rotation(DisplayRotation::Rotate0);
+                        display.clear(White);
+                        println!("page {}:{:?}",i,content);
+                        display.set_rotation(DisplayRotation::Rotate90);
+                        let _ = font.render_aligned(
+                            content.as_str(),
+                            Point::new(0,2),
+                            VerticalPosition::Top,
+                            HorizontalAlignment::Left,
+                            FontColor::Transparent(Black),
+                            &mut display,
+                        );
+                        epd.update_and_display_frame(&mut spi_bus_2,display.buffer(),&mut delay );
+                        epd.sleep(&mut spi_bus_2, &mut delay);
+                        delay.delay_ms(5000);
+                    }
+
+
                     my_file.close();
 
                     println!("end_time:{}",Instant::now().as_secs());
@@ -187,14 +232,10 @@ async fn main(spawner: Spawner) {
 
 
 
+
     println!("read end");
 
-    let mut epd = Epd2in9::new(&mut spi_bus_2, epd_cs_ph , epd_busy, epd_dc, epd_rst, &mut delay).unwrap();
-
-    let mut display: Display2in9 = Display2in9::default();
     //draw_text(&mut display, "hello world!", 5, 50);
-
-
 
     let style =
         U8g2TextStyle::new(fonts::u8g2_font_wqy12_t_gb2312b, Black);
@@ -202,35 +243,27 @@ async fn main(spawner: Spawner) {
 
 
 
-
     let clipping_area = Rectangle::new(Point::new(5, 5)
-                                       , Size::new(display.bounding_box().size.width - 10,display.bounding_box().size.height - 10));
-    let mut clipped_display = display.clipped(&clipping_area);
-    let mut textBoxyStyle =  TextBoxStyleBuilder::new()
-        .height_mode(HeightMode::FitToText)
-        .alignment(HorizontalAlignment::Justified)
-        .paragraph_spacing(6)
-        .build();
-    let str =  "中年男子狐疑的看向了杨凌问道：“这……都是你干的？”
-此时的杨凌已经回过神来，拥有了系统的他，整个人都自信了起来。
-他微微笑道：“运气好而已……”
-中年男子瞪大了眼睛，脸上露出了难以置信之色。
-他看向了前方的群众，得到了肯定的回答之后，用力拍了拍杨凌的肩膀道：“好小子有你的！”
-“你是哪个部门的，叫什么名字！”
-杨凌一个立正：“报告，我是新入队的，叫杨凌。”
-这端正的态度，这不卑不吭的语气让中年男子微微点头，他笑道：“杨凌是吧，好，我记下你";
+                                       , Size::new(display.bounding_box().size.width - 10,display.bounding_box().size.width - 10));
+    //let mut clipped_display = display.clipped(&clipping_area);
 
-    let mut textBox = TextBox::with_textbox_style(
+
+    let str =  "abc\r\n123\n中文\n君不见黄河之水天上来，奔流到海不复回。\n君不见高堂明镜悲白发，朝如青丝暮成雪。\n  明夕玦只觉得那个天雷滚滚，心想我日后的人\n生难道就是拥有一个脑残的愿望然后要和脑残\n们接触还被没有大脑的主角打败？这的人生\n";
+
+    display.clear(White);
+
+    println!("str:{}",str);
+
+    let _ = font.render_aligned(
         str,
-        display.bounding_box(),
-        style.clone(),
-        textBoxyStyle
+        Point::new(5,5),
+        VerticalPosition::Top,
+        HorizontalAlignment::Left,
+        FontColor::Transparent(Black),
+        &mut display,
     );
+    use u8g2_fonts::Content;
 
-
-
-
-        textBox.draw(&mut display);
     epd.update_and_display_frame(&mut spi_bus_2,display.buffer(),&mut delay );
     epd.sleep(&mut spi_bus_2, &mut delay);
     println!("render end");

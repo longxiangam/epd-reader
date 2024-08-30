@@ -82,6 +82,7 @@ impl TxtReader {
 
         //结束时最后计算
         let (lost_str,pages) =  Self::compute_pages(txt_str.as_str(),begin_position);
+       /* let (lost_str,pages) = crate::epd2in9_txt::compute_page(txt_str.as_str(),begin_position);*/
         all_page_position_vec.extend_from_slice(&pages);
 
         debug!("txt_str:{}",txt_str);
@@ -243,11 +244,11 @@ impl TxtReader {
         buffer.len()
     }
 
-    fn compute_pages(txt_str:&str,begin_position:usize)->(&str,Vec<u16,50>){
+    fn compute_pages(txt_str:&str,begin_position:usize)->(&str,Vec<u16,100>){
 
         //position 是对应文件中的下标
         let mut real_position = begin_position as u16;
-        let mut page_positions:Vec<u16,50> = Vec::new();
+        let mut page_positions:Vec<u16,100> = Vec::new();
 
 
         //index 对应切片的下标
@@ -272,7 +273,7 @@ impl TxtReader {
 
     //计算整屏的文本，返回字符串切片，及是否为完整一屏
     fn compute_page(txt_str:&str)->(&str,bool){
-        const LOW_WORD:usize = 300;//起步的字符数量
+        const LOW_WORD:usize = 30;//起步的字符数量
         if txt_str.len() > LOW_WORD {
 
             let mut end = txt_str.ceil_char_boundary(LOW_WORD);
