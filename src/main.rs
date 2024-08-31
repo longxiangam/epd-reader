@@ -6,8 +6,9 @@
 #![feature(round_char_boundary)]
 #![allow(static_mut_refs)]
 
-mod txt_reader;
+
 mod epd2in9_txt;
+mod sd_mount;
 
 extern crate alloc;
 use alloc::{format, vec};
@@ -68,6 +69,7 @@ use embedded_graphics::draw_target::DrawTargetExt;
 use embedded_graphics::text::renderer::TextRenderer;
 use embedded_hal::delay::DelayNs;
 use epd_waveshare::graphics::DisplayRotation;
+use futures::SinkExt;
 /*use embedded_text::alignment::{HorizontalAlignment, VerticalAlignment};*/
 /*use embedded_text::style::{HeightMode, TextBoxStyle, TextBoxStyleBuilder, VerticalOverdraw};*/
 
@@ -81,23 +83,6 @@ macro_rules! make_static {
     }};
 }
 
-// This is just a placeholder TimeSource. In a real world application
-// one would probably use the RTC to provide time.
-pub struct TimeSource;
-
-
-impl embedded_sdmmc::TimeSource for TimeSource {
-    fn get_timestamp(&self) -> embedded_sdmmc::Timestamp {
-        embedded_sdmmc::Timestamp {
-            year_since_1970: 0,
-            zero_indexed_month: 0,
-            zero_indexed_day: 0,
-            hours: 0,
-            minutes: 0,
-            seconds: 0,
-        }
-    }
-}
 
 #[esp_hal_embassy::main]
 async fn main(spawner: Spawner) {
@@ -107,7 +92,8 @@ async fn main(spawner: Spawner) {
 
     let mut system = SystemControl::new(unsafe{peripherals.SYSTEM.clone_unchecked()});
 
-    let clocks = ClockControl::max(system.clock_control).freeze();
+    let clocks = ClockControl::boot_defaults(system.clock_control).freeze();
+
     let systimer = esp_hal::timer::systimer::SystemTimer::new(peripherals.SYSTIMER);
 
     let timg0 = TimerGroup::new(peripherals.TIMG0, &clocks);
@@ -158,29 +144,18 @@ async fn main(spawner: Spawner) {
 
     let sdcard = SdCard::new_with_options(&mut spi_bus,  delay,AcquireOpts{use_crc:false,acquire_retries:50});
 
-    let mut volume_mgr = VolumeManager::new(sdcard,TimeSource);
-
+    let mut volume_mgr = VolumeManager::new(sdcard,crate::sd_mount:: TimeSource);
 
 
     match volume_mgr.device().num_bytes() {
         Ok(size) =>{
             println!("card size is {} bytes", size);
-
         },
         Err(e) => {
             println!("Error retrieving card size: {:?}", e);
 
         }
     }
-
-
-    for i in 0x32u8..=0x32 {
-        let c = char::from(i);
-        let mut dims = font.get_rendered_dimensions(c,Point::new(0,0),VerticalPosition::Baseline).unwrap();
-
-        println!("else if ch ==  '{}' {{ {} }}",c,dims.bounding_box.unwrap().size.width);
-    }
-
 
 
     let mut key_boot = Input::new(io.pins.gpio9,Pull::Up);
@@ -194,18 +169,21 @@ async fn main(spawner: Spawner) {
                     let begin_secs = Instant::now().as_secs();
                     println!("begin_time:{}",begin_secs);
                     let mut pages_vec = None;
+                    let mut logs_vec = None;
 
                     let mut need_index = false;
                     let mut file_len =  0;
 
-                    let file_name = "xcb.txt";
-                    let index_name = "xcb.idx";
+                    let file_name = "abc.txt";
+                    let index_name = "abc.idx";
+                    let log_name = "abc.log";
 
                     {
                         let mut my_file = root.open_file_in_dir(file_name, embedded_sdmmc::Mode::ReadOnly).unwrap();
                         file_len = my_file.length();
                         my_file.close();
                     }
+
                     println!("file len:{}",file_len);
                     {
                         let mut my_file_index = root.open_file_in_dir(index_name, embedded_sdmmc::Mode::ReadOnly);
@@ -216,7 +194,9 @@ async fn main(spawner: Spawner) {
                             }else{
                                 println!("entry read pages");
                                 //读索引
+                                println!("file_name:{}",file_name);
                                 pages_vec  = Some(crate::epd2in9_txt::TxtReader::read_pages(&mut mfi));
+                                println!("file_name:{}",file_name);
                                 if let Some(ref p_vec) = pages_vec{
                                     if p_vec.len() ==  0  {
                                         need_index  = true;
@@ -232,11 +212,12 @@ async fn main(spawner: Spawner) {
                             need_index  = true;
                         }
                     }
-
+                    println!("file_name:{}",file_name);
                     if need_index {
                         {
                             let mut my_file = root.open_file_in_dir(file_name, embedded_sdmmc::Mode::ReadOnly).unwrap();
                             pages_vec = Some(TxtReader::generate_pages(&mut my_file));
+                            my_file.close();
                         }
 
                         //写索引
@@ -246,34 +227,71 @@ async fn main(spawner: Spawner) {
                             if let Some(ref p_vec) = pages_vec {
                                 crate::epd2in9_txt::TxtReader::save_pages(&mut mfi, p_vec);
                             }
+                            mfi.close();
+                        }
+
+                    }else{
+                        //读日志
+                        let mut my_file = root.open_file_in_dir(log_name, embedded_sdmmc::Mode::ReadOnly);
+                        if let Ok(mut f) = my_file {
+                            logs_vec = Some(TxtReader::read_log(&mut f));
+                            f.close();
                         }
 
                     }
 
-
+                    println!("file_name:{}",file_name);
                     if let Some(ref p_vec) = pages_vec {
-                        let mut my_file = root.open_file_in_dir(file_name, embedded_sdmmc::Mode::ReadOnly).unwrap();
-                        for i in 0..p_vec.len() {
-                            let content = TxtReader::get_page_content(&mut my_file, i + 1, &p_vec);
-                            display.clear_buffer(Color::White);
-                            let _ = font.render_aligned(
-                                content.as_str(),
-                                Point::new(0, 2),
-                                VerticalPosition::Top,
-                                HorizontalAlignment::Left,
-                                FontColor::Transparent(Black),
-                                &mut display,
-                            );
 
-                            if i % 5 == 0 {
-                                epd.set_lut(&mut spi_bus_2, Some(RefreshLut::Full));
-                            } else if i % 5 == 1 {
-                                epd.set_lut(&mut spi_bus_2, Some(RefreshLut::Quick));
+                        let mut current_page:usize =  0;
+                        if let Some(lv) = logs_vec {
+                            if lv.len() > 0 {
+                                current_page = lv[0] as usize;
                             }
-                            epd.update_and_display_frame(&mut spi_bus_2, display.buffer(), &mut delay);
-                            key_boot.wait_for_rising_edge().await;
                         }
-                        my_file.close();
+
+                        loop{
+                            {
+                                println!("file_name:{}",file_name);
+                                let mut my_file = root.open_file_in_dir(file_name, embedded_sdmmc::Mode::ReadOnly).unwrap();
+                                let content = TxtReader::get_page_content(&mut my_file, current_page + 1, &p_vec);
+                                display.clear_buffer(Color::White);
+                                let _ = font.render_aligned(
+                                    content.as_str(),
+                                    Point::new(0, 2),
+                                    VerticalPosition::Top,
+                                    HorizontalAlignment::Left,
+                                    FontColor::Transparent(Black),
+                                    &mut display,
+                                );
+
+                                if current_page % 5 == 0 {
+                                    epd.set_lut(&mut spi_bus_2, Some(RefreshLut::Full));
+                                } else if current_page % 5 == 1 {
+                                    epd.set_lut(&mut spi_bus_2, Some(RefreshLut::Quick));
+                                }
+                                epd.update_and_display_frame(&mut spi_bus_2, display.buffer(), &mut delay);
+
+
+                                my_file.close();
+                            }
+
+
+                            key_boot.wait_for_rising_edge().await;
+                            current_page += 1;
+                            if current_page == p_vec.len() {
+                                current_page = 0;
+                            }
+                            {
+                                let logfile = root.open_file_in_dir(log_name, embedded_sdmmc::Mode::ReadWriteCreateOrTruncate);
+                                if let Ok(mut f) = logfile{
+                                    epd2in9_txt::TxtReader::save_log(&mut f,current_page as u32,false);
+                                    f.close();
+                                }
+                            }
+                        }
+
+
                     }
                     epd.sleep(&mut spi_bus_2, &mut delay);
 
@@ -450,7 +468,7 @@ async fn main_loop(){
 
 fn alloc(){
     // -------- Setup Allocator --------
-    const HEAP_SIZE: usize = 2 * 1024;
+    const HEAP_SIZE: usize = 1 * 1024;
     static mut HEAP: [u8; HEAP_SIZE] = [0; HEAP_SIZE];
     #[global_allocator]
     static ALLOCATOR: embedded_alloc::Heap = embedded_alloc::Heap::empty();

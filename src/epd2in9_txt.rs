@@ -20,14 +20,15 @@ use u8g2_fonts::fonts;
 use u8g2_fonts::types::FontColor;
 use u8g2_fonts::types::HorizontalAlignment;
 use crate::epd2in9_txt::CharType::{Ascii, Other, Tail, Zh};
-use crate::TimeSource;
+use crate::sd_mount::TimeSource;
 
 
 const LINES_NUM:u32 = 7;//行数
 pub const WIDTH: u32 =296;
 pub const HEIGHT: u32 =128;
 const BUFFER_LEN: usize = 200;
-const PAGES_VEC_MAX:usize = 26_000;
+const PAGES_VEC_MAX:usize = 10_000;
+const LOG_VEC_MAX:usize = 100;
 pub struct TxtReader;
 
 const ZH_WIDTH:u32 = 16;
@@ -258,6 +259,52 @@ impl TxtReader {
         pages_vec
     }
 
+    pub fn save_log<CS: esp_hal::gpio::OutputPin>(my_file: &mut FileObject<CS>,page:u32,is_favorite:bool)->Vec<u32,LOG_VEC_MAX>{
+
+        let mut log_vec:Vec<u32,LOG_VEC_MAX> = Self::read_log(my_file);
+
+        if is_favorite {
+            if !log_vec.contains(&page) && log_vec.len() < LOG_VEC_MAX{
+                if(log_vec.len() == 0){
+                    log_vec.push(page);
+                }
+                log_vec.push(page);
+            }
+        }else {
+            if log_vec.len() == 0 {
+                log_vec.push(page);
+            }else{
+                log_vec[0] = page;
+            }
+        }
+        const LEN:usize = LOG_VEC_MAX * 4;
+        let mut buffer:Vec<u8, LEN> = Vec::new() ;
+
+        for i in 0..log_vec.len() {
+            let value = log_vec[i];
+            buffer.push((value >> 24) as u8);
+            buffer.push( (value >> 16) as u8);
+            buffer.push((value >> 8) as u8);
+            buffer.push( value as u8);
+        }
+
+        my_file.write(&buffer);
+        log_vec
+    }
+    pub fn read_log<CS: esp_hal::gpio::OutputPin>(my_file: &mut FileObject<CS>)->Vec<u32,LOG_VEC_MAX>{
+        let mut log_vec:Vec<u32,LOG_VEC_MAX> = Vec::new();
+        let mut buffer = [0u8; LOG_VEC_MAX * 4];
+        let mut num_read = 0;
+        while !my_file.is_eof() {
+            num_read = my_file.read(&mut buffer).unwrap();
+        }
+        for i in (0..num_read).step_by(4) {
+            let value = ((buffer[i] as u32) << 24) | ((buffer[i + 1] as u32) << 16) | ((buffer[i + 2] as u32) << 8) | buffer[i + 3] as u32;
+            log_vec.push(value);
+        }
+
+        log_vec
+    }
 }
 #[derive(Debug)]
 enum CharType{
