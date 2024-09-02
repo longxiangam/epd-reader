@@ -9,11 +9,21 @@
 
 mod epd2in9_txt;
 mod sd_mount;
+mod event;
+mod sleep;
+mod utils;
+mod wifi;
+mod worldtime;
+mod pages;
+mod display;
+mod widgets;
 
 extern crate alloc;
 use alloc::{format, vec};
 use core::{borrow::BorrowMut, cell::RefCell};
-use esp_hal::riscv::_export::critical_section::Mutex;
+use esp_hal::riscv::_export::critical_section::{CriticalSection, Mutex};
+use esp_hal::riscv::_export::critical_section;
+use esp_hal::riscv::_export::critical_section::{with};
 
 use embassy_executor::Spawner;
 use embassy_time::{Duration, Instant, Timer};
@@ -36,7 +46,6 @@ use esp_println::{logger::init_logger, print, println};
 use esp_hal::prelude::{_fugit_RateExtU32, main};
 use esp_hal::{Cpu, dma_descriptors, entry};
 use esp_hal::delay::Delay;
-use esp_hal::dma::{Dma, DmaPriority};
 use esp_hal::gpio::{Input, Io, Output, Pull};
 use esp_hal::peripheral::Peripheral;
 use esp_hal::spi::master::Spi;
@@ -52,6 +61,7 @@ use heapless::{String, Vec};
 use log::{debug, error, trace};
 use reqwless::request::RequestBody;
 use core::str::FromStr;
+use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embedded_layout::View;
 use crate::epd2in9_txt::TxtReader;
 use u8g2_fonts::types::VerticalPosition;
@@ -70,19 +80,16 @@ use embedded_graphics::text::renderer::TextRenderer;
 use embedded_hal::delay::DelayNs;
 use epd_waveshare::graphics::DisplayRotation;
 use futures::SinkExt;
-/*use embedded_text::alignment::{HorizontalAlignment, VerticalAlignment};*/
-/*use embedded_text::style::{HeightMode, TextBoxStyle, TextBoxStyleBuilder, VerticalOverdraw};*/
 
-#[macro_export]
-macro_rules! make_static {
-    ($t:ty,$val:expr) => {{
-        static STATIC_CELL: static_cell::StaticCell<$t> = static_cell::StaticCell::new();
-        #[deny(unused_attributes)]
-        let x = STATIC_CELL.uninit().write(($val));
-        x
-    }};
-}
+use esp_hal::clock::Clocks;
+use esp_hal::peripherals::SPI2;
+use static_cell::StaticCell;
+use esp_hal::gpio::{Gpio1,Gpio0};
 
+
+pub static mut CLOCKS_REF: Option<&'static Clocks>  =  None;
+
+pub static SHARE_SPI:embassy_sync::mutex::Mutex<CriticalSectionRawMutex,Option<Spi<SPI2,FullDuplexMode>>> = embassy_sync::mutex::Mutex::new(None);
 
 #[esp_hal_embassy::main]
 async fn main(spawner: Spawner) {
@@ -92,7 +99,7 @@ async fn main(spawner: Spawner) {
 
     let mut system = SystemControl::new(unsafe{peripherals.SYSTEM.clone_unchecked()});
 
-    let clocks = ClockControl::boot_defaults(system.clock_control).freeze();
+    let clocks = ClockControl::max(system.clock_control).freeze();
 
     let systimer = esp_hal::timer::systimer::SystemTimer::new(peripherals.SYSTIMER);
 
@@ -123,7 +130,7 @@ async fn main(spawner: Spawner) {
 
 
     let mut_spi = Mutex::new(RefCell::new(spi));
-    
+
 
     //let mut spi_bus = ExclusiveDevice::new(spi, epd_cs, delay);
     let mut spi_bus = CriticalSectionDevice::new(&mut_spi,sdcard_cs,delay);
@@ -266,11 +273,11 @@ async fn main(spawner: Spawner) {
                                 );
 
                                 if current_page % 5 == 0 {
-                                    epd.set_lut(&mut spi_bus_2, Some(RefreshLut::Full));
+
                                 } else if current_page % 5 == 1 {
-                                    epd.set_lut(&mut spi_bus_2, Some(RefreshLut::Quick));
+
                                 }
-                                epd.update_and_display_frame(&mut spi_bus_2, display.buffer(), &mut delay);
+                                //epd.update_and_display_frame(&mut spi_bus_2, display.buffer(), &mut delay);
 
 
                                 my_file.close();
@@ -293,7 +300,7 @@ async fn main(spawner: Spawner) {
 
 
                     }
-                    epd.sleep(&mut spi_bus_2, &mut delay);
+                    //epd.sleep(&mut spi_bus_2, &mut delay);
 
 
 
@@ -312,41 +319,6 @@ async fn main(spawner: Spawner) {
 
 
 
-
-    println!("read end");
-
-    //draw_text(&mut display, "hello world!", 5, 50);
-
-    let style =
-        U8g2TextStyle::new(fonts::u8g2_font_wqy12_t_gb2312b, Black);
-
-
-
-
-    let clipping_area = Rectangle::new(Point::new(5, 5)
-                                       , Size::new(display.bounding_box().size.width - 10,display.bounding_box().size.width - 10));
-    //let mut clipped_display = display.clipped(&clipping_area);
-
-
-    let str =  "abc\r\n123\n中文\n君不见黄河之水天上来，奔流到海不复回。\n君不见高堂明镜悲白发，朝如青丝暮成雪。\n  明夕玦只觉得那个天雷滚滚，心想我日后的人\n生难道就是拥有一个脑残的愿望然后要和脑残\n们接触还被没有大脑的主角打败？这的人生\n";
-
-    display.clear(White);
-
-    println!("str:{}",str);
-
-    let _ = font.render_aligned(
-        str,
-        Point::new(5,5),
-        VerticalPosition::Top,
-        HorizontalAlignment::Left,
-        FontColor::Transparent(Black),
-        &mut display,
-    );
-    use u8g2_fonts::Content;
-
-    epd.update_and_display_frame(&mut spi_bus_2,display.buffer(),&mut delay );
-    epd.sleep(&mut spi_bus_2, &mut delay);
-    println!("render end");
     loop{
         Timer::after_secs(1).await;
     }
