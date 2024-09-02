@@ -267,15 +267,6 @@ async fn main(spawner: Spawner) {
                                 println!("file_name:{}",file_name);
                                 let mut my_file = root.open_file_in_dir(file_name, embedded_sdmmc::Mode::ReadOnly).unwrap();
                                 let content = TxtReader::get_page_content(&mut my_file, current_page + 1, &p_vec);
-                                display.clear_buffer(Color::White);
-                                let _ = font.render_aligned(
-                                    content.as_str(),
-                                    Point::new(0, 2),
-                                    VerticalPosition::Top,
-                                    HorizontalAlignment::Left,
-                                    FontColor::Transparent(Black),
-                                    &mut display,
-                                );
 
                                 if current_page % 5 == 0 {
 
@@ -283,7 +274,19 @@ async fn main(spawner: Spawner) {
 
                                 }
                                 //epd.update_and_display_frame(&mut spi_bus_2, display.buffer(), &mut delay);
+                                if let Some(display) = display::display_mut() {
+                                    display.clear_buffer(Color::White);
+                                    let _ = font.render_aligned(
+                                        content.as_str(),
+                                        Point::new(0, 2),
+                                        VerticalPosition::Top,
+                                        HorizontalAlignment::Left,
+                                        FontColor::Transparent(Black),
+                                        display,
+                                    );
 
+                                    display::RENDER_CHANNEL.send(display::RenderInfo { time: 0, need_sleep: false }).await;
+                                }
 
                                 my_file.close();
                             }
