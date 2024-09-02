@@ -154,9 +154,10 @@ async fn net_task(stack: &'static Stack<WifiDevice<'static, WifiStaDevice>>) {
 
 #[embassy_executor::task]
 async fn connection_wifi(mut controller: WifiController<'static>) {
-    println!("start connection task");
+    println!("start connection task1");
     println!("Device capabilities: {:?}", controller.get_capabilities());
     loop {
+        println!("loop");
         match esp_wifi::wifi::get_wifi_state() {
             WifiState::StaConnected => {
                 // wait until we're no longer connected

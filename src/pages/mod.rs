@@ -6,9 +6,7 @@ use crate::pages::main_page::MainPage;
 pub mod main_page;
 
 mod calendar_page;
-
-
-
+mod read_page;
 
 enum PageEnum {
     EMainPage,

@@ -11,14 +11,14 @@ use embassy_time::{Duration,  Timer};
 use embedded_graphics::Drawable;
 use embedded_graphics::geometry::Dimensions;
 
-use embedded_graphics::prelude::{DrawTarget, Point, };
-
+use embedded_graphics::prelude::{DrawTarget, Point, Size};
+use embedded_graphics::text::Text;
 use esp_println::println;
 use esp_hal::macros::ram;
 use epd_waveshare::color::{Black, Color, White};
 use epd_waveshare::epd2in9::{Display2in9, Epd2in9};
 use epd_waveshare::prelude::{Display, RefreshLut, WaveshareDisplay};
-
+use u8g2_fonts::U8g2TextStyle;
 use crate::{ event};
 use crate::display::{display_mut,  RENDER_CHANNEL, RenderInfo};
 use crate::event::EventType;
@@ -26,11 +26,11 @@ use crate::pages::{MenuItem, Page, PageEnum};
 use crate::pages::calendar_page::CalendarPage;
 use crate::pages::PageEnum::{ECalendarPage, EChip8Page, EClockPage, ESettingPage, ETimerPage, EWeatherPage};
 use crate::widgets::list_widget::ListWidget;
-
+use u8g2_fonts::fonts;
 static MAIN_PAGE:Mutex<CriticalSectionRawMutex,Option<MainPage> > = Mutex::new(None);
 
 #[ram(rtc_fast)]
-pub static mut PAGE_INDEX:u32 = 2;
+pub static mut PAGE_INDEX:i32 = -1;
 
 ///每个page 包含状态与绘制与逻辑处理
 ///状态通过事件改变，并触发绘制
@@ -48,11 +48,14 @@ impl MainPage {
         let mut page_index = unsafe{ PAGE_INDEX };
 
         MAIN_PAGE.lock().await.replace(MainPage::new());
-        spawner.spawn(increase()).ok();
-        spawner.spawn(decrease()).ok();
+
         Self::bind_event(MAIN_PAGE.lock().await.as_mut().unwrap()).await;
 
-        MAIN_PAGE.lock().await.as_mut().unwrap().current_page = Some(page_index);
+        if page_index > -1 {
+            MAIN_PAGE.lock().await.as_mut().unwrap().current_page = Some(page_index as u32);
+        }else{
+            MAIN_PAGE.lock().await.as_mut().unwrap().current_page = None;
+        }
     }
 
     pub async fn get_mut() -> Option<&'static mut MainPage> {
@@ -112,30 +115,18 @@ impl Page for  MainPage{
                 println!("current_page:{}",Self::get_mut().await.unwrap().choose_index );
             });
         }).await;
-        event::on(EventType::KeyLongStart(1),  |info|  {
-            println!("current_page:" );
-            return Box::pin( async {
-                INCREASE_CHANNEL.send(true).await;
-            });
-        }).await;
 
         event::on(EventType::KeyLongEnd(1),  |info|  {
             println!("current_page:" );
             return Box::pin( async {
-                INCREASE_CHANNEL.send(false).await;
-            });
-        }).await;
-        event::on(EventType::KeyLongStart(2),  |info|  {
-            println!("current_page:" );
-            return Box::pin( async {
-                DECREASE_CHANNEL.send(true).await;
+
             });
         }).await;
 
         event::on(EventType::KeyLongEnd(2),  |info|  {
             println!("current_page:" );
             return Box::pin( async {
-                DECREASE_CHANNEL.send(false).await;
+
             });
         }).await;
         event::on(EventType::KeyShort(2),  |info|  {
@@ -145,32 +136,18 @@ impl Page for  MainPage{
                 println!("current_page:{}",Self::get_mut().await.unwrap().choose_index );
             });
         }).await;
-        event::on(EventType::KeyShort(5),  |info|  {
+        event::on(EventType::KeyShort(3),  |info|  {
             println!("current_page:" );
             return Box::pin( async {
                 let mut_ref = Self::get_mut().await.unwrap();
                 mut_ref.current_page = Some( mut_ref.choose_index);
                 unsafe {
-                    PAGE_INDEX = mut_ref.choose_index;
+                    PAGE_INDEX = mut_ref.choose_index as i32;
                 }
                 println!("current_page:{}",Self::get_mut().await.unwrap().choose_index );
             });
         }).await;
-        event::on(EventType::WheelFront,  |info|  {
-            println!("current_page:" );
-            return Box::pin( async {
-                Self::get_mut().await.unwrap().increase();
-                println!("current_page:{}",Self::get_mut().await.unwrap().choose_index );
-            });
-        }).await;
 
-        event::on(EventType::WheelBack,  |info|  {
-            println!("current_page:" );
-            return Box::pin( async {
-                Self::get_mut().await.unwrap().decrease();
-                println!("current_page:{}",Self::get_mut().await.unwrap().choose_index );
-            });
-        }).await;
     }
 
 
@@ -182,18 +159,19 @@ impl Page for  MainPage{
             if let Some(display) = display_mut() {
                 self.need_render = false;
 
-                let _ = display.clear(White);
+                let _ = display.clear_buffer(Color::White);
                 let menus:Vec<&str,20> = self.menus.as_ref().unwrap().iter().map(|v|{ v.title.as_str() }).collect();
 
 
                 let mut list_widget = ListWidget::new(Point::new(0, 0)
                                                       , Black
                                                       , White
-                                                      , display.bounding_box().size
+                                                      , Size::new(display.bounding_box().size.height,display.bounding_box().size.width)
                                                       , menus
                 );
                 list_widget.choose(self.choose_index as usize);
                 let _ = list_widget.draw(display);
+
                 RENDER_CHANNEL.send(RenderInfo { time: 0, need_sleep: true }).await;
                 println!("has display:{}", self.choose_index);
 
@@ -207,13 +185,16 @@ impl Page for  MainPage{
 
     async fn run(&mut self,spawner: Spawner){
 
+        crate::display::QUICKLY_LUT_CHANNEL.send(true).await;
         loop {
+
             if  None == self.current_page {
                 self.render().await;
                 Timer::after(Duration::from_millis(50)).await;
                 continue;
             }
             let current_page = self.current_page.unwrap();
+
             let menu_item = &self.menus.as_mut().unwrap()[current_page as usize];
             match menu_item.page_enum {
                 PageEnum::EMainPage => {
@@ -247,49 +228,5 @@ impl Page for  MainPage{
         }
     }
 
-}
-
-
-static INCREASE_CHANNEL:Channel<CriticalSectionRawMutex,bool, 2> = Channel::new();
-static DECREASE_CHANNEL:Channel<CriticalSectionRawMutex,bool, 2> = Channel::new();
-#[embassy_executor::task]
-async fn increase(){
-    loop {
-        INCREASE_CHANNEL.receive().await;
-        loop {
-            let a = Timer::after(Duration::from_millis(100));
-            let b = INCREASE_CHANNEL.receive();
-            match select(a,b).await {
-                Either::First(_) => {
-                    MainPage::get_mut().await.unwrap().increase();
-                }
-                Either::Second(_) => {
-                    break;
-                }
-            }
-        }
-        Timer::after(Duration::from_millis(100)).await;
-    }
-}
-
-
-#[embassy_executor::task]
-async fn decrease(){
-    loop {
-        DECREASE_CHANNEL.receive().await;
-        loop {
-            let a = Timer::after(Duration::from_millis(100));
-            let b = DECREASE_CHANNEL.receive();
-            match select(a,b).await {
-                Either::First(_) => {
-                    MainPage::get_mut().await.unwrap().decrease();
-                }
-                Either::Second(_) => {
-                    break;
-                }
-            }
-        }
-        Timer::after(Duration::from_millis(100)).await;
-    }
 }
 
