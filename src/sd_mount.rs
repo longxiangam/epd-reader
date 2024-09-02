@@ -1,12 +1,13 @@
+use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+use embassy_sync::mutex::Mutex;
 use embedded_hal_bus::spi::CriticalSectionDevice;
 use embedded_sdmmc::{File, SdCard, Volume, VolumeManager};
-use esp_hal::delay::Delay;
+use embassy_time::Delay;
 use esp_hal::gpio::Output;
 use esp_hal::peripherals::SPI2;
 use esp_hal::spi::FullDuplexMode;
 use esp_hal::spi::master::Spi;
-
-
+use esp_hal::gpio::GpioPin;
 
 pub struct TimeSource;
 
@@ -24,20 +25,7 @@ impl embedded_sdmmc::TimeSource for TimeSource {
     }
 }
 
-type ActualSdCard<'a,CS: esp_hal::gpio::OutputPin> = SdCard<&'a mut CriticalSectionDevice<'a,Spi<'a,SPI2, FullDuplexMode>, Output<'a,CS>, Delay>, Delay>;
+pub type ActualSdCard<'a,CS: esp_hal::gpio::OutputPin> = SdCard<&'a mut CriticalSectionDevice<'a,Spi<'a,SPI2, FullDuplexMode>, Output<'a,CS>, Delay>, Delay>;
+pub type ActualVolumeManager<'a,CS: esp_hal::gpio::OutputPin> = VolumeManager<ActualSdCard<'a,CS>, TimeSource>;
+pub static SDCARD_REF:Mutex<CriticalSectionRawMutex,Option<ActualVolumeManager<'static, GpioPin<0>>>> = Mutex::new(None);
 
-
-
-struct SdMount<'a,'b,CS: esp_hal::gpio::OutputPin>{
-    volume_mgr:VolumeManager<ActualSdCard<'a,CS>,TimeSource>,
-    volume0:Volume<'b,ActualSdCard<'a,CS>, TimeSource, 4, 4, 1>
-}
-
-impl <'a,'b, CS: esp_hal::gpio::OutputPin> SdMount<'a,'b,CS>{
-    pub fn new(){
-
-    }
-    fn open_root(){
-
-    }
-}

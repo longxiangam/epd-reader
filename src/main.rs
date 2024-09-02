@@ -155,19 +155,19 @@ async fn main(spawner: Spawner) {
     spawner.spawn(event::run(key1,key2,key3)).ok();
 
     let mut_spi = Mutex::new(RefCell::new(spi));
-    let mut_spi_mut = make_static!( Mutex<RefCell<Spi<SPI2, FullDuplexMode>>>,mut_spi);
+    let mut_spi_static = make_static!( Mutex<RefCell<Spi<SPI2, FullDuplexMode>>>,mut_spi);
 
     //let mut spi_bus = ExclusiveDevice::new(spi, epd_cs, delay);
-    let mut spi_bus = CriticalSectionDevice::new(mut_spi_mut,sdcard_cs,Delay);
-    let mut spi_bus_2 = CriticalSectionDevice::new(mut_spi_mut,epd_cs,Delay);
+    let mut spi_bus_sd = CriticalSectionDevice::new(mut_spi_static,sdcard_cs,Delay);
+    let mut spi_bus_epd = CriticalSectionDevice::new(mut_spi_static,epd_cs,Delay);
 
-    let spi_bus_mut = make_static!(CriticalSectionDevice<Spi<SPI2, FullDuplexMode>, Output<Gpio0>, Delay>,spi_bus);
-    let spi_bus_2_mut = make_static!(CriticalSectionDevice<Spi<SPI2, FullDuplexMode>, Output<Gpio1>, Delay>,spi_bus_2);
+    let spi_bus_sd = make_static!(CriticalSectionDevice<Spi<SPI2, FullDuplexMode>, Output<Gpio0>, Delay>,spi_bus_sd);
+    let spi_bus_epd = make_static!(CriticalSectionDevice<Spi<SPI2, FullDuplexMode>, Output<Gpio1>, Delay>,spi_bus_epd);
     let font: FontRenderer = FontRenderer::new::<fonts::u8g2_font_wqy15_t_gb2312>();
     let mut font = font.with_ignore_unknown_chars(true);
     //init_logger(log::LevelFilter::Trace);
     trace!("test trace");
-    spawner.spawn(display::render(spi_bus_2_mut,epd_busy,epd_rst,epd_dc)).ok();
+    spawner.spawn(display::render(spi_bus_epd,epd_busy,epd_rst,epd_dc)).ok();
 
     let mut display: Display2in9 = Display2in9::default();
     use embedded_graphics::draw_target::DrawTarget;
@@ -176,12 +176,11 @@ async fn main(spawner: Spawner) {
     display.set_rotation(DisplayRotation::Rotate90);
 
 
-    let sdcard = SdCard::new_with_options(spi_bus_mut,  Delay,AcquireOpts{use_crc:false,acquire_retries:50});
+    let sdcard = SdCard::new_with_options(spi_bus_sd,  Delay,AcquireOpts{use_crc:false,acquire_retries:50});
 
     let mut volume_mgr = VolumeManager::new(sdcard,crate::sd_mount:: TimeSource);
-
-
-    match volume_mgr.device().num_bytes() {
+    crate::sd_mount::SDCARD_REF.lock().await.replace(volume_mgr);
+    match crate::sd_mount::SDCARD_REF.lock().await.as_mut().unwrap().device().num_bytes() {
         Ok(size) =>{
             println!("card size is {} bytes", size);
         },
@@ -191,6 +190,7 @@ async fn main(spawner: Spawner) {
         }
     }
 
+
     spawner.spawn(pages::main_task(spawner.clone())).ok();
     Timer::after_millis(10).await;
 
@@ -198,9 +198,9 @@ async fn main(spawner: Spawner) {
     loop{
         Timer::after_secs(1).await;
     }
+/*
 
 
-    //let mut key_boot = Input::new(io.pins.gpio9,Pull::Up);
     let mut volume0 = volume_mgr.open_volume(embedded_sdmmc::VolumeIdx(0));
     match volume0 {
         Ok(mut v) => {
@@ -355,7 +355,7 @@ async fn main(spawner: Spawner) {
             println!("open volume:{:?}",e);
         }
     }
-
+*/
 
 
     loop{
