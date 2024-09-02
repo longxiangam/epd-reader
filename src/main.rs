@@ -45,11 +45,13 @@ use esp_println::{logger::init_logger, print, println};
 
 use esp_hal::prelude::{_fugit_RateExtU32, main};
 use esp_hal::{Cpu, dma_descriptors, entry};
-use esp_hal::delay::Delay;
+
 use esp_hal::gpio::{Input, Io, Output, Pull};
 use esp_hal::peripheral::Peripheral;
 use esp_hal::spi::master::Spi;
 use esp_hal::spi::SpiMode;
+
+use embassy_time::Delay;
 
 use embedded_hal::spi::*;
 use esp_hal::spi::master::*;
@@ -109,9 +111,9 @@ async fn main(spawner: Spawner) {
     spawner.spawn(main_loop()).ok();
 
     let mut io = Io::new(peripherals.GPIO, peripherals.IO_MUX);
-    let epd_busy = Input::new(io.pins.gpio6,Pull::Down);
-    let epd_rst =  Output::new(io.pins.gpio7,esp_hal::gpio::Level::High);
-    let epd_dc = Output::new (io.pins.gpio5,esp_hal::gpio::Level::High);
+    let epd_busy = io.pins.gpio6;
+    let epd_rst =  io.pins.gpio7;
+    let epd_dc = io.pins.gpio5;
     let epd_cs = Output::new(io.pins.gpio1,esp_hal::gpio::Level::High );
     let epd_sclk = io.pins.gpio2;
     let epd_mosi = io.pins.gpio3;
@@ -124,22 +126,25 @@ async fn main(spawner: Spawner) {
         .with_sck(epd_sclk)
         .with_miso(epd_miso)
         .with_mosi(epd_mosi);
-    let mut delay = Delay::new(&clocks);
+    //let mut delay = Delay::new(&clocks);
 
     //spi.change_bus_frequency(40_u32.kHz(), &clocks); 
 
 
     let mut_spi = Mutex::new(RefCell::new(spi));
-
+    let mut_spi_mut = make_static!( Mutex<RefCell<Spi<SPI2, FullDuplexMode>>>,mut_spi);
 
     //let mut spi_bus = ExclusiveDevice::new(spi, epd_cs, delay);
-    let mut spi_bus = CriticalSectionDevice::new(&mut_spi,sdcard_cs,delay);
-    let mut spi_bus_2 = CriticalSectionDevice::new(&mut_spi,epd_cs,delay);
+    let mut spi_bus = CriticalSectionDevice::new(mut_spi_mut,sdcard_cs,Delay);
+    let mut spi_bus_2 = CriticalSectionDevice::new(mut_spi_mut,epd_cs,Delay);
 
+    let spi_bus_mut = make_static!(CriticalSectionDevice<Spi<SPI2, FullDuplexMode>, Output<Gpio0>, Delay>,spi_bus);
+    let spi_bus_2_mut = make_static!(CriticalSectionDevice<Spi<SPI2, FullDuplexMode>, Output<Gpio1>, Delay>,spi_bus_2);
 
     //init_logger(log::LevelFilter::Trace);
     trace!("test trace");
-    let mut epd = Epd2in9::new(&mut spi_bus_2, epd_cs_ph , epd_busy, epd_dc, epd_rst, &mut delay).unwrap();
+    //let mut epd = Epd2in9::new(spi_bus_2_mut, epd_cs_ph , epd_busy, epd_dc, epd_rst, &mut delay).unwrap();
+    spawner.spawn(crate::display::render(spi_bus_2_mut,epd_busy,epd_rst,epd_dc)).ok();
 
     let mut display: Display2in9 = Display2in9::default();
     use embedded_graphics::draw_target::DrawTarget;
@@ -149,7 +154,7 @@ async fn main(spawner: Spawner) {
     let font: FontRenderer = FontRenderer::new::<fonts::u8g2_font_wqy15_t_gb2312>();
     let mut font = font.with_ignore_unknown_chars(true);
 
-    let sdcard = SdCard::new_with_options(&mut spi_bus,  delay,AcquireOpts{use_crc:false,acquire_retries:50});
+    let sdcard = SdCard::new_with_options(spi_bus_mut,  Delay,AcquireOpts{use_crc:false,acquire_retries:50});
 
     let mut volume_mgr = VolumeManager::new(sdcard,crate::sd_mount:: TimeSource);
 

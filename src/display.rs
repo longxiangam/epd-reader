@@ -37,7 +37,7 @@ pub static mut DISPLAY:Option<Display2in9>  = None;
 pub static RENDER_CHANNEL: Channel<CriticalSectionRawMutex,RenderInfo, 64> = Channel::new();
 pub static QUICKLY_LUT_CHANNEL: Channel<CriticalSectionRawMutex,bool, 64> = Channel::new();
 #[embassy_executor::task]
-pub async  fn render(mut spi_device: CriticalSectionDevice<'static,Spi<'static,SPI2, FullDuplexMode>, Output<'static,Gpio1>, Delay> ,
+pub async  fn render(mut spi_device: &'static mut CriticalSectionDevice<'static,Spi<'static,SPI2, FullDuplexMode>, Output<'static,Gpio1>, Delay> ,
                      mut busy:Gpio6 ,
                            rst:Gpio7,
                            dc: Gpio5)

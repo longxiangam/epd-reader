@@ -5,7 +5,7 @@ use embedded_graphics::prelude::Point;
 use embedded_hal_bus::spi::CriticalSectionDevice;
 use embedded_sdmmc::{File, SdCard};
 use epd_waveshare::epd2in9::Display2in9;
-use esp_hal::delay::Delay;
+use embassy_time::Delay;
 use esp_hal::gpio::Output;
 use esp_hal::peripherals::SPI2;
 use esp_hal::spi::FullDuplexMode;
