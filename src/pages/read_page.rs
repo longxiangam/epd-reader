@@ -3,9 +3,12 @@ use embedded_graphics::Drawable;
 use embedded_graphics::prelude::{Dimensions, Point, Size};
 use epd_waveshare::color::{Black, Color,White};
 use epd_waveshare::graphics::Display;
+use esp_println::println;
+use futures::FutureExt;
 use heapless::{String, Vec};
 use crate::display::{display_mut, RENDER_CHANNEL, RenderInfo};
 use crate::pages::{ Page};
+use crate::sd_mount::{SD_MOUNT, SdMount};
 use crate::widgets::list_widget::ListWidget;
 
 struct FileItem{
@@ -17,7 +20,7 @@ struct ReadPage{
     need_render:bool,
     choose_index:u32,
     open_file_name:String<50>,
-    menus:Option<Vec<FileItem,20>>
+    menus:Option<Vec<FileItem,20>>,
 }
 
 impl Page for ReadPage{
@@ -59,7 +62,26 @@ impl Page for ReadPage{
 
     async fn run(&mut self, spawner: Spawner) {
         //读sd卡目录
-        todo!()
+
+        if let Some(ref mut v) =  *SD_MOUNT.lock().await{
+            //v.open_root().await.unwrap();
+
+            {
+
+                //let b = v.get_open_root();
+
+            }
+
+        }
+
+/*        let take = SD_MOUNT.lock().await.take();
+        {
+            let mut tamp = take.unwrap();
+            {
+                tamp.get_open_root();
+            }
+        }*/
+
     }
 
     async fn bind_event(&mut self) {

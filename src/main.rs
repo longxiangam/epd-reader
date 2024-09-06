@@ -88,6 +88,7 @@ use esp_hal::peripherals::SPI2;
 use static_cell::StaticCell;
 use esp_hal::gpio::{Gpio1,Gpio0};
 use alloc::string::ToString;
+use crate::sd_mount::{ SdCsPin, SdMount};
 
 pub static mut CLOCKS_REF: Option<&'static Clocks>  =  None;
 
@@ -174,21 +175,23 @@ async fn main(spawner: Spawner) {
 
 
     display.set_rotation(DisplayRotation::Rotate90);
-
+    use crate::sd_mount::ActualVolumeManager;
+    use crate::sd_mount::SdCsPin;
 
     let sdcard = SdCard::new_with_options(spi_bus_sd,  Delay,AcquireOpts{use_crc:false,acquire_retries:50});
 
     let mut volume_mgr = VolumeManager::new(sdcard,crate::sd_mount:: TimeSource);
-    crate::sd_mount::SDCARD_REF.lock().await.replace(volume_mgr);
-    match crate::sd_mount::SDCARD_REF.lock().await.as_mut().unwrap().device().num_bytes() {
-        Ok(size) =>{
-            println!("card size is {} bytes", size);
-        },
-        Err(e) => {
-            println!("Error retrieving card size: {:?}", e);
 
-        }
-    }
+    let mut sd_mount = SdMount::new(volume_mgr);
+    crate::sd_mount::SD_MOUNT.lock().await.replace(sd_mount);
+
+
+
+
+/*    let mut my_struct = MyStruct{open_volume:None};
+
+    let mut a = my_struct.get_open_volume();*/
+
 
 
     spawner.spawn(pages::main_task(spawner.clone())).ok();
