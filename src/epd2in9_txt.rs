@@ -28,7 +28,7 @@ pub const WIDTH: u32 =296;
 pub const HEIGHT: u32 =128;
 const BUFFER_LEN: usize = 200;
 pub(crate) const PAGES_VEC_MAX:usize = 10_000;
-const LOG_VEC_MAX:usize = 100;
+pub(crate) const LOG_VEC_MAX:usize = 100;
 pub struct TxtReader;
 
 const ZH_WIDTH:u32 = 16;
@@ -259,9 +259,9 @@ impl TxtReader {
         pages_vec
     }
 
-    pub fn save_log<CS: esp_hal::gpio::OutputPin>(my_file: &mut FileObject<CS>,page:u32,is_favorite:bool)->Vec<u32,LOG_VEC_MAX>{
+    pub fn save_log<CS: esp_hal::gpio::OutputPin>(my_file: &mut FileObject<CS>, log_vec:&mut Vec<u32,LOG_VEC_MAX>,page:u32,is_favorite:bool){
 
-        let mut log_vec:Vec<u32,LOG_VEC_MAX> = Self::read_log(my_file);
+        //let mut log_vec:Vec<u32,LOG_VEC_MAX> = Self::read_log(my_file);
 
         if is_favorite {
             if !log_vec.contains(&page) && log_vec.len() < LOG_VEC_MAX{
@@ -289,7 +289,7 @@ impl TxtReader {
         }
 
         my_file.write(&buffer);
-        log_vec
+
     }
     pub fn read_log<CS: esp_hal::gpio::OutputPin>(my_file: &mut FileObject<CS>)->Vec<u32,LOG_VEC_MAX>{
         let mut log_vec:Vec<u32,LOG_VEC_MAX> = Vec::new();

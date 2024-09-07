@@ -124,7 +124,7 @@ pub async  fn run(mut key1: Gpio20,mut key2: Gpio8,
     }
 }
 
-static  ENABLE_DOUBLE:Mutex<CriticalSectionRawMutex,bool> = Mutex::new(false);
+pub static  ENABLE_DOUBLE:Mutex<CriticalSectionRawMutex,bool> = Mutex::new(false);
 pub async fn enable_double_click(){
     *ENABLE_DOUBLE.lock().await = true;
 }

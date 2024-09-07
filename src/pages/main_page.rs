@@ -189,6 +189,9 @@ impl Page for  MainPage{
 
     async fn run(&mut self,spawner: Spawner){
 
+        crate::display::QUICKLY_LUT_CHANNEL.send(false).await;
+        RENDER_CHANNEL.send(RenderInfo { time: 0, need_sleep: false }).await;
+
         crate::display::QUICKLY_LUT_CHANNEL.send(true).await;
         loop {
 

@@ -21,6 +21,7 @@ use crate::sd_mount::{ActualDirectory, SD_MOUNT, SdMount};
 use crate::widgets::list_widget::ListWidget;
 
 const PAGES_VEC_MAX:usize = epd2in9_txt::PAGES_VEC_MAX;
+const LOG_VEC_MAX:usize = epd2in9_txt::LOG_VEC_MAX;
 
 pub struct ReadPage{
     running:bool,
@@ -32,6 +33,7 @@ pub struct ReadPage{
     open_file_name:String<20>,
     menus:Option<Vec<String<20>,40>>,
     page_vec:Option<Vec<u32,PAGES_VEC_MAX>>,
+    log_vec:Option<Vec<u32,LOG_VEC_MAX>>,
     page_index:u32,
     page_content:String<1000>,
 }
@@ -99,7 +101,24 @@ impl ReadPage{
 
         return pages_vec;
     }
+    async fn get_log_vec(&mut self,books_dir:&mut ActualDirectory<'_>) {
+        let book_name = self.menus.as_ref().unwrap()[self.choose_index as usize].clone();
+        let log_name = format!("{}.log", book_name);
+        {
+            //读日志
+            let mut my_file =books_dir.open_file_in_dir(log_name.as_str(), embedded_sdmmc::Mode::ReadOnly);
+            if let Ok(mut f) = my_file {
+                self.log_vec = Some(TxtReader::read_log(&mut f));
+                if let Some(ref lv) = self.log_vec{
+                    if lv.len() > 0 {
+                        self.page_index = lv[0];
+                    }
+                }
+                f.close();
+            }
+        }
 
+    }
     async fn get_page_content(&mut self,books_dir:&mut ActualDirectory<'_>){
 
         let book_name = self.menus.as_ref().unwrap()[self.choose_index as usize].clone();
@@ -108,7 +127,6 @@ impl ReadPage{
         let begin_secs = Instant::now().as_secs();
         println!("begin_time:{}", begin_secs);
         let mut pages_vec = self.page_vec.as_ref();
-        let mut logs_vec = None;
 
         let mut need_index = false;
         let mut file_len = 0;
@@ -117,35 +135,33 @@ impl ReadPage{
         let log_name = format!("{}.log", book_name);
 
 
-        {
-            //读日志
-            let mut my_file =books_dir.open_file_in_dir(log_name.as_str(), embedded_sdmmc::Mode::ReadOnly);
-            if let Ok(mut f) = my_file {
-                logs_vec = Some(TxtReader::read_log(&mut f));
-                f.close();
-            }
-        }
-        if let Some(lv) = logs_vec {
-            if lv.len() > 0 && self.page_index == 0 {
-                self.page_index = lv[0];
-            }
-        }
-
         if let Some(ref p_vec) = pages_vec {
             {
                 let mut my_file =books_dir.open_file_in_dir(file_name.as_str(), embedded_sdmmc::Mode::ReadOnly).unwrap();
-                self.page_content = TxtReader::get_page_content(&mut my_file, (self.page_index +1) as usize, &p_vec);
+                self.page_content = TxtReader::get_page_content(&mut my_file, (self.page_index) as usize, &p_vec);
 
                 my_file.close();
             }
             {
                 let logfile =books_dir.open_file_in_dir(log_name.as_str(), embedded_sdmmc::Mode::ReadWriteCreateOrTruncate);
                 if let Ok(mut f) = logfile {
-                    epd2in9_txt::TxtReader::save_log(&mut f, self.page_index as u32, false);
+                   epd2in9_txt::TxtReader::save_log(&mut f,self.log_vec.as_mut().unwrap(), self.page_index as u32, false);
                     f.close();
                 }
             }
         }
+
+    }
+
+    async fn do_change_page(&mut self,page_index:u32){
+
+        if page_index >= self.page_vec.as_ref().unwrap().len() as u32 {
+            self.page_index = self.page_vec.as_ref().unwrap().len() as u32;
+        }else{
+            self.page_index = page_index;
+        }
+        self.change_page = true;
+        self.need_render = true;
 
     }
 }
@@ -162,6 +178,7 @@ impl Page for ReadPage{
             open_file_name: Default::default(),
             menus: None,
             page_vec: None,
+            log_vec: None,
             page_index: 0,
             page_content: Default::default(),
         }
@@ -192,14 +209,25 @@ impl Page for ReadPage{
                     let mut font = font.with_ignore_unknown_chars(true);
                     //显示选择书本对应页的内容
                     display.clear_buffer(Color::White);
-                    let _ = font.render_aligned(
-                        self.page_content.as_str(),
-                        Point::new(0, 2),
-                        VerticalPosition::Top,
-                        HorizontalAlignment::Left,
-                        FontColor::Transparent(Black),
-                        display,
-                    );
+                    if self.page_index as usize == self.page_vec.as_ref().unwrap().len() {
+                        let _ = font.render_aligned(
+                            "已是最后一页",
+                            Point::new(display.bounding_box().center().y,display.bounding_box().center().x),
+                            VerticalPosition::Center,
+                            HorizontalAlignment::Center,
+                            FontColor::Transparent(Black),
+                            display,
+                        );
+                    }else {
+                        let _ = font.render_aligned(
+                            self.page_content.as_str(),
+                            Point::new(0, 2),
+                            VerticalPosition::Top,
+                            HorizontalAlignment::Left,
+                            FontColor::Transparent(Black),
+                            display,
+                        );
+                    }
                 }
             }
 
@@ -211,6 +239,7 @@ impl Page for ReadPage{
     async fn run(&mut self, spawner: Spawner) {
         self.running = true;
         self.need_render = true;
+        *event::ENABLE_DOUBLE.lock().await = true;
         //读sd卡目录
         if let Some(ref mut sd) =  *SD_MOUNT.lock().await {
 
@@ -225,11 +254,14 @@ impl Page for ReadPage{
                                 let books = SdMount::get_books(&mut books_dir).unwrap();
                                 self.menus = Some(books);
 
-                                self.page_vec = self.get_page_vec(&mut books_dir).await;
+
 
                                 loop {
                                     if !self.running { break; }
-
+                                    if let None = self.page_vec {
+                                        self.page_vec = self.get_page_vec(&mut books_dir).await;
+                                        self.get_log_vec(&mut books_dir).await;
+                                    }
                                     if self.change_page {
 
                                         self.change_page = false;
@@ -252,7 +284,7 @@ impl Page for ReadPage{
                 }
             }
         }
-
+        *event::ENABLE_DOUBLE.lock().await = false;
 
     }
 
@@ -267,20 +299,29 @@ impl Page for ReadPage{
         event::on_target(EventType::KeyShort(3),Self::mut_to_ptr(self),  move |info|  {
             return Box::pin(async move {
                 let mut_ref:&mut Self =  Self::mut_by_ptr(info.ptr).unwrap();
-                mut_ref.reading = true;
-                mut_ref.change_page = true;
+                if mut_ref.reading {
+                    mut_ref.reading = false;
+                }else{
+                    mut_ref.reading = true;
+                    mut_ref.change_page = true;
+                    mut_ref.page_index = 0;
+                    mut_ref.page_vec = None;
+                }
                 mut_ref.need_render = true;
 
             });
         }).await;
-
+        event::on_target(EventType::KeyLongEnd(1),Self::mut_to_ptr(self),  move |info|  {
+            return Box::pin(async move {
+                let mut_ref:&mut Self =  Self::mut_by_ptr(info.ptr).unwrap();
+                println!("显示弹出框");
+            });
+        }).await;
         event::on_target(EventType::KeyShort(1),Self::mut_to_ptr(self),  move |info|  {
             return Box::pin(async move {
                 let mut_ref:&mut Self =  Self::mut_by_ptr(info.ptr).unwrap();
                 if mut_ref.reading {
-                    mut_ref.page_index +=1;
-                    mut_ref.change_page = true;
-                    mut_ref.need_render = true;
+                    mut_ref.do_change_page(mut_ref.page_index + 1).await;
                 }else {
                     if mut_ref.choose_index < mut_ref.menus.as_ref().unwrap().len() as u32 {
                         mut_ref.choose_index += 1;
@@ -293,9 +334,10 @@ impl Page for ReadPage{
             return Box::pin(async move {
                 let mut_ref:&mut Self =  Self::mut_by_ptr(info.ptr).unwrap();
                 if mut_ref.reading {
-                    mut_ref.page_index -=1;
-                    mut_ref.change_page = true;
-                    mut_ref.need_render = true;
+                    if mut_ref.page_index > 0 {
+                        mut_ref.do_change_page(mut_ref.page_index - 1).await;
+                    }
+                    println!("page_index {}",mut_ref.page_index);
                 }else {
                     if mut_ref.choose_index > 0 {
                         mut_ref.choose_index -= 1;

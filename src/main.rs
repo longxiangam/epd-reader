@@ -143,7 +143,7 @@ async fn main(spawner: Spawner) {
 
     let sdcard_cs = Output::new(io.pins.gpio0,esp_hal::gpio::Level::High );
 
-    let spi = Spi::new(peripherals.SPI2, 400_u32.kHz(), SpiMode::Mode0, &clocks)
+    let spi = Spi::new(peripherals.SPI2, 10000_u32.kHz(), SpiMode::Mode0, &clocks)
         .with_sck(epd_sclk)
         .with_miso(epd_miso)
         .with_mosi(epd_mosi);
