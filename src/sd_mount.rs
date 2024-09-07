@@ -40,7 +40,7 @@ pub type ActualDirectory<'a> = Directory<'a,ActualSdCard, TimeSource,4,4,1>;
 pub static  SD_MOUNT:Mutex<CriticalSectionRawMutex,Option<SdMount>> = Mutex::new(None);
 
 #[derive(Debug)]
-enum SdError{
+pub enum SdError{
     OpenVolumeError,
     OpenRootError,
     RootAlreadyOpen
@@ -67,15 +67,14 @@ impl <'a> SdMount<'a>{
     pub fn new(volume_manager: ActualVolumeManager)->Self{
         Self{ volume_manager, open_volume: None, open_root: None }
     }
-
-    pub async fn open_root<'b:'a>(&'b mut self)
-                           ->Result<&'b ActualDirectory<'a> , SdError>
+    pub  fn open_root<'b>(&'a mut self)
+                      ->Result<&'b ActualDirectory<'a> , SdError>
     {
 
-        if let None = self.open_volume {
+       if let None = self.open_volume {
             let mut volume0 = self.volume_manager.open_volume(embedded_sdmmc::VolumeIdx(0));
-            match volume0 {
-                Ok(mut v) => {
+            match  volume0 {
+                Ok(mut  v) => {
                     self.open_volume = Some(v);
                 }
                 Err(e)=>{
@@ -86,24 +85,25 @@ impl <'a> SdMount<'a>{
 
         if let None = self.open_root {
             let root_result = self.open_volume.as_mut().unwrap().open_root_dir();
-            match root_result {
-                Ok(root)=>{
+            return match root_result {
+                Ok(root) => {
                     self.open_root = Some(root);
 
-                    return  Ok(self.open_root.as_mut().unwrap());
+                    Ok( self.open_root.as_mut().unwrap())
                 }
                 Err(e) => {
-                    return Err(OpenRootError);
+                    Err(OpenRootError)
                 },
             }
         }else{
-            return Ok(self.open_root.as_mut().unwrap())
+            return Ok( self.open_root.as_mut().unwrap())
         }
+
     }
 
-    pub  fn get_open_root(& mut self) ->& mut ActualDirectory<'a>
+    pub  fn get_open_root<'b>(&'b mut self)  ->&'b ActualDirectory<'a>
     {
-        self.open_root.as_mut().unwrap()
+       self.open_root.as_mut().unwrap()
     }
 
 

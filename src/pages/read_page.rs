@@ -64,11 +64,11 @@ impl Page for ReadPage{
         //读sd卡目录
 
         if let Some(ref mut v) =  *SD_MOUNT.lock().await{
-            //v.open_root().await.unwrap();
+
 
             {
-
-                //let b = v.get_open_root();
+                //let a = v.open_root();
+                let a =  v.get_open_root();
 
             }
 
