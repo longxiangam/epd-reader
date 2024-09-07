@@ -98,7 +98,7 @@ impl Page for CalendarPage {
 
     async fn bind_event(&mut self) {
         event::clear().await;
-        event::on_target(EventType::KeyShort(5),Self::mut_to_ptr(self),  move |info|  {
+        event::on_target(EventType::KeyShort(3),Self::mut_to_ptr(self),  move |info|  {
             return Box::pin(async move {
                 let mut_ref:&mut Self =  Self::mut_by_ptr(info.ptr).unwrap();
                 mut_ref.back().await;

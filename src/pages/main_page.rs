@@ -24,9 +24,11 @@ use crate::display::{display_mut,  RENDER_CHANNEL, RenderInfo};
 use crate::event::EventType;
 use crate::pages::{MenuItem, Page, PageEnum};
 use crate::pages::calendar_page::CalendarPage;
-use crate::pages::PageEnum::{ECalendarPage, EChip8Page, EClockPage, ESettingPage, ETimerPage, EWeatherPage};
+use crate::pages::PageEnum::{ECalendarPage, EChip8Page, EClockPage, EReadPage, ESettingPage, ETimerPage, EWeatherPage};
 use crate::widgets::list_widget::ListWidget;
 use u8g2_fonts::fonts;
+use crate::pages::read_page::ReadPage;
+
 static MAIN_PAGE:Mutex<CriticalSectionRawMutex,Option<MainPage> > = Mutex::new(None);
 
 #[ram(rtc_fast)]
@@ -91,12 +93,14 @@ impl Page for  MainPage{
     fn new()->Self{
 
         let mut menus = Vec::new();
-        menus.push(MenuItem::new(String::<20>::from_str("时钟").unwrap(), EClockPage));
+
+        menus.push(MenuItem::new(String::<20>::from_str("电子书").unwrap(), EReadPage));
+       /* menus.push(MenuItem::new(String::<20>::from_str("时钟").unwrap(), EClockPage));
         menus.push(MenuItem::new(String::<20>::from_str("定时器").unwrap(), ETimerPage));
         menus.push(MenuItem::new(String::<20>::from_str("天气").unwrap(), EWeatherPage));
         menus.push(MenuItem::new(String::<20>::from_str("日历").unwrap(), ECalendarPage));
         menus.push(MenuItem::new(String::<20>::from_str("游戏").unwrap(), EChip8Page));
-        menus.push(MenuItem::new(String::<20>::from_str("设置").unwrap(), ESettingPage));
+        menus.push(MenuItem::new(String::<20>::from_str("设置").unwrap(), ESettingPage));*/
 
         Self{
             current_page:None,
@@ -199,6 +203,12 @@ impl Page for  MainPage{
             match menu_item.page_enum {
                 PageEnum::EMainPage => {
 
+                }
+                EReadPage => {
+                    let mut read_page = ReadPage::new();
+                    read_page.bind_event().await;
+                    read_page.run(spawner).await;
+                    self.back().await;
                 }
                 EClockPage => {
 

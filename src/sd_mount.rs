@@ -1,3 +1,5 @@
+use alloc::string::ToString;
+use core::str::FromStr;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::mutex::Mutex;
 use embedded_hal_bus::spi::CriticalSectionDevice;
@@ -9,9 +11,9 @@ use esp_hal::spi::FullDuplexMode;
 use esp_hal::spi::master::Spi;
 use esp_hal::gpio::GpioPin;
 use esp_println::println;
-use heapless::String;
+use heapless::{String, Vec};
 use crate::make_static;
-use crate::sd_mount::SdError::{OpenRootError, OpenVolumeError, RootAlreadyOpen};
+use crate::sd_mount::SdError::{OpenBooksError, OpenRootError, OpenVolumeError, RootAlreadyOpen};
 
 pub struct TimeSource;
 
@@ -43,14 +45,12 @@ pub static  SD_MOUNT:Mutex<CriticalSectionRawMutex,Option<SdMount>> = Mutex::new
 pub enum SdError{
     OpenVolumeError,
     OpenRootError,
+    OpenBooksError,
     RootAlreadyOpen
 }
 
-pub struct SdMount<'a>{
+pub struct SdMount{
     pub volume_manager: ActualVolumeManager,
-    pub open_volume:Option<ActualVolume<'a>>,
-    pub open_root:Option<ActualDirectory<'a>>
-    //book_dir:Option<>
 
 }
 /*pub struct MyStruct{
@@ -63,47 +63,26 @@ impl MyStruct{
     }
 }*/
 
-impl <'a> SdMount<'a>{
+impl SdMount{
     pub fn new(volume_manager: ActualVolumeManager)->Self{
-        Self{ volume_manager, open_volume: None, open_root: None }
-    }
-    pub  fn open_root<'b>(&'a mut self)
-                      ->Result<&'b ActualDirectory<'a> , SdError>
-    {
-
-       if let None = self.open_volume {
-            let mut volume0 = self.volume_manager.open_volume(embedded_sdmmc::VolumeIdx(0));
-            match  volume0 {
-                Ok(mut  v) => {
-                    self.open_volume = Some(v);
-                }
-                Err(e)=>{
-                    return Err(OpenVolumeError);
-                }
-            }
-        }
-
-        if let None = self.open_root {
-            let root_result = self.open_volume.as_mut().unwrap().open_root_dir();
-            return match root_result {
-                Ok(root) => {
-                    self.open_root = Some(root);
-
-                    Ok( self.open_root.as_mut().unwrap())
-                }
-                Err(e) => {
-                    Err(OpenRootError)
-                },
-            }
-        }else{
-            return Ok( self.open_root.as_mut().unwrap())
-        }
-
+        Self{ volume_manager}
     }
 
-    pub  fn get_open_root<'b>(&'b mut self)  ->&'b ActualDirectory<'a>
+
+    pub  fn get_books(books_dir:&mut ActualDirectory)->Result<Vec<String<20>,40>,SdError>
     {
-       self.open_root.as_mut().unwrap()
+        let mut books:Vec<String<20>,40> = Vec::new();
+
+
+        books_dir.iterate_dir(|directory|{
+                   if directory.name.extension() == b"TXT"{
+                       let name = String::from_utf8(Vec::try_from(directory.name.base_name()).unwrap()).unwrap();
+                       books.push(name);
+                   }
+               }).unwrap();
+
+                Ok(books)
+
     }
 
 

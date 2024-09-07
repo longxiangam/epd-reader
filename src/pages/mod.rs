@@ -16,6 +16,7 @@ enum PageEnum {
     ECalendarPage,
     EChip8Page,
     ESettingPage,
+    EReadPage,
 
 }
 struct  MenuItem{

@@ -27,7 +27,7 @@ const LINES_NUM:u32 = 7;//行数
 pub const WIDTH: u32 =296;
 pub const HEIGHT: u32 =128;
 const BUFFER_LEN: usize = 200;
-const PAGES_VEC_MAX:usize = 10_000;
+pub(crate) const PAGES_VEC_MAX:usize = 10_000;
 const LOG_VEC_MAX:usize = 100;
 pub struct TxtReader;
 
@@ -145,9 +145,9 @@ impl TxtReader {
         let mut lines_num = 0;//当前行数 用于换屏
 
 
-        let page = page_num - 1;
+        let page = page_num-0;
 
-        if page_num <= pages_vec.len() {
+        if page_num <= pages_vec.len()-1 {
             if page == 0 {
                 start_position = 0;
                 end_position = pages_vec[page];
