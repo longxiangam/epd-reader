@@ -1,6 +1,9 @@
+use alloc::boxed::Box;
 use alloc::vec;
+use core::future::Future;
 use core::iter::once;
-use embassy_time::Instant;
+use core::pin::Pin;
+use embassy_time::{Instant, Timer};
 use embedded_graphics::prelude::Point;
 use embedded_hal_bus::spi::CriticalSectionDevice;
 use embedded_sdmmc::{File, SdCard};
@@ -27,14 +30,16 @@ const LINES_NUM:u32 = 7;//行数
 pub const WIDTH: u32 =296;
 pub const HEIGHT: u32 =128;
 const BUFFER_LEN: usize = 200;
-pub(crate) const PAGES_VEC_MAX:usize = 10_000;
+pub(crate) const PAGES_VEC_MAX:usize = 5_000;
 pub(crate) const LOG_VEC_MAX:usize = 100;
 pub struct TxtReader;
 
 const ZH_WIDTH:u32 = 16;
 type FileObject<'a,'b,CS: esp_hal::gpio::OutputPin> = File<'b,SdCard<&'a mut CriticalSectionDevice<'a,Spi<'a,SPI2, FullDuplexMode>, Output<'a,CS>, Delay>, Delay>, TimeSource, 4, 4, 1>;
 impl TxtReader {
-    pub fn generate_pages<CS: esp_hal::gpio::OutputPin>(my_file: &mut FileObject<CS>) ->Vec<u32, PAGES_VEC_MAX>   {
+     pub async fn generate_pages<CS: esp_hal::gpio::OutputPin,F>(my_file: &mut FileObject<'_,'_,CS>, mut process: F) ->Vec<u32, PAGES_VEC_MAX>
+     where F:FnMut(f32) -> (Pin<Box<dyn Future<Output=()>>>)
+     {
 
 
 
@@ -117,6 +122,7 @@ impl TxtReader {
 
                     if  Instant::now().as_secs() % 5 == 0 {
                         let percent = (end_position as f32 / file_length as f32) * 100.0;
+                        process(percent).await;
                         println!("进度：{} %",percent);
                     }
 

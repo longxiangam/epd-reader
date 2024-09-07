@@ -29,6 +29,10 @@ pub struct ReadPage{
     need_render:bool,
     change_page:bool,
 
+    force_indexing:bool,
+    indexing:bool,
+    indexing_process:f32,
+
     choose_index:u32,
     open_file_name:String<20>,
     menus:Option<Vec<String<20>,40>>,
@@ -81,10 +85,23 @@ impl ReadPage{
                 need_index = true;
             }
         }
-        if need_index {
+        if need_index || self.force_indexing {
             {
                 let mut my_file =books_dir.open_file_in_dir(file_name.as_str(), embedded_sdmmc::Mode::ReadOnly).unwrap();
-                pages_vec = Some(TxtReader::generate_pages(&mut my_file));
+
+                self.indexing = true;
+                let self_ptr = Self::mut_to_ptr(self);
+                pages_vec = Some(TxtReader::generate_pages(&mut my_file, |process|  {
+                    return Box::pin(async  move {
+                        let mut_ref:&mut Self =  Self::mut_by_ptr(Some(self_ptr)).unwrap();
+                        mut_ref.indexing_process = process;
+                        mut_ref.render().await;
+                        Timer::after_millis(10).await;
+                    });
+                }).await);
+
+                self.force_indexing = false;
+                self.indexing = false;
                 my_file.close();
             }
 
@@ -98,6 +115,8 @@ impl ReadPage{
                 mfi.close();
             }
         }
+
+
 
         return pages_vec;
     }
@@ -174,6 +193,9 @@ impl Page for ReadPage{
             reading: false,
             need_render: false,
             change_page:false,
+            force_indexing: false,
+            indexing: false,
+            indexing_process: 0.0,
             choose_index: 0,
             open_file_name: Default::default(),
             menus: None,
@@ -209,24 +231,36 @@ impl Page for ReadPage{
                     let mut font = font.with_ignore_unknown_chars(true);
                     //显示选择书本对应页的内容
                     display.clear_buffer(Color::White);
-                    if self.page_index as usize == self.page_vec.as_ref().unwrap().len() {
+                    if self.indexing {
                         let _ = font.render_aligned(
-                            "已是最后一页",
-                            Point::new(display.bounding_box().center().y,display.bounding_box().center().x),
+                            format_args!("正在创建索引，\n 已创建索引进度：{}%",self.indexing_process),
+                            Point::new(display.bounding_box().center().y, display.bounding_box().center().x),
                             VerticalPosition::Center,
                             HorizontalAlignment::Center,
                             FontColor::Transparent(Black),
                             display,
                         );
                     }else {
-                        let _ = font.render_aligned(
-                            self.page_content.as_str(),
-                            Point::new(0, 2),
-                            VerticalPosition::Top,
-                            HorizontalAlignment::Left,
-                            FontColor::Transparent(Black),
-                            display,
-                        );
+
+                        if self.page_index as usize == self.page_vec.as_ref().unwrap().len() {
+                            let _ = font.render_aligned(
+                                "已是最后一页",
+                                Point::new(display.bounding_box().center().y, display.bounding_box().center().x),
+                                VerticalPosition::Center,
+                                HorizontalAlignment::Center,
+                                FontColor::Transparent(Black),
+                                display,
+                            );
+                        } else {
+                            let _ = font.render_aligned(
+                                self.page_content.as_str(),
+                                Point::new(0, 2),
+                                VerticalPosition::Top,
+                                HorizontalAlignment::Left,
+                                FontColor::Transparent(Black),
+                                display,
+                            );
+                        }
                     }
                 }
             }
@@ -314,7 +348,11 @@ impl Page for ReadPage{
         event::on_target(EventType::KeyLongEnd(1),Self::mut_to_ptr(self),  move |info|  {
             return Box::pin(async move {
                 let mut_ref:&mut Self =  Self::mut_by_ptr(info.ptr).unwrap();
-                println!("显示弹出框");
+                if mut_ref.reading {
+                    mut_ref.force_indexing = true;
+                    mut_ref.page_vec = None;
+                    println!("显示弹出框");
+                }
             });
         }).await;
         event::on_target(EventType::KeyShort(1),Self::mut_to_ptr(self),  move |info|  {
