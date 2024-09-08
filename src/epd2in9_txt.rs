@@ -1,5 +1,5 @@
 use alloc::boxed::Box;
-use alloc::vec;
+use alloc::{format, vec};
 use core::future::Future;
 use core::iter::once;
 use core::pin::Pin;
@@ -23,25 +23,25 @@ use u8g2_fonts::fonts;
 use u8g2_fonts::types::FontColor;
 use u8g2_fonts::types::HorizontalAlignment;
 use crate::epd2in9_txt::CharType::{Ascii, Other, Tail, Zh};
-use crate::sd_mount::TimeSource;
+use crate::sd_mount::{ActualDirectory, TimeSource};
 
 
 const LINES_NUM:u32 = 7;//行数
 pub const WIDTH: u32 =296;
 pub const HEIGHT: u32 =128;
 const BUFFER_LEN: usize = 200;
-pub(crate) const PAGES_VEC_MAX:usize = 5_000;
+pub(crate) const PAGES_VEC_MAX:usize = 1_000;
 pub(crate) const LOG_VEC_MAX:usize = 100;
 pub struct TxtReader;
 
 const ZH_WIDTH:u32 = 16;
 type FileObject<'a,'b,CS: esp_hal::gpio::OutputPin> = File<'b,SdCard<&'a mut CriticalSectionDevice<'a,Spi<'a,SPI2, FullDuplexMode>, Output<'a,CS>, Delay>, Delay>, TimeSource, 4, 4, 1>;
 impl TxtReader {
-     pub async fn generate_pages<CS: esp_hal::gpio::OutputPin,F>(my_file: &mut FileObject<'_,'_,CS>, mut process: F) ->Vec<u32, PAGES_VEC_MAX>
+     pub async fn generate_pages<F>(books_dir:&mut ActualDirectory<'_>,book_name:&str, mut process: F) ->Option<BookPages>
      where F:FnMut(f32) -> (Pin<Box<dyn Future<Output=()>>>)
      {
-
-
+         let file_name = format!("{}.txt", book_name);
+         let index_name = format!("{}.idx", book_name);
 
         let mut begin_position :u32= 0; //每一屏在文件中的开始位置
         let mut end_position:u32 = 0; //每一屏在文件中的结束位置
@@ -52,116 +52,143 @@ impl TxtReader {
 
         let last_boundary_index = 0;//最后一次字符边界
 
-
-        let mut file_length = my_file.length();
+         let mut file_length = 0;
+         {
+             let mut my_file = books_dir.open_file_in_dir(file_name.as_str(), embedded_sdmmc::Mode::ReadOnly).unwrap();
+             file_length = my_file.length();
+             my_file.close();
+         }
         println!("文件大小：{}", file_length);
 
         let begin_sec = Instant::now().as_secs();
-        while !my_file.is_eof() {
-            let mut buffer = [0u8; BUFFER_LEN];
-            let num_read = my_file.read(&mut buffer).unwrap();
-          /*  println!("buffer num:{}",num_read);
+        let mut last_sec = begin_sec;
+
+         //删除
+         books_dir.delete_file_in_dir(index_name.as_str()).expect("index file delete fail");
+         println!("删除旧索引");
+         while end_position != file_length {
+             println!("end_position:{}",end_position);
+             let mut my_file =books_dir.open_file_in_dir(file_name.as_str(), embedded_sdmmc::Mode::ReadOnly).unwrap();
+             if end_position > 0 {
+                 my_file.seek_from_start(end_position);
+                 last_borrow_chars = 0;
+                 line_width = 0;
+                 lines_num = 0;
+                 begin_position = end_position;
+                 all_page_position_vec.clear();
+             }
+             'outer: while !my_file.is_eof() {
+                 let mut buffer = [0u8; BUFFER_LEN];
+                 let num_read = my_file.read(&mut buffer).unwrap();
+                 /*  println!("buffer num:{}",num_read);
             println!("buffer : {:?}",buffer );*/
 
-            let mut i = 0;
-            if last_borrow_chars > 0 {
-                i += last_borrow_chars;
-            }
+                 let mut i = 0;
+                 if last_borrow_chars > 0 {
+                     i += last_borrow_chars;
+                 }
 
-            while  i < num_read {
-                let byte = buffer[i];
-                let (char_type,byte_num) = char_type_width(byte);
+                 while i < num_read {
+                     let byte = buffer[i];
+                     let (char_type, byte_num) = char_type_width(byte);
 
-                match char_type {
-                    Ascii => {
-                        let char = char::from(byte);
-                        if char == '\n' || char == '\r' {
-                            //判断当前行是否有数据，无数据则不再增加新行
-                            if line_width > 0 {
-                                lines_num += 1;
-                                line_width = 0;
-                            }
-                        }else{
-                            line_width += ascii_width(char);
-                        }
-                    }
-                    Zh => {
-                        line_width += ZH_WIDTH;
-                    }
-                    Other => {
-                        line_width += ZH_WIDTH;
-                    }
-                    Tail => {
-                        //不处理
-                    }
-                }
-                //println!("byte_num:{}",byte_num);
-                //步进一个字符的字节数
-                if byte_num > 0 {
-                    end_position += byte_num as u32;
-                    i += byte_num as usize;
-                }
-
-
-                //换行
-                if line_width > WIDTH && line_width - WIDTH > 2{
-                    lines_num += 1;
-                    line_width = 0;
-                }
-
-                //换屏 保存分页
-                if lines_num == LINES_NUM {
-                    all_page_position_vec.push(end_position);
-
-                    //重置下一屏的位置
-                    begin_position = end_position;
-
-                    lines_num = 0;
-                    line_width = 0;
+                     match char_type {
+                         Ascii => {
+                             let char = char::from(byte);
+                             if char == '\n' || char == '\r' {
+                                 //判断当前行是否有数据，无数据则不再增加新行
+                                 if line_width > 0 {
+                                     lines_num += 1;
+                                     line_width = 0;
+                                 }
+                             } else {
+                                 line_width += ascii_width(char);
+                             }
+                         }
+                         Zh => {
+                             line_width += ZH_WIDTH;
+                         }
+                         Other => {
+                             line_width += ZH_WIDTH;
+                         }
+                         Tail => {
+                             //不处理
+                         }
+                     }
+                     //println!("byte_num:{}",byte_num);
+                     //步进一个字符的字节数
+                     if byte_num > 0 {
+                         end_position += byte_num as u32;
+                         i += byte_num as usize;
+                     }
 
 
-                    if  Instant::now().as_secs() % 5 == 0 {
-                        let percent = (end_position as f32 / file_length as f32) * 100.0;
-                        process(percent).await;
-                        println!("进度：{} %",percent);
-                    }
+                     //换行
+                     if line_width > WIDTH && line_width - WIDTH > 2 {
+                         lines_num += 1;
+                         line_width = 0;
+                     }
 
-                }
-            }
-            //记录超出
-            if i > num_read {
-                last_borrow_chars = i - num_read ;
-            }else{
-                last_borrow_chars = 0;
-            }
-        }
-        if end_position != begin_position {
-            all_page_position_vec.push(end_position);
-        }
+                     //换屏 保存分页
+                     if lines_num == LINES_NUM {
+                         all_page_position_vec.push(end_position);
+                         //重置下一屏的位置
+                         begin_position = end_position;
 
-        println!("pages:{:?}",all_page_position_vec);
-        println!("pages len:{}",all_page_position_vec.len());
-        return all_page_position_vec;
+                         if all_page_position_vec.len() == PAGES_VEC_MAX{
+                             break 'outer;
+                         }
+
+
+                         lines_num = 0;
+                         line_width = 0;
+
+
+                         if Instant::now().as_secs() - last_sec > 2 {
+                             last_sec = Instant::now().as_secs();
+                             let percent = (end_position as f32 / file_length as f32) * 100.0;
+                             process(percent).await;
+                             println!("进度：{} %", percent);
+                         }
+                     }
+                 }
+                 //记录超出
+                 if i > num_read {
+                     last_borrow_chars = i - num_read;
+                 } else {
+                     last_borrow_chars = 0;
+                 }
+             }
+             if end_position != begin_position {
+                 all_page_position_vec.push(end_position);
+             }
+             my_file.close();
+
+
+             //写索引
+             let mut my_file_index =books_dir.open_file_in_dir(index_name.as_str(), embedded_sdmmc::Mode::ReadWriteCreateOrAppend);
+             if let Ok(mut mfi) = my_file_index {
+                 crate::epd2in9_txt::TxtReader::save_pages(&mut mfi, &all_page_position_vec);
+                 mfi.close();
+             }
+
+         }
+         //写索引
+         let mut book_pages  = None;
+         let mut my_file_index =books_dir.open_file_in_dir(index_name.as_str(), embedded_sdmmc::Mode::ReadOnly);
+         if let Ok(mut mfi) = my_file_index {
+             book_pages = Some(BookPages::new(mfi.length()));
+             mfi.close();
+         }
+
+         return book_pages;
     }
 
-    pub fn get_page_content<CS: esp_hal::gpio::OutputPin>(my_file: &mut FileObject<CS>,page_num:usize,pages_vec:&Vec<u32,PAGES_VEC_MAX>)->String<1000>{
-        let mut  start_position = 0;
-        let mut  end_position = 0;
+    pub fn get_page_content<CS: esp_hal::gpio::OutputPin>(my_file: &mut FileObject<CS>,start_position:u32,end_position:u32)->String<1000>{
+
         let mut line_width = 0;//当前行宽 用于换行
         let mut lines_num = 0;//当前行数 用于换屏
 
-
-        let page = page_num-0;
-
-        if page_num <= pages_vec.len()-1 {
-            if page == 0 {
-                start_position = 0;
-                end_position = pages_vec[page];
-            }else{
-                start_position = pages_vec[page-1];
-                end_position = pages_vec[page];
-            }
-        }
 
         println!("start:{},end:{}",start_position,end_position);
         my_file.seek_from_start(start_position as u32);
@@ -226,8 +253,7 @@ impl TxtReader {
     }
 
 
-
-    pub fn save_pages<CS: esp_hal::gpio::OutputPin>(my_file: &mut FileObject<CS>,pages_vec:&Vec<u32, PAGES_VEC_MAX> ){
+    pub fn save_pages<CS: esp_hal::gpio::OutputPin>(my_file: &mut FileObject<CS>,pages_vec:&Vec<u32, PAGES_VEC_MAX>){
         const LEN:usize = PAGES_VEC_MAX * 4;
         let mut buffer:Vec<u8, LEN> = Vec::new() ;
 
@@ -241,28 +267,6 @@ impl TxtReader {
 
         my_file.write(&buffer);
 
-    }
-    pub fn read_pages<CS: esp_hal::gpio::OutputPin>(my_file: &mut FileObject<CS> )->Vec<u32, PAGES_VEC_MAX> {
-        println!(" begin read pages");
-        //读索引
-
-        let mut buffer = [0u8; PAGES_VEC_MAX * 4];
-        let mut num_read = 0;
-        while !my_file.is_eof() {
-            num_read = my_file.read(&mut buffer).unwrap();
-            println!("times");
-        }
-
-        let mut pages_vec = Vec::new();
-        for i in (0..num_read).step_by(4) {
-
-            let value = ((buffer[i] as u32) << 24) | ((buffer[i + 1] as u32) << 16) | ((buffer[i + 2] as u32) << 8) | buffer[i + 3] as u32;
-            pages_vec.push(value);
-
-        }
-
-
-        pages_vec
     }
 
     pub fn save_log<CS: esp_hal::gpio::OutputPin>(my_file: &mut FileObject<CS>, log_vec:&mut Vec<u32,LOG_VEC_MAX>,page:u32,is_favorite:bool){
@@ -312,6 +316,138 @@ impl TxtReader {
         log_vec
     }
 }
+
+/**
+ * 总页数，vec 数量，及vec位置
+ */
+#[derive(Debug)]
+pub struct BookPages{
+    pub total_page:u32,
+    total_vec_nums:u32,
+    current_vec_num:u32,
+    current_page:u32,
+
+    vec_offset_begin:u32,
+    vec_offset_end:u32,
+    vec_index:u32,
+    page_vec:Vec<u32,PAGES_VEC_MAX>,
+    need_read_page_vec:bool,
+    prev_vec_last_page:u32,
+
+    end_page_position:u32,
+}
+
+impl BookPages {
+
+    pub fn new (index_file_len:u32)->Self{
+         Self{
+            total_page: Self::compute_total_page(index_file_len),
+            total_vec_nums: Self::compute_total_vec(index_file_len),
+            current_vec_num: 0,
+            current_page: 0,
+            vec_offset_begin: 0,
+            vec_offset_end: 0,
+            vec_index: 0,
+            page_vec: Default::default(),
+            need_read_page_vec: true,
+            prev_vec_last_page:0,
+            end_page_position: 0,
+        }
+
+    }
+
+    fn compute_total_page(index_len:u32) -> u32{
+         index_len / 4
+    }
+
+    fn compute_total_vec(index_len:u32) -> u32{
+        let total_vec = (index_len / 4 ) / (PAGES_VEC_MAX as u32);
+        return total_vec;
+    }
+
+    pub fn set_current_page(&mut self,page:u32){
+        if page >= self.total_page {
+            self.current_page = self.total_page - 1;
+        }else{
+            self.current_page = page;
+        }
+        self.compute_vec_offset();
+    }
+
+    fn compute_vec_offset(&mut self) {
+        let vec_num = self.current_page / (PAGES_VEC_MAX as u32);
+
+        //读取分页的偏移
+        let vec_offset_begin = vec_num * (PAGES_VEC_MAX as u32) * 4;
+        let vec_offset_end = (vec_num + 1) * (PAGES_VEC_MAX as u32) * 4;
+
+        //分页内的索引
+        let vec_index = self.current_page % (PAGES_VEC_MAX as u32);
+
+        self.vec_offset_begin = vec_offset_begin;
+        self.vec_offset_end = vec_offset_end;
+        self.vec_index = vec_index;
+
+        if self.current_vec_num != vec_num {
+           self.need_read_page_vec = true;
+        }
+        self.current_vec_num = vec_num;
+
+    }
+
+    pub fn get_end_page_position<CS: esp_hal::gpio::OutputPin>(&mut self,my_file: &mut FileObject<CS> )->u32{
+        my_file.seek_from_end(4);
+        let mut buffer = [0u8;4];
+        let num_read = my_file.read(&mut buffer).unwrap();
+        let value = ((buffer[0] as u32) << 24) | ((buffer[1] as u32) << 16) | ((buffer[2] as u32) << 8) | buffer[3] as u32;
+        self.end_page_position = value;
+        return value;
+    }
+
+    pub fn get_page_content_position<CS: esp_hal::gpio::OutputPin>(&mut self,my_file: &mut FileObject<CS> )->(u32,u32){
+        if self.need_read_page_vec {
+
+            if self.current_vec_num > 0 {
+                my_file.seek_from_start(self.vec_offset_begin - 4);
+                let mut buffer = [0u8;4];
+                let num_read = my_file.read(&mut buffer).unwrap();
+                let value = ((buffer[0] as u32) << 24) | ((buffer[1] as u32) << 16) | ((buffer[2] as u32) << 8) | buffer[3] as u32;
+                self.prev_vec_last_page = value;
+            }else{
+                my_file.seek_from_start(self.vec_offset_begin);
+                self.prev_vec_last_page = 0;
+            }
+
+            let mut buffer = [0u8; PAGES_VEC_MAX * 4];
+            let mut num_read = 0;
+            num_read = my_file.read(&mut buffer).unwrap();
+
+            self.page_vec.clear();
+            for i in (0..num_read).step_by(4) {
+                let value = ((buffer[i] as u32) << 24) | ((buffer[i + 1] as u32) << 16) | ((buffer[i + 2] as u32) << 8) | buffer[i + 3] as u32;
+                self.page_vec.push(value);
+            }
+
+            self.need_read_page_vec = false;
+        }
+
+        //这里得到的是当前页的结束 ，开始位用 prev_vec_last_page
+        let mut page_begin_position = 0;
+        if self.vec_index == 0 {
+            page_begin_position = self.prev_vec_last_page;
+        }else{
+            page_begin_position = self.page_vec[(self.vec_index - 1) as usize];
+        }
+        let page_end_position = self.page_vec[self.vec_index as usize];
+
+
+        return (page_begin_position,page_end_position);
+    }
+
+}
+
+
+
 #[derive(Debug)]
 enum CharType{
     Ascii,
@@ -458,7 +594,7 @@ fn ascii_width(ch:char) -> u32{
     else if ch ==  '|' { 1 }
     else if ch ==  '}' { 6 }
     else if ch ==  '~' { 7 }
-    else if ch ==  ' ' { ZH_WIDTH/4 }
+    else if ch ==  ' ' { ZH_WIDTH/2 }
     else{  0 }
 
 }

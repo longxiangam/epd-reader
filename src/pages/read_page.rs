@@ -14,7 +14,7 @@ use u8g2_fonts::fonts;
 use u8g2_fonts::types::{FontColor, HorizontalAlignment, VerticalPosition};
 use crate::display::{display_mut, RENDER_CHANNEL, RenderInfo};
 use crate::{display, epd2in9_txt, event};
-use crate::epd2in9_txt::TxtReader;
+use crate::epd2in9_txt::{BookPages, TxtReader};
 use crate::event::EventType;
 use crate::pages::{ Page};
 use crate::sd_mount::{ActualDirectory, SD_MOUNT, SdMount};
@@ -36,7 +36,7 @@ pub struct ReadPage{
     choose_index:u32,
     open_file_name:String<20>,
     menus:Option<Vec<String<20>,40>>,
-    page_vec:Option<Vec<u32,PAGES_VEC_MAX>>,
+    book_pages:Option<BookPages>,
     log_vec:Option<Vec<u32,LOG_VEC_MAX>>,
     page_index:u32,
     page_content:String<1000>,
@@ -46,14 +46,14 @@ impl ReadPage{
     async fn back(&mut self){
         self.running = false;
     }
-    async fn get_page_vec<>(&mut self, books_dir:&mut ActualDirectory<'_>) -> Option<Vec<u32, PAGES_VEC_MAX>> {
+    async fn get_page_vec<>(&mut self, books_dir:&mut ActualDirectory<'_>)  {
         let book_name = self.menus.as_ref().unwrap()[self.choose_index as usize].clone();
 
         let file_name = format!("{}.txt", book_name);
         let index_name = format!("{}.idx", book_name);
         let mut need_index = false;
         let mut file_len = 0;
-        let mut pages_vec = None;
+        let mut book_pages = None;
         {
             let mut my_file =books_dir.open_file_in_dir(file_name.as_str(), embedded_sdmmc::Mode::ReadOnly).unwrap();
             file_len = my_file.length();
@@ -70,14 +70,17 @@ impl ReadPage{
                 } else {
                     println!("entry read pages");
                     //读索引
-                    pages_vec = Some(crate::epd2in9_txt::TxtReader::read_pages(&mut mfi));
-                    if let Some(ref p_vec) = pages_vec {
-                        if p_vec.len() == 0 {
+                    book_pages = Some(BookPages::new(mfi.length()));
+
+                    if let Some(ref mut b) = book_pages {
+
+                        if b.total_page == 0 {
                             need_index = true;
-                        } else if p_vec[p_vec.len() - 1] != file_len {
-                            println!("end_width :{},{}", p_vec[p_vec.len() - 1], file_len);
+                        }else if b.get_end_page_position(&mut mfi)  != file_len{
                             need_index = true;
                         }
+
+                        println!("book_pages:{:?}",*b);
                     }
                 }
                 mfi.close();
@@ -86,39 +89,29 @@ impl ReadPage{
             }
         }
         if need_index || self.force_indexing {
-            {
-                let mut my_file =books_dir.open_file_in_dir(file_name.as_str(), embedded_sdmmc::Mode::ReadOnly).unwrap();
 
-                self.indexing = true;
-                let self_ptr = Self::mut_to_ptr(self);
-                pages_vec = Some(TxtReader::generate_pages(&mut my_file, |process|  {
-                    return Box::pin(async  move {
-                        let mut_ref:&mut Self =  Self::mut_by_ptr(Some(self_ptr)).unwrap();
-                        mut_ref.indexing_process = process;
-                        mut_ref.render().await;
-                        Timer::after_millis(10).await;
-                    });
-                }).await);
 
-                self.force_indexing = false;
-                self.indexing = false;
-                my_file.close();
-            }
+            self.indexing = true;
+            let self_ptr = Self::mut_to_ptr(self);
+            book_pages = TxtReader::generate_pages(books_dir,book_name.as_str(), |process|  {
+                return Box::pin(async  move {
 
-            //写索引
-            let mut my_file_index =books_dir.open_file_in_dir(index_name.as_str(), embedded_sdmmc::Mode::ReadWriteCreateOrTruncate);
+                    let mut_ref:&mut Self =  Self::mut_by_ptr(Some(self_ptr)).unwrap();
+                    mut_ref.indexing_process = process;
+                    mut_ref.need_render = true;
+                    mut_ref.render().await;
+                    Timer::after_millis(500).await;
+                });
+            }).await;
 
-            if let Ok(mut mfi) = my_file_index {
-                if let Some(ref p_vec) = pages_vec {
-                    crate::epd2in9_txt::TxtReader::save_pages(&mut mfi, p_vec);
-                }
-                mfi.close();
-            }
+            self.need_render = true;
+            self.force_indexing = false;
+            self.indexing = false;
+
         }
 
+        self.book_pages = book_pages;
 
-
-        return pages_vec;
     }
     async fn get_log_vec(&mut self,books_dir:&mut ActualDirectory<'_>) {
         let book_name = self.menus.as_ref().unwrap()[self.choose_index as usize].clone();
@@ -145,20 +138,20 @@ impl ReadPage{
 
         let begin_secs = Instant::now().as_secs();
         println!("begin_time:{}", begin_secs);
-        let mut pages_vec = self.page_vec.as_ref();
-
-        let mut need_index = false;
-        let mut file_len = 0;
 
         let file_name = format!("{}.txt", book_name);
         let log_name = format!("{}.log", book_name);
-
-
-        if let Some(ref p_vec) = pages_vec {
+        let index_name = format!("{}.idx", book_name);
+        if let Some( bp) = self.book_pages.as_mut() {
+            let mut begin =  0;
+            let mut end =  0;
+            {
+                let mut index_file =books_dir.open_file_in_dir(index_name.as_str(), embedded_sdmmc::Mode::ReadOnly).unwrap();
+                (begin, end) = bp.get_page_content_position(&mut index_file);
+            }
             {
                 let mut my_file =books_dir.open_file_in_dir(file_name.as_str(), embedded_sdmmc::Mode::ReadOnly).unwrap();
-                self.page_content = TxtReader::get_page_content(&mut my_file, (self.page_index) as usize, &p_vec);
-
+                self.page_content = TxtReader::get_page_content(&mut my_file, begin,end);
                 my_file.close();
             }
             {
@@ -174,13 +167,15 @@ impl ReadPage{
 
     async fn do_change_page(&mut self,page_index:u32){
 
-        if page_index >= self.page_vec.as_ref().unwrap().len() as u32 {
-            self.page_index = self.page_vec.as_ref().unwrap().len() as u32;
+
+        if page_index >= self.book_pages.as_ref().unwrap().total_page {
+            self.page_index = self.book_pages.as_ref().unwrap().total_page;
         }else{
             self.page_index = page_index;
         }
         self.change_page = true;
         self.need_render = true;
+
 
     }
 }
@@ -199,7 +194,7 @@ impl Page for ReadPage{
             choose_index: 0,
             open_file_name: Default::default(),
             menus: None,
-            page_vec: None,
+            book_pages: None,
             log_vec: None,
             page_index: 0,
             page_content: Default::default(),
@@ -212,54 +207,58 @@ impl Page for ReadPage{
 
             if let Some(display) = display_mut() {
                 let _ = display.clear_buffer(Color::White);
-                if !self.reading {
-                    println!("in render");
-                    if let Some(ref menus) = self.menus {
-                        println!("in render menus");
-                        let menus: Vec<&str, 20> = menus.iter().map(|v| { v.as_str() }).collect();
-                        let mut list_widget = ListWidget::new(Point::new(0, 0)
-                                                              , Black
-                                                              , White
-                                                              , Size::new(display.bounding_box().size.height, display.bounding_box().size.width)
-                                                              , menus
-                        );
-                        list_widget.choose(self.choose_index as usize);
-                        let _ = list_widget.draw(display);
-                    }
-                }else{
+                if self.indexing {
                     let font: FontRenderer = FontRenderer::new::<fonts::u8g2_font_wqy15_t_gb2312>();
                     let mut font = font.with_ignore_unknown_chars(true);
-                    //显示选择书本对应页的内容
-                    display.clear_buffer(Color::White);
-                    if self.indexing {
-                        let _ = font.render_aligned(
-                            format_args!("正在创建索引，\n 已创建索引进度：{}%",self.indexing_process),
-                            Point::new(display.bounding_box().center().y, display.bounding_box().center().x),
-                            VerticalPosition::Center,
-                            HorizontalAlignment::Center,
-                            FontColor::Transparent(Black),
-                            display,
-                        );
-                    }else {
-
-                        if self.page_index as usize == self.page_vec.as_ref().unwrap().len() {
-                            let _ = font.render_aligned(
-                                "已是最后一页",
-                                Point::new(display.bounding_box().center().y, display.bounding_box().center().x),
-                                VerticalPosition::Center,
-                                HorizontalAlignment::Center,
-                                FontColor::Transparent(Black),
-                                display,
+                    let _ = font.render_aligned(
+                        format_args!("正在创建索引，\n 已创建索引进度：{}%",self.indexing_process),
+                        Point::new(display.bounding_box().center().y, display.bounding_box().center().x),
+                        VerticalPosition::Center,
+                        HorizontalAlignment::Center,
+                        FontColor::Transparent(Black),
+                        display,
+                    );
+                    println!("显示进度：{}",self.indexing_process);
+                }else {
+                    if !self.reading {
+                        println!("in render");
+                        if let Some(ref menus) = self.menus {
+                            println!("in render menus");
+                            let menus: Vec<&str, 20> = menus.iter().map(|v| { v.as_str() }).collect();
+                            let mut list_widget = ListWidget::new(Point::new(0, 0)
+                                                                  , Black
+                                                                  , White
+                                                                  , Size::new(display.bounding_box().size.height, display.bounding_box().size.width)
+                                                                  , menus
                             );
-                        } else {
-                            let _ = font.render_aligned(
-                                self.page_content.as_str(),
-                                Point::new(0, 2),
-                                VerticalPosition::Top,
-                                HorizontalAlignment::Left,
-                                FontColor::Transparent(Black),
-                                display,
-                            );
+                            list_widget.choose(self.choose_index as usize);
+                            let _ = list_widget.draw(display);
+                        }
+                    } else {
+                        let font: FontRenderer = FontRenderer::new::<fonts::u8g2_font_wqy15_t_gb2312>();
+                        let mut font = font.with_ignore_unknown_chars(true);
+                        //显示选择书本对应页的内容
+                        display.clear_buffer(Color::White);
+                        {
+                            if self.page_index == self.book_pages.as_ref().unwrap().total_page {
+                                let _ = font.render_aligned(
+                                    "已是最后一页",
+                                    Point::new(display.bounding_box().center().y, display.bounding_box().center().x),
+                                    VerticalPosition::Center,
+                                    HorizontalAlignment::Center,
+                                    FontColor::Transparent(Black),
+                                    display,
+                                );
+                            } else {
+                                let _ = font.render_aligned(
+                                    self.page_content.as_str(),
+                                    Point::new(0, 2),
+                                    VerticalPosition::Top,
+                                    HorizontalAlignment::Left,
+                                    FontColor::Transparent(Black),
+                                    display,
+                                );
+                            }
                         }
                     }
                 }
@@ -292,13 +291,14 @@ impl Page for ReadPage{
 
                                 loop {
                                     if !self.running { break; }
-                                    if let None = self.page_vec {
-                                        self.page_vec = self.get_page_vec(&mut books_dir).await;
+                                    if let None = self.book_pages {
+                                        self.get_page_vec(&mut books_dir).await;
                                         self.get_log_vec(&mut books_dir).await;
                                     }
                                     if self.change_page {
 
                                         self.change_page = false;
+                                        self.book_pages.as_mut().unwrap().set_current_page(self.page_index);
                                         self.get_page_content(&mut books_dir).await;
                                     }
 
@@ -339,7 +339,7 @@ impl Page for ReadPage{
                     mut_ref.reading = true;
                     mut_ref.change_page = true;
                     mut_ref.page_index = 0;
-                    mut_ref.page_vec = None;
+                    mut_ref.book_pages = None;
                 }
                 mut_ref.need_render = true;
 
@@ -348,11 +348,11 @@ impl Page for ReadPage{
         event::on_target(EventType::KeyLongEnd(1),Self::mut_to_ptr(self),  move |info|  {
             return Box::pin(async move {
                 let mut_ref:&mut Self =  Self::mut_by_ptr(info.ptr).unwrap();
-                if mut_ref.reading {
-                    mut_ref.force_indexing = true;
-                    mut_ref.page_vec = None;
-                    println!("显示弹出框");
-                }
+
+                mut_ref.force_indexing = true;
+                mut_ref.book_pages = None;
+                println!("显示弹出框");
+
             });
         }).await;
         event::on_target(EventType::KeyShort(1),Self::mut_to_ptr(self),  move |info|  {
