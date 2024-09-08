@@ -211,7 +211,7 @@ impl Page for ReadPage{
                     let font: FontRenderer = FontRenderer::new::<fonts::u8g2_font_wqy15_t_gb2312>();
                     let mut font = font.with_ignore_unknown_chars(true);
                     let _ = font.render_aligned(
-                        format_args!("正在创建索引，\n 已创建索引进度：{}%",self.indexing_process),
+                        format_args!("正在创建索引，\n 已创建索引进度：{:.2}%",self.indexing_process),
                         Point::new(display.bounding_box().center().y, display.bounding_box().center().x),
                         VerticalPosition::Center,
                         HorizontalAlignment::Center,
