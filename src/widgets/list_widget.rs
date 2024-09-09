@@ -190,7 +190,7 @@ impl <C> Drawable for  ListItemWidget<C>  where C:PixelColor{
             let line_style = PrimitiveStyleBuilder::new()
                 .stroke_color(self.front_color)
                 .stroke_alignment(StrokeAlignment::Inside)
-                .fill_color(self.front_color)
+                //.fill_color(self.front_color)
                 .stroke_width(1).build();
             let _rectangle = Rectangle::new(self.position,self.size)
                 .into_styled(line_style)
@@ -210,12 +210,22 @@ impl <C> Drawable for  ListItemWidget<C>  where C:PixelColor{
 
 
         let font: FontRenderer = FontRenderer::new::<fonts::u8g2_font_wqy16_t_gb2312>();
+
         let _ = font.render_aligned(
-            format_args!("{} {}",tag, self.label),
+            format_args!("{} ",tag),
             self.position+Point::new(10,5),
             VerticalPosition::Top,
             HorizontalAlignment::Left,
-            FontColor::Transparent(if self.is_choose { self.back_color}else {self.front_color}),
+            FontColor::Transparent(self.front_color),
+            target,
+        );
+
+        let _ = font.render_aligned(
+            format_args!(" {}", self.label),
+            self.position+Point::new(15,5),
+            VerticalPosition::Top,
+            HorizontalAlignment::Left,
+            FontColor::Transparent(self.front_color),
             target,
         );
         //style.set_background_color(Some(self.back_color));

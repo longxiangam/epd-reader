@@ -19,6 +19,7 @@ use epd_waveshare::epd2in9::{Display2in9, Epd2in9};
 use epd_waveshare::prelude::{Display, RefreshLut, WaveshareDisplay};
 
 use embedded_graphics::{Drawable };
+use embedded_graphics::prelude::Dimensions;
 use esp_println::println;
 use esp_hal::Async;
 use esp_hal::spi::{Error, FullDuplexMode, SpiDataMode, SpiMode};
@@ -26,6 +27,9 @@ use embedded_hal_bus::spi::CriticalSectionDevice;
 use esp_hal::spi::master::Spi;
 use epd_waveshare::prelude::DisplayRotation;
 use esp_hal::peripheral::Peripheral;
+use u8g2_fonts::fonts;
+use u8g2_fonts::FontRenderer;
+use u8g2_fonts::types::{FontColor, HorizontalAlignment, VerticalPosition};
 
 pub struct RenderInfo{
     pub time:i32,
@@ -115,5 +119,32 @@ pub async  fn render(mut spi_device: &'static mut CriticalSectionDevice<'static,
 pub fn display_mut()->Option<&'static mut Display2in9>{
     unsafe {
         DISPLAY.as_mut()
+    }
+}
+
+pub async fn show_error(error:&str,need_clear:bool) {
+    if let Some(display) = display_mut() {
+        let font: FontRenderer = FontRenderer::new::<fonts::u8g2_font_wqy15_t_gb2312>();
+        let mut font = font.with_ignore_unknown_chars(true);
+
+        if need_clear {
+            display.clear_buffer(Color::White);
+        }
+        let _ = font.render_aligned(
+            error,
+            Point::new(display.bounding_box().center().y, display.bounding_box().center().x),
+            VerticalPosition::Center,
+            HorizontalAlignment::Center,
+            FontColor::Transparent(Black),
+            display,
+        );
+
+
+
+
+
+
+        RENDER_CHANNEL.send(RenderInfo { time: 0,need_sleep:true }).await;
+        Timer::after_secs(1).await;
     }
 }

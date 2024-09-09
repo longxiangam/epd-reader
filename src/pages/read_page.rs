@@ -178,6 +178,8 @@ impl ReadPage{
 
 
     }
+
+
 }
 
 impl Page for ReadPage{
@@ -310,11 +312,13 @@ impl Page for ReadPage{
                         },
                         Err(er) => {
                             println!("open volume:{:?}", er);
+                            display::show_error("打开主目录失败",true).await;
                         },
                     }
                 },
                 Err(e) => {
                     println!("open volume:{:?}", e);
+                    display::show_error("读取分区失败",true).await;
                 }
             }
         }
