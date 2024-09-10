@@ -16,7 +16,7 @@ use embedded_graphics::text::Text;
 use esp_println::println;
 use esp_hal::macros::ram;
 use epd_waveshare::color::{Black, Color, White};
-use epd_waveshare::epd2in9::{Display2in9, Epd2in9};
+
 use epd_waveshare::prelude::{Display, RefreshLut, WaveshareDisplay};
 use u8g2_fonts::U8g2TextStyle;
 use crate::{ event};
@@ -95,11 +95,11 @@ impl Page for  MainPage{
         let mut menus = Vec::new();
 
         menus.push(MenuItem::new(String::<20>::from_str("电子书").unwrap(), EReadPage));
-       /* menus.push(MenuItem::new(String::<20>::from_str("时钟").unwrap(), EClockPage));
+        menus.push(MenuItem::new(String::<20>::from_str("时钟").unwrap(), EClockPage));
         menus.push(MenuItem::new(String::<20>::from_str("定时器").unwrap(), ETimerPage));
         menus.push(MenuItem::new(String::<20>::from_str("天气").unwrap(), EWeatherPage));
         menus.push(MenuItem::new(String::<20>::from_str("日历").unwrap(), ECalendarPage));
-        menus.push(MenuItem::new(String::<20>::from_str("游戏").unwrap(), EChip8Page));
+       /* menus.push(MenuItem::new(String::<20>::from_str("游戏").unwrap(), EChip8Page));
         menus.push(MenuItem::new(String::<20>::from_str("设置").unwrap(), ESettingPage));*/
 
         Self{

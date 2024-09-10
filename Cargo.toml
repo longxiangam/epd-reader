@@ -61,3 +61,8 @@ epd-waveshare = {path="../../lcd_drivers/epd-waveshare-modify"}
 esp-hal = { git = 'https://github.com/esp-rs/esp-hal' }
 esp-hal-embassy = { git = "https://github.com/esp-rs/esp-hal"}
 esp-wifi = {git = 'https://github.com/esp-rs/esp-hal' }
+
+
+[features]
+epd2in9=[]
+epd4in2=[]

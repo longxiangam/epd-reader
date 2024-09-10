@@ -24,6 +24,7 @@ use esp_println::println;
 use esp_hal::Async;
 use esp_hal::spi::{Error, FullDuplexMode, SpiDataMode, SpiMode};
 use embedded_hal_bus::spi::CriticalSectionDevice;
+use epd_waveshare::epd4in2_v3::{Display4in2, Epd4in2};
 use esp_hal::spi::master::Spi;
 use epd_waveshare::prelude::DisplayRotation;
 use esp_hal::peripheral::Peripheral;
@@ -36,23 +37,34 @@ pub struct RenderInfo{
     pub need_sleep:bool,
 }
 
-pub static mut DISPLAY:Option<Display2in9>  = None;
+#[cfg(feature = "epd2in9")]
+pub type EpdDisplay = Display2in9;
+#[cfg(feature = "epd2in9")]
+pub type EpdControl<SPI, BUSY, DC, RST, DELAY> = Epd2in9<SPI,  BUSY, DC, RST, DELAY>;
+
+#[cfg(feature = "epd4in2")]
+pub type EpdDisplay = Display4in2;
+#[cfg(feature = "epd4in2")]
+pub type EpdControl<SPI, BUSY, DC, RST, DELAY> = Epd4in2<SPI, BUSY, DC, RST, DELAY>;
+
+pub static mut DISPLAY:Option<EpdDisplay>  = None;
 
 pub static RENDER_CHANNEL: Channel<CriticalSectionRawMutex,RenderInfo, 64> = Channel::new();
 pub static QUICKLY_LUT_CHANNEL: Channel<CriticalSectionRawMutex,bool, 64> = Channel::new();
+
+type ActualSpi = CriticalSectionDevice<'static,Spi<'static,SPI2, FullDuplexMode>, Output<'static,Gpio1>, Delay>;
 #[embassy_executor::task]
-pub async  fn render(mut spi_device: &'static mut CriticalSectionDevice<'static,Spi<'static,SPI2, FullDuplexMode>, Output<'static,Gpio1>, Delay> ,
+pub async  fn render(mut spi_device: &'static mut ActualSpi,
                      mut busy:Gpio6 ,
                            rst:Gpio7,
                            dc: Gpio5)
 {
-    let ass_cs = Output::new(unsafe{busy.clone_unchecked()},Level::Low);
     let busy = Input::new(busy, Pull::Down);
     let rst = Output::new( rst, Level::High);
     let dc = Output::new( dc, Level::High);
 
-    let mut epd = Epd2in9::new(&mut spi_device, ass_cs , busy, dc, rst, &mut Delay).unwrap();
-    let mut display: Display2in9 = Display2in9::default();
+    let mut epd = EpdControl::new(&mut spi_device,  busy, dc, rst, &mut Delay).unwrap();
+    let mut display: EpdDisplay = EpdDisplay::default();
     display.set_rotation(DisplayRotation::Rotate90);
     display.clear_buffer(Color::White);
 
@@ -63,6 +75,7 @@ pub async  fn render(mut spi_device: &'static mut CriticalSectionDevice<'static,
     }
     let mut render_times = 0;
     let mut refresh_lut:RefreshLut=RefreshLut::Full;
+    let mut is_sleep = false;
 
     const FORCE_FULL_REFRESH_TIMES:u32 =  5;
     loop {
@@ -73,20 +86,27 @@ pub async  fn render(mut spi_device: &'static mut CriticalSectionDevice<'static,
             Either::First(render_info) => {
                 render_times +=1;
                 println!("begin render");
+
+                if is_sleep {
+                    //唤醒
+                    epd.wake_up(&mut spi_device,&mut Delay);
+                    is_sleep = false;
+                }
+
                 let buffer = unsafe { DISPLAY.as_mut().unwrap().buffer() };
                 let len = buffer.len();
                 let mut need_force_full = false;
                 if render_times % FORCE_FULL_REFRESH_TIMES == 0 && refresh_lut == RefreshLut::Quick{
                     need_force_full = true;
-                    epd.set_lut(&mut spi_device, Some(RefreshLut::Full));
+                    spi_device  = set_refresh_mode(RefreshLut::Full,&mut epd,spi_device);
                 }
                 epd.update_and_display_frame(&mut spi_device, buffer, &mut Delay);
-
                 if need_force_full {
-                    epd.set_lut(&mut spi_device, Some(RefreshLut::Quick));
+                    spi_device  = set_refresh_mode(RefreshLut::Quick,&mut epd,spi_device);
                 }
 
                 if render_info.need_sleep {
+                    is_sleep = true;
                     epd.sleep(&mut spi_device, &mut Delay);
                     println!("sleep epd");
                 }
@@ -102,10 +122,10 @@ pub async  fn render(mut spi_device: &'static mut CriticalSectionDevice<'static,
             Either::Second(v) => {
                 if v {
                     refresh_lut = RefreshLut::Quick;
-                    epd.set_lut(&mut spi_device, Some(RefreshLut::Quick));
+                    spi_device  = set_refresh_mode(RefreshLut::Quick,&mut epd,spi_device);
                 }else{
                     refresh_lut = RefreshLut::Full;
-                    epd.set_lut(&mut spi_device, Some(RefreshLut::Full));
+                    spi_device  = set_refresh_mode(RefreshLut::Full,&mut epd,spi_device);
                 }
             },
         }
@@ -114,9 +134,23 @@ pub async  fn render(mut spi_device: &'static mut CriticalSectionDevice<'static,
 
 }
 
+pub fn set_refresh_mode< BUSY, DC, RST > (mode:RefreshLut,epd:&mut EpdControl<&'static mut ActualSpi, BUSY, DC, RST,Delay>,mut spi_device: &'static mut  ActualSpi)
+-> &'static mut ActualSpi
+where BUSY: embedded_hal::digital::InputPin, DC: embedded_hal::digital::OutputPin,  RST: embedded_hal::digital::OutputPin
+{
+    #[cfg(feature = "epd2in9")]
+    epd.set_lut( spi_device, Some(mode));
+
+    #[cfg(feature = "epd4in2")]
+    {
+        epd.set_refresh(&mut spi_device,&mut Delay,mode).expect("切换刷新模式失败");
+    }
+
+    return spi_device;
+}
 
 
-pub fn display_mut()->Option<&'static mut Display2in9>{
+pub fn display_mut()->Option<&'static mut EpdDisplay>{
     unsafe {
         DISPLAY.as_mut()
     }

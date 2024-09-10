@@ -7,7 +7,7 @@ use embassy_time::{Instant, Timer};
 use embedded_graphics::prelude::Point;
 use embedded_hal_bus::spi::CriticalSectionDevice;
 use embedded_sdmmc::{File, SdCard};
-use epd_waveshare::epd2in9::Display2in9;
+
 use embassy_time::Delay;
 use esp_hal::gpio::Output;
 use esp_hal::peripherals::SPI2;
@@ -25,16 +25,31 @@ use u8g2_fonts::types::HorizontalAlignment;
 use crate::epd2in9_txt::CharType::{Ascii, Other, Tail, Zh};
 use crate::sd_mount::{ActualDirectory, TimeSource};
 
-
+#[cfg(feature = "epd2in9")]
 const LINES_NUM:u32 = 7;//行数
+#[cfg(feature = "epd2in9")]
 pub const WIDTH: u32 =296;
+#[cfg(feature = "epd2in9")]
 pub const HEIGHT: u32 =128;
+
+#[cfg(feature = "epd4in2")]
+const LINES_NUM:u32 = 22;//行数
+#[cfg(feature = "epd4in2")]
+pub const WIDTH: u32 = 300;
+#[cfg(feature = "epd4in2")]
+pub const HEIGHT: u32 = 400;
+
+
 const BUFFER_LEN: usize = 200;
 pub(crate) const PAGES_VEC_MAX:usize = 1_000;
 pub(crate) const LOG_VEC_MAX:usize = 100;
+
+pub const ONE_PAGE_CONTENT_LEN:usize = 2000;
 pub struct TxtReader;
 
 const ZH_WIDTH:u32 = 16;
+const LINE_OVERFLOW:u32 = 8;
+
 type FileObject<'a,'b,CS: esp_hal::gpio::OutputPin> = File<'b,SdCard<&'a mut CriticalSectionDevice<'a,Spi<'a,SPI2, FullDuplexMode>, Output<'a,CS>, Delay>, Delay>, TimeSource, 4, 4, 1>;
 impl TxtReader {
      pub async fn generate_pages<F>(books_dir:&mut ActualDirectory<'_>,book_name:&str, mut process: F) ->Option<BookPages>
@@ -64,8 +79,10 @@ impl TxtReader {
         let mut last_sec = begin_sec;
 
          //删除
-         books_dir.delete_file_in_dir(index_name.as_str()).expect("index file delete fail");
-         println!("删除旧索引");
+         if let Ok(dir_ent) =  books_dir.find_directory_entry(index_name.as_str()){
+             books_dir.delete_file_in_dir(index_name.as_str()).expect("index file delete fail");
+             println!("删除旧索引");
+         }
          while end_position != file_length {
              println!("end_position:{}",end_position);
              let mut my_file =books_dir.open_file_in_dir(file_name.as_str(), embedded_sdmmc::Mode::ReadOnly).unwrap();
@@ -124,7 +141,7 @@ impl TxtReader {
 
 
                      //换行
-                     if line_width > WIDTH && line_width - WIDTH > 2 {
+                     if line_width > WIDTH && line_width - WIDTH > LINE_OVERFLOW {
                          lines_num += 1;
                          line_width = 0;
                      }
@@ -184,7 +201,7 @@ impl TxtReader {
          return book_pages;
     }
 
-    pub fn get_page_content<CS: esp_hal::gpio::OutputPin>(my_file: &mut FileObject<CS>,start_position:u32,end_position:u32)->String<1000>{
+    pub fn get_page_content<CS: esp_hal::gpio::OutputPin>(my_file: &mut FileObject<CS>,start_position:u32,end_position:u32)->String<ONE_PAGE_CONTENT_LEN>{
 
         let mut line_width = 0;//当前行宽 用于换行
         let mut lines_num = 0;//当前行数 用于换屏
@@ -193,9 +210,9 @@ impl TxtReader {
         println!("start:{},end:{}",start_position,end_position);
         my_file.seek_from_start(start_position as u32);
 
-        let mut buffer = [0u8; 1000];
+        let mut buffer = [0u8; ONE_PAGE_CONTENT_LEN];
         let num_read = my_file.read(&mut buffer).unwrap();
-        let mut txt:Vec<u8,1000> = Vec::new();
+        let mut txt:Vec<u8,ONE_PAGE_CONTENT_LEN> = Vec::new();
 
         let mut i:usize = 0;
         let len = (end_position - start_position) as usize;
@@ -238,7 +255,7 @@ impl TxtReader {
             i += byte_num as usize;
 
             //换行
-            if line_width > WIDTH && line_width - WIDTH > 2{
+            if line_width > WIDTH && line_width - WIDTH > LINE_OVERFLOW{
                 line_width = 0;
                 //txt.push(b'\r');
                 txt.push(b'\n');
@@ -500,101 +517,14 @@ fn char_type_width(byte:u8) ->(CharType, u8){
     }
 */
 fn ascii_width(ch:char) -> u32{
-
-    if ch ==  '"' { 3 }
-    else if ch ==  '#' { 8 }
-    else if ch ==  '$' { 7 }
-    else if ch ==  '%' { 9 }
-    else if ch ==  '&' { 8 }
-    else if ch ==  '\'' { 1 }
-    else if ch ==  '(' { 4 }
-    else if ch ==  ')' { 4 }
-    else if ch ==  '*' { 7 }
-    else if ch ==  '+' { 11 }
-    else if ch ==  ',' { 2 }
-    else if ch ==  '-' { 4 }
-    else if ch ==  '.' { 2 }
-    else if ch ==  '/' { 6 }
-    else if ch ==  '0' { 7 }
-    else if ch ==  '1' { 5 }
-    else if ch ==  '2' { 7 }
-    else if ch ==  '3' { 7 }
-    else if ch ==  '4' { 7 }
-    else if ch ==  '5' { 7 }
-    else if ch ==  '6' { 7 }
-    else if ch ==  '7' { 7 }
-    else if ch ==  '8' { 7 }
-    else if ch ==  '9' { 7 }
-    else if ch ==  ':' { 2 }
-    else if ch ==  ';' { 2 }
-    else if ch ==  '<' { 9 }
-    else if ch ==  '=' { 10 }
-    else if ch ==  '>' { 9 }
-    else if ch ==  '?' { 6 }
-    else if ch ==  '@' { 9 }
-    else if ch ==  'A' { 9 }
-    else if ch ==  'B' { 7 }
-    else if ch ==  'C' { 8 }
-    else if ch ==  'D' { 8 }
-    else if ch ==  'E' { 7 }
-    else if ch ==  'F' { 6 }
-    else if ch ==  'G' { 8 }
-    else if ch ==  'H' { 8 }
-    else if ch ==  'I' { 3 }
-    else if ch ==  'J' { 4 }
-    else if ch ==  'K' { 8 }
-    else if ch ==  'L' { 7 }
-    else if ch ==  'M' { 9 }
-    else if ch ==  'N' { 8 }
-    else if ch ==  'O' { 9 }
-    else if ch ==  'P' { 7 }
-    else if ch ==  'Q' { 9 }
-    else if ch ==  'R' { 7 }
-    else if ch ==  'S' { 7 }
-    else if ch ==  'T' { 9 }
-    else if ch ==  'U' { 8 }
-    else if ch ==  'V' { 9 }
-    else if ch ==  'W' { 11 }
-    else if ch ==  'X' { 8 }
-    else if ch ==  'Y' { 7 }
-    else if ch ==  'Z' { 8 }
-    else if ch ==  '[' { 2 }
-    else if ch ==  '\\' { 6 }
-    else if ch ==  ']' { 2 }
-    else if ch ==  '^' { 5 }
-    else if ch ==  '_' { 9 }
-    else if ch ==  '`' { 2 }
-    else if ch ==  'a' { 6 }
-    else if ch ==  'b' { 7 }
-    else if ch ==  'c' { 6 }
-    else if ch ==  'd' { 7 }
-    else if ch ==  'e' { 7 }
-    else if ch ==  'f' { 5 }
-    else if ch ==  'g' { 7 }
-    else if ch ==  'h' { 7 }
-    else if ch ==  'i' { 2 }
-    else if ch ==  'j' { 3 }
-    else if ch ==  'k' { 6 }
-    else if ch ==  'l' { 1 }
-    else if ch ==  'm' { 11 }
-    else if ch ==  'n' { 6 }
-    else if ch ==  'o' { 7 }
-    else if ch ==  'p' { 7 }
-    else if ch ==  'q' { 7 }
-    else if ch ==  'r' { 5 }
-    else if ch ==  's' { 6 }
-    else if ch ==  't' { 5 }
-    else if ch ==  'u' { 7 }
-    else if ch ==  'v' { 6 }
-    else if ch ==  'w' { 9 }
-    else if ch ==  'x' { 6 }
-    else if ch ==  'y' { 6 }
-    else if ch ==  'z' { 6 }
-    else if ch ==  '{' { 6 }
-    else if ch ==  '|' { 1 }
-    else if ch ==  '}' { 6 }
-    else if ch ==  '~' { 7 }
-    else if ch ==  ' ' { ZH_WIDTH/2 }
+    if ch ==  ' ' { return ZH_WIDTH/2 ; }
+    let width = {
+         if ch == '"' { 3 } else if ch == '#' { 8 } else if ch == '$' { 7 } else if ch == '%' { 9 } else if ch == '&' { 8 } else if ch == '\'' { 1 } else if ch == '(' { 4 } else if ch == ')' { 4 } else if ch == '*' { 7 } else if ch == '+' { 11 } else if ch == ',' { 2 } else if ch == '-' { 4 } else if ch == '.' { 2 } else if ch == '/' { 6 } else if ch == '0' { 7 } else if ch == '1' { 5 } else if ch == '2' { 7 } else if ch == '3' { 7 } else if ch == '4' { 7 } else if ch == '5' { 7 } else if ch == '6' { 7 } else if ch == '7' { 7 } else if ch == '8' { 7 } else if ch == '9' { 7 } else if ch == ':' { 2 } else if ch == ';' { 2 } else if ch == '<' { 9 } else if ch == '=' { 10 } else if ch == '>' { 9 } else if ch == '?' { 6 } else if ch == '@' { 9 } else if ch == 'A' { 9 } else if ch == 'B' { 7 } else if ch == 'C' { 8 } else if ch == 'D' { 8 } else if ch == 'E' { 7 } else if ch == 'F' { 6 } else if ch == 'G' { 8 } else if ch == 'H' { 8 } else if ch == 'I' { 3 } else if ch == 'J' { 4 } else if ch == 'K' { 8 } else if ch == 'L' { 7 } else if ch == 'M' { 9 } else if ch == 'N' { 8 } else if ch == 'O' { 9 } else if ch == 'P' { 7 } else if ch == 'Q' { 9 } else if ch == 'R' { 7 } else if ch == 'S' { 7 } else if ch == 'T' { 9 } else if ch == 'U' { 8 } else if ch == 'V' { 9 } else if ch == 'W' { 11 } else if ch == 'X' { 8 } else if ch == 'Y' { 7 } else if ch == 'Z' { 8 } else if ch == '[' { 2 } else if ch == '\\' { 6 } else if ch == ']' { 2 } else if ch == '^' { 5 } else if ch == '_' { 9 } else if ch == '`' { 2 } else if ch == 'a' { 6 } else if ch == 'b' { 7 } else if ch == 'c' { 6 } else if ch == 'd' { 7 } else if ch == 'e' { 7 } else if ch == 'f' { 5 } else if ch == 'g' { 7 } else if ch == 'h' { 7 } else if ch == 'i' { 2 } else if ch == 'j' { 3 } else if ch == 'k' { 6 } else if ch == 'l' { 1 } else if ch == 'm' { 11 } else if ch == 'n' { 6 } else if ch == 'o' { 7 } else if ch == 'p' { 7 } else if ch == 'q' { 7 } else if ch == 'r' { 5 } else if ch == 's' { 6 } else if ch == 't' { 5 } else if ch == 'u' { 7 } else if ch == 'v' { 6 } else if ch == 'w' { 9 } else if ch == 'x' { 6 } else if ch == 'y' { 6 } else if ch == 'z' { 6 } else if ch == '{' { 6 } else if ch == '|' { 1 } else if ch == '}' { 6 }
+        else if ch == '~' { 7 }else { 0 }
+    };
+    if width > 0{
+        width + 2
+    }
     else{  0 }
 
 }

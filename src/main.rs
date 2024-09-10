@@ -57,7 +57,7 @@ use embedded_hal::spi::*;
 use esp_hal::spi::master::*;
 use embedded_hal_bus::spi::{CriticalSectionDevice, ExclusiveDevice};
 use epd_waveshare::color::{Black, Color, White};
-use epd_waveshare::epd2in9::{Display2in9, Epd2in9};
+
 use epd_waveshare::prelude::{Display, RefreshLut, WaveshareDisplay};
 use heapless::{String, Vec};
 use log::{debug, error, trace};
@@ -143,7 +143,7 @@ async fn main(spawner: Spawner) {
 
     let sdcard_cs = Output::new(io.pins.gpio0,esp_hal::gpio::Level::High );
 
-    let spi = Spi::new(peripherals.SPI2, 10000_u32.kHz(), SpiMode::Mode0, &clocks)
+    let spi = Spi::new(peripherals.SPI2, 32u32.MHz(), SpiMode::Mode0, &clocks)
         .with_sck(epd_sclk)
         .with_miso(epd_miso)
         .with_mosi(epd_mosi);
@@ -170,7 +170,7 @@ async fn main(spawner: Spawner) {
     trace!("test trace");
     spawner.spawn(display::render(spi_bus_epd,epd_busy,epd_rst,epd_dc)).ok();
 
-    let mut display: Display2in9 = Display2in9::default();
+    let mut display:display::EpdDisplay = display::EpdDisplay::default();
     use embedded_graphics::draw_target::DrawTarget;
 
 
@@ -185,17 +185,7 @@ async fn main(spawner: Spawner) {
     let mut sd_mount = SdMount::new(volume_mgr);
     crate::sd_mount::SD_MOUNT.lock().await.replace(sd_mount);
 
-
-
     spawner.spawn(pages::main_task(spawner.clone())).ok();
-    Timer::after_millis(10).await;
-
-
-    loop{
-        Timer::after_secs(1).await;
-    }
-
-
 
     loop{
         Timer::after_secs(1).await;
@@ -218,7 +208,7 @@ fn alloc(){
     static ALLOCATOR: embedded_alloc::Heap = embedded_alloc::Heap::empty();
     unsafe { ALLOCATOR.init(&mut HEAP as *const u8 as usize, core::mem::size_of_val(&HEAP)) };
 }
-fn draw_text(display: &mut Display2in9, text: &str, x: i32, y: i32) {
+fn draw_text(display: &mut  display::EpdDisplay , text: &str, x: i32, y: i32) {
     let style = MonoTextStyleBuilder::new()
         .font(&embedded_graphics::mono_font::ascii::FONT_6X10)
         .text_color(White)

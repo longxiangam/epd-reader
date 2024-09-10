@@ -22,7 +22,7 @@ use crate::widgets::list_widget::ListWidget;
 
 const PAGES_VEC_MAX:usize = epd2in9_txt::PAGES_VEC_MAX;
 const LOG_VEC_MAX:usize = epd2in9_txt::LOG_VEC_MAX;
-
+const ONE_PAGE_CONTENT_LEN:usize = epd2in9_txt::ONE_PAGE_CONTENT_LEN;
 pub struct ReadPage{
     running:bool,
     reading:bool,
@@ -39,7 +39,7 @@ pub struct ReadPage{
     book_pages:Option<BookPages>,
     log_vec:Option<Vec<u32,LOG_VEC_MAX>>,
     page_index:u32,
-    page_content:String<1000>,
+    page_content:String<ONE_PAGE_CONTENT_LEN>,
 }
 
 impl ReadPage{
