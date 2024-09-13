@@ -17,6 +17,10 @@ mod worldtime;
 mod pages;
 mod display;
 mod widgets;
+mod model;
+mod weather;
+mod request;
+mod random;
 
 extern crate alloc;
 use alloc::{format, vec};
@@ -46,11 +50,11 @@ use esp_println::{logger::init_logger, print, println};
 use esp_hal::prelude::{_fugit_RateExtU32, main};
 use esp_hal::{Cpu, dma_descriptors, entry};
 
-use esp_hal::gpio::{Input, Io, Output, Pull};
+use esp_hal::gpio::{DriveStrength, Input, Io, Output, Pull};
 use esp_hal::peripheral::Peripheral;
 use esp_hal::spi::master::Spi;
 use esp_hal::spi::SpiMode;
-
+use esp_hal::rng::Rng;
 use embassy_time::Delay;
 
 use embedded_hal::spi::*;
@@ -82,7 +86,7 @@ use embedded_graphics::text::renderer::TextRenderer;
 use embedded_hal::delay::DelayNs;
 use epd_waveshare::graphics::DisplayRotation;
 use futures::SinkExt;
-
+use esp_hal::rtc_cntl::Rtc;
 use esp_hal::clock::Clocks;
 use esp_hal::peripherals::SPI2;
 use static_cell::StaticCell;
@@ -100,38 +104,42 @@ async fn main(spawner: Spawner) {
     println!("entry");
     let mut peripherals = Peripherals::take();
 
-    let mut system = SystemControl::new(unsafe{peripherals.SYSTEM.clone_unchecked()});
+    let mut system = SystemControl::new(peripherals.SYSTEM);
 
-    let clocks = ClockControl::max(system.clock_control).freeze();
+    let clocks_val = ClockControl::max(system.clock_control).freeze();
+    let clocks  = make_static!(Clocks,clocks_val);
 
-    let systimer = esp_hal::timer::systimer::SystemTimer::new(peripherals.SYSTIMER);
+    let mut rtc = Rtc::new(peripherals.LPWR);
+    crate::sleep:: RTC_MANGE.lock().await.replace(rtc);
+    unsafe {
+         CLOCKS_REF.replace(clocks);
+    }
 
-    let timg0 = TimerGroup::new(unsafe{peripherals.TIMG0.clone_unchecked()}, &clocks);
-    esp_hal_embassy::init(&clocks, timg0.timer0);
-   /* let stack =  crate::wifi::connect_wifi(&spawner,
+    use esp_hal::timer::systimer::{SystemTimer, Target};
+    let systimer = esp_hal::timer::systimer::SystemTimer::new(peripherals.SYSTIMER).split::<Target>();
+    esp_hal_embassy::init(&clocks, systimer.alarm0);
+
+
+    //init_logger(log::LevelFilter::Trace);
+    trace!("test trace");
+    let stack =  crate::wifi::connect_wifi(&spawner,
                                            peripherals.TIMG0,
                                            Rng::new(peripherals.RNG),
                                            peripherals.WIFI,
                                            peripherals.RADIO_CLK,
                                            &clocks).await;
     spawner.spawn(crate::worldtime::ntp_worker()).ok();
-    loop {
-        if let Some(clock) = worldtime:: get_clock(){
-            let local = clock.local().await;
-            let hour = local.hour();
-            let minute = local.minute();
-            let second = local.second();
-            let str = format_args!("{:02}:{:02}:{:02}",hour,minute,second).to_string();
+    spawner.spawn(crate::weather::weather_worker()).ok();
 
-            println!("Current_time: {} {}", clock.get_date_str().await,str);
-        }
-        Timer::after(Duration::from_secs(10)).await;
-
-    }*/
 
     spawner.spawn(main_loop()).ok();
 
     let mut io = Io::new(peripherals.GPIO, peripherals.IO_MUX);
+    Output::new(io.pins.gpio12,esp_hal::gpio::Level::Low ).set_low();
+    let mut io13 = Output::new(io.pins.gpio13,esp_hal::gpio::Level::Low );
+    io13.set_drive_strength(DriveStrength::I5mA);
+    io13.set_low();
+    
     let epd_busy = io.pins.gpio6;
     let epd_rst =  io.pins.gpio7;
     let epd_dc = io.pins.gpio5;
@@ -139,7 +147,7 @@ async fn main(spawner: Spawner) {
     let epd_sclk = io.pins.gpio2;
     let epd_mosi = io.pins.gpio3;
     let epd_miso = io.pins.gpio10;
-    let epd_cs_ph = Output::new(io.pins.gpio13,esp_hal::gpio::Level::High);
+
 
     let sdcard_cs = Output::new(io.pins.gpio0,esp_hal::gpio::Level::High );
 
@@ -166,8 +174,7 @@ async fn main(spawner: Spawner) {
     let spi_bus_epd = make_static!(CriticalSectionDevice<Spi<SPI2, FullDuplexMode>, Output<Gpio1>, Delay>,spi_bus_epd);
     let font: FontRenderer = FontRenderer::new::<fonts::u8g2_font_wqy15_t_gb2312>();
     let mut font = font.with_ignore_unknown_chars(true);
-    //init_logger(log::LevelFilter::Trace);
-    trace!("test trace");
+
     spawner.spawn(display::render(spi_bus_epd,epd_busy,epd_rst,epd_dc)).ok();
 
     let mut display:display::EpdDisplay = display::EpdDisplay::default();
@@ -186,9 +193,25 @@ async fn main(spawner: Spawner) {
     crate::sd_mount::SD_MOUNT.lock().await.replace(sd_mount);
 
     spawner.spawn(pages::main_task(spawner.clone())).ok();
+/*    let rtc_io_0 = make_static!(Gpio5, io.pins.gpio5);
+    let rtc_io_1 = make_static!(Gpio1, io.pins.gpio1);
+    let rtc_io_2 = make_static!(Gpio0, io.pins.gpio0);
 
-    loop{
-        Timer::after_secs(1).await;
+    add_rtcio( rtc_io_2,  WakeupLevel::Low).await;
+    add_rtcio( rtc_io_a,  WakeupLevel::Low).await;
+    add_rtcio( rtc_io_b,  WakeupLevel::Low).await;*/
+    loop {
+        if let Some(clock) = worldtime:: get_clock(){
+            let local = clock.local().await;
+            let hour = local.hour();
+            let minute = local.minute();
+            let second = local.second();
+            let str = format_args!("{:02}:{:02}:{:02}",hour,minute,second).to_string();
+
+            println!("Current_time: {} {}", clock.get_date_str().await,str);
+        }
+        Timer::after(Duration::from_secs(10)).await;
+
     }
 }
 
@@ -202,7 +225,7 @@ async fn main_loop(){
 
 fn alloc(){
     // -------- Setup Allocator --------
-    const HEAP_SIZE: usize = 5 * 1024;
+    const HEAP_SIZE: usize = 20 * 1024;
     static mut HEAP: [u8; HEAP_SIZE] = [0; HEAP_SIZE];
     #[global_allocator]
     static ALLOCATOR: embedded_alloc::Heap = embedded_alloc::Heap::empty();

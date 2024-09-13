@@ -65,7 +65,7 @@ pub async  fn render(mut spi_device: &'static mut ActualSpi,
 
     let mut epd = EpdControl::new(&mut spi_device,  busy, dc, rst, &mut Delay).unwrap();
     let mut display: EpdDisplay = EpdDisplay::default();
-    display.set_rotation(DisplayRotation::Rotate90);
+    //display.set_rotation(DisplayRotation::Rotate90);
     display.clear_buffer(Color::White);
 
     let receiver = RENDER_CHANNEL.receiver();

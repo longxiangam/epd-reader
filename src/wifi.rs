@@ -76,7 +76,7 @@ pub async fn connect_wifi(spawner: &Spawner,
                           radio_clk: RADIO_CLK,
                           clocks: &Clocks<'_> )
     -> Result<&'static Stack<WifiDevice<'static, WifiStaDevice>>, WifiNetError> {
-    REINIT_WIFI_SIGNAL.wait().await;
+    //REINIT_WIFI_SIGNAL.wait().await;
     HAL_RNG.lock().await.replace(rng);
 
     let timer = esp_hal::timer::timg::TimerGroup::new(timg0, &clocks);

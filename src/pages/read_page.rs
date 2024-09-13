@@ -5,7 +5,7 @@ use embassy_time::{Instant, Timer};
 use embedded_graphics::Drawable;
 use embedded_graphics::prelude::{Dimensions, Point, Size};
 use epd_waveshare::color::{Black, Color,White};
-use epd_waveshare::graphics::Display;
+use epd_waveshare::graphics::{Display, DisplayRotation};
 use esp_println::{print, println};
 use futures::FutureExt;
 use heapless::{String, Vec};
@@ -272,9 +272,12 @@ impl Page for ReadPage{
     }
 
     async fn run(&mut self, spawner: Spawner) {
+        if let Some(display) = display_mut() {
+           display.set_rotation(DisplayRotation::Rotate90);
+        }
         self.running = true;
         self.need_render = true;
-        *event::ENABLE_DOUBLE.lock().await = true;
+        //*event::ENABLE_DOUBLE.lock().await = true;
         //读sd卡目录
         if let Some(ref mut sd) =  *SD_MOUNT.lock().await {
 
@@ -322,8 +325,10 @@ impl Page for ReadPage{
                 }
             }
         }
-        *event::ENABLE_DOUBLE.lock().await = false;
-
+        //*event::ENABLE_DOUBLE.lock().await = false;
+        if let Some(display) = display_mut() {
+            display.set_rotation(DisplayRotation::Rotate0);
+        }
     }
 
     async fn bind_event(&mut self) {

@@ -8,6 +8,7 @@ pub mod main_page;
 mod calendar_page;
 mod read_page;
 mod read_menu_page;
+mod weather_page;
 
 enum PageEnum {
     EMainPage,

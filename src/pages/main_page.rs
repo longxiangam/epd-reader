@@ -28,6 +28,7 @@ use crate::pages::PageEnum::{ECalendarPage, EChip8Page, EClockPage, EReadPage, E
 use crate::widgets::list_widget::ListWidget;
 use u8g2_fonts::fonts;
 use crate::pages::read_page::ReadPage;
+use crate::pages::weather_page::WeatherPage;
 
 static MAIN_PAGE:Mutex<CriticalSectionRawMutex,Option<MainPage> > = Mutex::new(None);
 
@@ -170,7 +171,7 @@ impl Page for  MainPage{
                 let mut list_widget = ListWidget::new(Point::new(0, 0)
                                                       , Black
                                                       , White
-                                                      , Size::new(display.bounding_box().size.height,display.bounding_box().size.width)
+                                                      ,display.bounding_box().size
                                                       , menus
                 );
                 list_widget.choose(self.choose_index as usize);
@@ -214,13 +215,16 @@ impl Page for  MainPage{
                     self.back().await;
                 }
                 EClockPage => {
-
+                    self.back().await;
                 }
                 ETimerPage => {
-
+                    self.back().await;
                 }
                 EWeatherPage => {
-
+                    let mut weather_page = WeatherPage::new();
+                    weather_page.bind_event().await;
+                    weather_page.run(spawner).await;
+                    self.back().await;
                 }
                 ECalendarPage => {
                     let mut calendar_page = CalendarPage::new();
@@ -228,11 +232,8 @@ impl Page for  MainPage{
                     calendar_page.run(spawner).await;
                     self.back().await;
                 }
-                EChip8Page => {
-
-                }
                 ESettingPage =>{
-
+                    self.back().await;
                 }
                 _ => { self.back().await;}
             }

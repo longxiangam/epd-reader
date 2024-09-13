@@ -43,7 +43,7 @@ embedded-tls={version = "0.17"  , default-features = false}
 sntpc = {version = "0.3",features = ["async"] , default-features = false}
 rand_core = { version = "0.6.4" , default-features = false ,features = ["alloc"]}
 micromath = {version = "2.1.0"}
-
+mini-json={git="https://github.com/longxiangam/mini-json"}
 
 
 wavv = { version = "0.1.4" }

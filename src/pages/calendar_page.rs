@@ -81,12 +81,25 @@ impl Page for CalendarPage {
     async fn run(&mut self, spawner: Spawner) {
         self.running = true;
         refresh_active_time().await;
+        let mut refresh_time = None;
         loop {
             if !self.running {
                 break;
             }
 
-            self.need_render = true;
+            match refresh_time {
+                Some(v) => {
+                    if Instant::now().duration_since(v).as_secs() > 3600   {
+                        self.need_render = true;
+                        refresh_time = Some(Instant::now());
+                    }
+                }
+                None=>{
+                    self.need_render = true;
+                    refresh_time = Some(Instant::now());
+                }
+            }
+
             self.render().await;
 
             if sync_time_success() {
