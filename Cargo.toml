@@ -1,5 +1,5 @@
 [package]
-name = "sdcard"
+name = "epd-reader"
 version = "0.1.0"
 edition = "2021"
 
@@ -54,7 +54,7 @@ qrcodegen-no-heap ={version = "1.8"}
 dhcparse ={version = "1.0.0",default-features = false}
 httparse ={version = "1.9.3",default-features = false}
 embedded-sdmmc = {version = "0.8.0"}
-epd-waveshare = {path="../../lcd_drivers/epd-waveshare-modify"}
+epd-waveshare = {path="../lcd_drivers/epd-waveshare-modify"}
 
 [patch.crates-io]
 #embassy-executor-macros = { git = 'https://github.com/embassy-rs/embassy' }
