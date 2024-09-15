@@ -5,7 +5,6 @@ edition = "2021"
 
 [dependencies]
 esp-hal = { package = "esp-hal", version = "0.19.0", default-features = false  ,features = ["esp32c3","async"]}
-#esp-hal = { package = "esp-hal", version = "0.19.0" ,git="https://github.com/esp-rs/esp-hal", default-features = false  ,features = ["esp32c3","async"]}
 esp-backtrace = { version = "0.13.0", features = ["esp32c3", "panic-handler", "exception-handler","println"] }
 esp-println       = { version = "0.10.0", features = ["esp32c3","log"] }
 esp-wifi = {version = "0.7.0", features = ["esp32c3", "async", "wifi","embassy-net","tcp","udp"] }
@@ -44,9 +43,6 @@ sntpc = {version = "0.3",features = ["async"] , default-features = false}
 rand_core = { version = "0.6.4" , default-features = false ,features = ["alloc"]}
 micromath = {version = "2.1.0"}
 mini-json={git="https://github.com/longxiangam/mini-json"}
-
-
-wavv = { version = "0.1.4" }
 
 eg-seven-segment ={version = "0.2"}
 
