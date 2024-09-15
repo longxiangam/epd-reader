@@ -42,16 +42,14 @@ embedded-tls={version = "0.17"  , default-features = false}
 sntpc = {version = "0.3",features = ["async"] , default-features = false}
 rand_core = { version = "0.6.4" , default-features = false ,features = ["alloc"]}
 micromath = {version = "2.1.0"}
-mini-json={git="https://github.com/longxiangam/mini-json"}
-
 eg-seven-segment ={version = "0.2"}
-
 qrcodegen-no-heap ={version = "1.8"}
 dhcparse ={version = "1.0.0",default-features = false}
 httparse ={version = "1.9.3",default-features = false}
 embedded-sdmmc = {version = "0.8.0"}
-epd-waveshare = {path="../lcd_drivers/epd-waveshare-modify"}
 
+epd-waveshare = {git="https://github.com/longxiangam/epd-waveshare-modify"}
+mini-json={git="https://github.com/longxiangam/mini-json"}
 [patch.crates-io]
 #embassy-executor-macros = { git = 'https://github.com/embassy-rs/embassy' }
 esp-hal = { git = 'https://github.com/esp-rs/esp-hal' }
