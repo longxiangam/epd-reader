@@ -79,6 +79,10 @@ impl<C> Drawable for Calendar<C>
         // 使用 display.clipped 包裹裁剪区域
         let mut clipped_display = display.clipped(&clipping_area);
 
+        let year_style = U8g2TextStyle::new(fonts::u8g2_font_wqy16_t_gb2312b, self.front_color);
+        let year_text_style = TextStyleBuilder::new().baseline(Baseline::Middle)
+            .alignment(Alignment::Center).build();
+        
         let style = U8g2TextStyle::new(fonts::u8g2_font_wqy12_t_gb2312b, self.front_color);
         let text_style = TextStyleBuilder::new().baseline(Baseline::Middle)
             .alignment(Alignment::Center).build();
@@ -91,24 +95,25 @@ impl<C> Drawable for Calendar<C>
 
         let year = self.month_first_day.year();
         let month = self.month_first_day.month();
-        let title_height = 12;
+        let title_height = 20;
 
         let title_rect = Rectangle::new(self.position,Size::new(self.size.width,title_height));
         // 绘制月份和年份
         let month_year = format!("{}-{}", year, month as u8);
-        Text::with_text_style(&month_year, title_rect.center(), style.clone(), text_style)
+        Text::with_text_style(&month_year, title_rect.center(), year_style, year_text_style)
             .draw(&mut clipped_display)?;
+        let header_height = 12;
 
         //计算小格大小与位置
         let grid_width = self.size.width / 7; //7列
-        let grid_height = ( self.size.height - title_height ) / 7;//加表头7行
+        let grid_height = ( self.size.height - title_height - header_height ) / 6;//加表头6行
         let mut rect = Rectangle::new(Point::zero(), Size::new(grid_width, grid_height));
 
 
 
         // 绘制星期标题
         let days = ["日", "一", "二", "三", "四", "五", "六"];
-        let top = grid_height ;
+        let top =  header_height ;
 
         for (i, &day) in days.iter().enumerate() {
             rect.top_left = self.position + Point::new(i as i32 * grid_width as i32, top as i32);

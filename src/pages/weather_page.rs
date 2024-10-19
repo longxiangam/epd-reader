@@ -4,7 +4,7 @@ use alloc::string::{String, ToString};
 use core::future::Future;
 use eg_seven_segment::SevenSegmentStyleBuilder;
 use embassy_executor::Spawner;
-use embassy_time::{Duration, Timer};
+use embassy_time::{Duration, Instant, Timer};
 use embedded_graphics::Drawable;
 use embedded_graphics::geometry::{Point, Size};
 use embedded_graphics::mono_font::MonoTextStyleBuilder;
@@ -29,6 +29,7 @@ use crate::model::seniverse::{DailyResult, form_json};
 use crate::pages::Page;
 use crate::request::RequestClient;
 use crate::weather::{get_weather, WEATHER_SYNC_SUCCESS};
+use crate::widgets::calendar::Calendar;
 use crate::wifi::{finish_wifi, use_wifi, WIFI_STATE};
 use crate::worldtime::{get_clock, sync_time_success};
 
@@ -90,7 +91,7 @@ impl Page for  WeatherPage{
                 let _ = display.clear_buffer(White);
 
                 let style =
-                    U8g2TextStyle::new(fonts::u8g2_font_wqy12_t_gb2312b, Black);
+                    U8g2TextStyle::new(fonts::u8g2_font_wqy16_t_gb2312, Black);
 
 
 
@@ -107,14 +108,15 @@ impl Page for  WeatherPage{
 
                         if let Some(weather) = weather.daily_result.lock().await.as_mut() {
 
-                            let mut y = 10;
+                            let x = 100;
+                            let mut y = display.size().height - 45;
                             for one in weather.daily.iter() {
                                 let (year, date) = one.date.split_once('-').unwrap();
                                 let date = date.replace("-",".");
                                 let str = format_args!("{} {}/{},{}/{}℃,湿:{}%,风:{}"
                                                        ,date,one.text_day,one.text_night,one.low,one.high,one.humidity,one.wind_scale).to_string();
-                                let _ = Text::new(str.as_str(), Point::new(0, y), style.clone()).draw(display);
-                                y+=15;
+                                let _ = Text::new(str.as_str(), Point::new(x, y as i32), style.clone()).draw(display);
+                                y+=20;
                             }
 
                         }
@@ -132,40 +134,33 @@ impl Page for  WeatherPage{
                         let second = local.second();
 
 
-                        let str = format_args!("{:02}:{:02}:{:02}",hour,minute,second).to_string();
+                        let str = format_args!("{:02}:{:02}",hour,minute).to_string();
 
                         let date = clock.get_date_str().await;
                         let week = clock.get_week_day().await;
 
                         Self::draw_clock(display,str.as_str());
+                        //因为进行了旋转，这里宽高互换
+                        let height = display.size().height;
+                        let width = display.size().width;
 
-                        let font: FontRenderer = FontRenderer::new::<fonts::u8g2_font_wqy16_t_gb2312>();
-                        let date_rect = Rectangle::new(Point::new((display.size().width - 80) as i32, (display.size().height - 35) as i32)
-                                                       , Size::new(80,20));
-                        let week_rect = Rectangle::new(Point::new((display.size().width - 80) as i32, (display.size().height - 15) as i32)
-                                                       , Size::new(80,20));
+                
+                        let calendar_rect = Rectangle::new(Point::new( 0, 0)
+                                                       , Size::new(width,height - 45));
+                 
 
-                        let _ = font.render_aligned(
-                            format_args!("{} ",date),
-                            date_rect.center(),
-                            VerticalPosition::Center,
-                            HorizontalAlignment::Center,
-                            FontColor::Transparent(Black),
-                            display,
-                        );
 
-                        let _ = font.render_aligned(
-                            format_args!("{} ",week),
-                            week_rect.center(),
-                            VerticalPosition::Center,
-                            HorizontalAlignment::Center,
-                            FontColor::Transparent(Black),
-                            display,
-                        );
-
+                        let local = clock.local().await;
+                        let year = local.year();
+                        let month = local.month();
+                        let today = local.date();
+                        let mut calendar = Calendar::new(Point::default(), Size::default(), year, month, today, Black, epd_waveshare::color::White);
+                        calendar.position = calendar_rect.top_left;
+                        calendar.size = calendar_rect.size;
+                        calendar.draw(display);
                     }
                 }else if(wifi_finish){
-                    let _ = Text::new("正在同步时间...", Point::new(0, 60), style.clone())
+                    let _ = Text::new("正在同步时间...", Point::new(0, 200), style.clone())
                         .draw(display);
                 }
                 RENDER_CHANNEL.send(RenderInfo { time: 0,need_sleep:true }).await;
@@ -179,12 +174,28 @@ impl Page for  WeatherPage{
         if let None = self.weather_data{
             //self.request().await;
         }
+        let mut last_refresh_time = Instant::now();
+        self.need_render = true;
+        let mut wait_sync_time =true;
         loop {
 
             if !self.running {
                 break;
             }
-            self.need_render = true;
+            
+            if sync_time_success() {
+                
+                if Instant::now().duration_since(last_refresh_time).as_secs() > 60 || wait_sync_time {
+                    wait_sync_time = false;
+                    self.need_render = true;
+                    last_refresh_time = Instant::now();
+                } 
+            }else{
+                if Instant::now().duration_since(last_refresh_time).as_secs() > 5 {
+                    self.need_render = true;
+                    last_refresh_time = Instant::now();
+                }
+            }
             self.render().await;
 
             Timer::after(Duration::from_millis(50)).await;
