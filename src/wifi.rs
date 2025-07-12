@@ -76,7 +76,10 @@ pub async fn connect_wifi(spawner: &Spawner,
                           radio_clk: RADIO_CLK,
                           clocks: &Clocks<'_> )
     -> Result<&'static Stack<WifiDevice<'static, WifiStaDevice>>, WifiNetError> {
-    //REINIT_WIFI_SIGNAL.wait().await;
+    println!("wait init wifi");
+    REINIT_WIFI_SIGNAL.wait().await;
+
+    println!("init wifi");
     HAL_RNG.lock().await.replace(rng);
 
     let timer = esp_hal::timer::timg::TimerGroup::new(timg0, &clocks);
@@ -111,8 +114,7 @@ pub async fn connect_wifi(spawner: &Spawner,
         seed
     ));
 
-
-    LAST_USE_TIME_SECS.lock().await.replace(Instant::now().as_secs());
+    refresh_last_time().await;
 
     spawner.spawn(connection_wifi(controller)).ok();
     spawner.spawn(net_task(stack)).ok();
@@ -228,6 +230,7 @@ async fn connection_wifi(mut controller: WifiController<'static>) {
 
 pub async fn refresh_last_time(){
     LAST_USE_TIME_SECS.lock().await.replace(Instant::now().as_secs());
+    crate::sleep::refresh_active_time().await;
 }
 
 
@@ -236,9 +239,14 @@ const TIME_OUT_SECS: u64 = 10;
 static WIFI_LOCK:Mutex<CriticalSectionRawMutex,bool> = Mutex::new(false);
 pub async fn use_wifi() ->Result<&'static Stack<WifiDevice<'static, WifiStaDevice>>, WifiNetError>{
     let secs = Instant::now().as_secs();
+
+    println!("wifi state: {:?}",*WIFI_STATE.lock().await);
     if *WIFI_STATE.lock().await == None {
+
+        println!("need init wifi");
         REINIT_WIFI_SIGNAL.signal(());
         loop {
+            refresh_last_time().await;
             if *WIFI_STATE.lock().await != None { break; }
             if Instant::now().as_secs() - secs > 3 {
                 return Err(WifiNetError::WaitConnecting);
@@ -255,7 +263,7 @@ pub async fn use_wifi() ->Result<&'static Stack<WifiDevice<'static, WifiStaDevic
     }
 
 
-
+    let mut try_times = 10; 
     loop {
         refresh_last_time().await;
         println!("use_wifi Waiting is_link_up...");
@@ -264,6 +272,7 @@ pub async fn use_wifi() ->Result<&'static Stack<WifiDevice<'static, WifiStaDevic
                 if v.is_link_up() {
 
                     loop {
+                        refresh_last_time().await;
                         if !*WIFI_LOCK.lock().await  {
                             break;
                         }
@@ -279,16 +288,18 @@ pub async fn use_wifi() ->Result<&'static Stack<WifiDevice<'static, WifiStaDevic
                 }else if Instant::now().as_secs() - secs > TIME_OUT_SECS {
                     return Err(WifiNetError::TimeOut);
                 }
-            }else{
+            }else if try_times == 0 {
                 return Err(WifiNetError::Infallible);
             }
+
+            try_times-=1;
         }
         Timer::after(Duration::from_millis(500)).await;
     }
 }
 
 pub async fn finish_wifi(){
-
+    refresh_last_time().await;
     *WIFI_LOCK.lock().await   = false;
     println!("finish_wifi");
 }
@@ -301,7 +312,7 @@ async fn do_stop(){
             if Instant::now().as_secs() - LAST_USE_TIME_SECS.lock().await.unwrap() > HOW_LONG_SECS_CLOSE {
                 println!("do_stop_wifi");
                 STOP_WIFI_SIGNAL.signal(());
-                finish_wifi().await;
+                //finish_wifi().await;
             }
         }
         Timer::after(Duration::from_millis(3000)).await
@@ -309,13 +320,38 @@ async fn do_stop(){
 }
 
 pub async fn force_stop_wifi(){
+    println!("force_stop_wifi:{:?}", *WIFI_STATE.lock().await);
     if *WIFI_STATE.lock().await == None {
         return;
     }
-
+   
     if  WIFI_STATE.lock().await.unwrap() == WifiNetState::WifiStopped {
         return;
     }else{
+        loop {
+            println!("wait unlock wifi");
+            if !*WIFI_LOCK.lock().await  {
+                *WIFI_LOCK.lock().await =  true;
+                break;
+            }
+            Timer::after(Duration::from_millis(50)).await;
+        }
+        
+        //等待任务完成
+        loop  {
+
+            println!("current_secs:{}",Instant::now().as_secs());
+            println!("last_secs:{}",LAST_USE_TIME_SECS.lock().await.unwrap());
+            
+            //wifi 最后更新时间要大于5s 才停止
+            if Instant::now().as_secs() - LAST_USE_TIME_SECS.lock().await.unwrap() >  5{
+                break;
+            }else{
+                println!("wait finish wifi");
+                Timer::after(Duration::from_secs(1)).await;
+            }
+            
+        }
         STOP_WIFI_SIGNAL.signal(());
         loop {
             if  WIFI_STATE.lock().await.unwrap() == WifiNetState::WifiStopped {

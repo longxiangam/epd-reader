@@ -1,11 +1,14 @@
 use alloc::boxed::Box;
 use alloc::format;
 use embassy_executor::Spawner;
-use embassy_time::{Instant, Timer};
+use embassy_time::{Duration, Instant, Timer};
 use embedded_graphics::Drawable;
 use embedded_graphics::prelude::{Dimensions, Point, Size};
 use epd_waveshare::color::{Black, Color,White};
 use epd_waveshare::graphics::{Display, DisplayRotation};
+use esp_hal::macros::ram;
+use esp_hal::reset::get_reset_reason;
+use esp_hal::rtc_cntl::SocResetReason;
 use esp_println::{print, println};
 use futures::FutureExt;
 use heapless::{String, Vec};
@@ -18,6 +21,7 @@ use crate::epd2in9_txt::{BookPages, TxtReader};
 use crate::event::EventType;
 use crate::pages::{ Page};
 use crate::sd_mount::{ActualDirectory, SD_MOUNT, SdMount};
+use crate::sleep::{to_sleep, to_sleep_tips};
 use crate::widgets::list_widget::ListWidget;
 
 const PAGES_VEC_MAX:usize = epd2in9_txt::PAGES_VEC_MAX;
@@ -34,8 +38,8 @@ pub struct ReadPage{
     indexing_process:f32,
 
     choose_index:u32,
-    open_file_name:String<20>,
-    menus:Option<Vec<String<20>,40>>,
+    open_file_name:String<50>,
+    menus:Option<Vec<String<50>,40>>,
     book_pages:Option<BookPages>,
     log_vec:Option<Vec<u32,LOG_VEC_MAX>>,
     page_index:u32,
@@ -55,14 +59,14 @@ impl ReadPage{
         let mut file_len = 0;
         let mut book_pages = None;
         {
-            let mut my_file =books_dir.open_file_in_dir(file_name.as_str(), embedded_sdmmc::Mode::ReadOnly).unwrap();
+            let mut my_file = SdMount::open_file_by_name(books_dir,file_name.as_str(), embedded_sdmmc::Mode::ReadOnly).unwrap();
             file_len = my_file.length();
             my_file.close();
         }
 
         println!("file len:{}", file_len);
         {
-            let mut my_file_index =books_dir.open_file_in_dir(index_name.as_str(), embedded_sdmmc::Mode::ReadOnly);
+            let mut my_file_index = SdMount::open_file_by_name(books_dir,index_name.as_str(), embedded_sdmmc::Mode::ReadOnly);
             if let Ok(mut mfi) = my_file_index {
                 println!("idx len:{}", mfi.length());
                 if (mfi.length() == 0) {
@@ -118,7 +122,7 @@ impl ReadPage{
         let log_name = format!("{}.log", book_name);
         {
             //读日志
-            let mut my_file =books_dir.open_file_in_dir(log_name.as_str(), embedded_sdmmc::Mode::ReadOnly);
+            let mut my_file =  SdMount::open_file_by_name(books_dir,log_name.as_str(), embedded_sdmmc::Mode::ReadOnly);
             if let Ok(mut f) = my_file {
                 self.log_vec = Some(TxtReader::read_log(&mut f));
                 if let Some(ref lv) = self.log_vec{
@@ -146,16 +150,21 @@ impl ReadPage{
             let mut begin =  0;
             let mut end =  0;
             {
-                let mut index_file =books_dir.open_file_in_dir(index_name.as_str(), embedded_sdmmc::Mode::ReadOnly).unwrap();
-                (begin, end) = bp.get_page_content_position(&mut index_file);
+                let mut index_file = SdMount::open_file_by_name(books_dir,index_name.as_str(), embedded_sdmmc::Mode::ReadOnly);
+                if let Ok(mut index_file) = index_file {
+                    (begin, end) = bp.get_page_content_position(&mut index_file);
+                }
             }
             {
-                let mut my_file =books_dir.open_file_in_dir(file_name.as_str(), embedded_sdmmc::Mode::ReadOnly).unwrap();
-                self.page_content = TxtReader::get_page_content(&mut my_file, begin,end);
-                my_file.close();
+                //let mut my_file =books_dir.open_file_in_dir(file_name.as_str(), embedded_sdmmc::Mode::ReadOnly).unwrap();
+                let mut my_file =  SdMount::open_file_by_name(books_dir,file_name.as_str(), embedded_sdmmc::Mode::ReadOnly);
+                if let Ok(mut my_file) = my_file {
+                    self.page_content = TxtReader::get_page_content(&mut my_file, begin, end);
+                    my_file.close();
+                }
             }
             {
-                let logfile =books_dir.open_file_in_dir(log_name.as_str(), embedded_sdmmc::Mode::ReadWriteCreateOrTruncate);
+                let logfile = SdMount::open_file_by_name(books_dir,log_name.as_str(), embedded_sdmmc::Mode::ReadWriteCreateOrTruncate);
                 if let Ok(mut f) = logfile {
                    epd2in9_txt::TxtReader::save_log(&mut f,self.log_vec.as_mut().unwrap(), self.page_index as u32, false);
                     f.close();
@@ -176,16 +185,18 @@ impl ReadPage{
         self.change_page = true;
         self.need_render = true;
 
-
     }
 
 
 }
+#[ram(rtc_fast)]
+pub static mut PAGE_INDEX:Option<u32>   = None ;
 
 impl Page for ReadPage{
     fn new() -> Self {
+        
 
-        Self{
+       let mut temp  = Self{
             running: false,
             reading: false,
             need_render: false,
@@ -198,9 +209,20 @@ impl Page for ReadPage{
             menus: None,
             book_pages: None,
             log_vec: None,
-            page_index: 0,
+            page_index:0,
             page_content: Default::default(),
-        }
+        };
+
+        unsafe{
+            if let Some(v) = PAGE_INDEX {
+                temp.choose_index = v;
+                temp.change_page = true;
+                temp.reading = true;
+                temp.book_pages = None;
+            }
+        } 
+       
+       temp
     }
 
     async fn render(&mut self) {
@@ -221,6 +243,7 @@ impl Page for ReadPage{
                         display,
                     );
                     println!("显示进度：{}",self.indexing_process);
+                    crate::sleep::refresh_active_time().await;
                 }else {
                     if !self.reading {
                         println!("in render");
@@ -270,6 +293,8 @@ impl Page for ReadPage{
             RENDER_CHANNEL.send(RenderInfo { time: 0,need_sleep:true }).await;
         }
     }
+    
+    
 
     async fn run(&mut self, spawner: Spawner) {
         if let Some(display) = display_mut() {
@@ -296,20 +321,25 @@ impl Page for ReadPage{
 
                                 loop {
                                     if !self.running { break; }
-                                    if let None = self.book_pages {
-                                        self.get_page_vec(&mut books_dir).await;
-                                        self.get_log_vec(&mut books_dir).await;
+                                    if self.menus.as_ref().unwrap().len() > 0 {
+                                        if let None = self.book_pages {
+                                            self.get_page_vec(&mut books_dir).await;
+                                            self.get_log_vec(&mut books_dir).await;
+                                        }
+                                        if self.change_page {
+                                            println!("change_page : {}", self.page_index);
+                                            self.change_page = false;
+                                            self.book_pages.as_mut().unwrap().set_current_page(self.page_index);
+                                            self.get_page_content(&mut books_dir).await;
+                                        }
                                     }
-                                    if self.change_page {
-
-                                        self.change_page = false;
-                                        self.book_pages.as_mut().unwrap().set_current_page(self.page_index);
-                                        self.get_page_content(&mut books_dir).await;
-                                    }
-
+                                    
                                     self.render().await;
 
-                                    Timer::after_millis(1).await;
+
+                                    to_sleep_tips(Duration::from_secs(0), Duration::from_secs(120),true).await;
+                                    
+                                    Timer::after_millis(50).await; 
                                 }
                             }
                         },
@@ -344,11 +374,18 @@ impl Page for ReadPage{
                 let mut_ref:&mut Self =  Self::mut_by_ptr(info.ptr).unwrap();
                 if mut_ref.reading {
                     mut_ref.reading = false;
+                    unsafe {
+                        PAGE_INDEX = None;
+                    }
                 }else{
                     mut_ref.reading = true;
                     mut_ref.change_page = true;
                     mut_ref.page_index = 0;
                     mut_ref.book_pages = None;
+
+                    unsafe {
+                        PAGE_INDEX = Some(mut_ref.choose_index);
+                    }
                 }
                 mut_ref.need_render = true;
 

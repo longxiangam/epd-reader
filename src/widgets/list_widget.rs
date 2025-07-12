@@ -148,7 +148,7 @@ impl <C> Drawable for  ListWidget<C> where C:PixelColor{
 
 
 pub struct ListItemWidget<C>{
-    label:String<20>,
+    label:String<50>,
     position:Point,
     size:Size,
     front_color:C,
@@ -158,7 +158,7 @@ pub struct ListItemWidget<C>{
 }
 
 impl <C: Clone>ListItemWidget<C>{
-    fn new(position: Point,front_color:C,back_color:C,size: Size,label:String<20>) ->Self{
+    fn new(position: Point, front_color:C, back_color:C, size: Size, label:String<50>) ->Self{
 
         Self{
             label,

@@ -50,8 +50,9 @@ impl Page for CalendarPage {
             self.need_render = false;
             if let Some(display) = display_mut() {
                 let _ = display.clear(White);
-
+                
                 if sync_time_success() {
+                   
                     if let Some(clock) = get_clock() {
 
                         let local = clock.local().await;
@@ -65,6 +66,10 @@ impl Page for CalendarPage {
 
 
 
+                    }else{
+                        let style =
+                            U8g2TextStyle::new(fonts::u8g2_font_wqy12_t_gb2312b, Black);
+                        let _ = Text::new("无时间数据", Point::new(0,50), style.clone()).draw(display);
                     }
                 }else{
                     let style =
@@ -87,24 +92,30 @@ impl Page for CalendarPage {
                 break;
             }
 
-            match refresh_time {
-                Some(v) => {
-                    if Instant::now().duration_since(v).as_secs() > 3600   {
+            if sync_time_success() {
+                match refresh_time {
+                    Some(v) => {
+                        if Instant::now().duration_since(v).as_secs() > 3600 {
+                            self.need_render = true;
+                            refresh_time = Some(Instant::now());
+                        }
+                    }
+                    None => {
                         self.need_render = true;
                         refresh_time = Some(Instant::now());
                     }
                 }
-                None=>{
-                    self.need_render = true;
-                    refresh_time = Some(Instant::now());
-                }
+            }else{
+                refresh_active_time().await;
             }
-
+            //时间与显示可能未准备好,延时一下
+            Timer::after(Duration::from_millis(1)).await; 
             self.render().await;
 
             if sync_time_success() {
                 to_sleep(Duration::from_secs(3600), Duration::from_secs(10)).await;
             }
+
             Timer::after(Duration::from_millis(50)).await;
         }
     }
@@ -123,6 +134,7 @@ impl Page for CalendarPage {
             return Box::pin(async move {
                 let mut_ref:&mut Self =  Self::mut_by_ptr(info.ptr).unwrap();
                 refresh_active_time().await;
+                mut_ref.need_render = true;
             });
         }).await;
     }

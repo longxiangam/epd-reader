@@ -291,7 +291,7 @@ pub async fn ntp_worker() {
     }
     //let mut init_page = InitPage::new();
     //init_page.append_log("开始同步时间").await;
-    Timer::after_secs(1).await;
+    //Timer::after_secs(1).await;
     //rtc 是否保存了启动时间
     unsafe {
         if WHEN_SLEEP_TIME_TIMESTAMP > 0 {

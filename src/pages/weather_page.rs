@@ -28,7 +28,8 @@ use crate::event::EventType;
 use crate::model::seniverse::{DailyResult, form_json};
 use crate::pages::Page;
 use crate::request::RequestClient;
-use crate::weather::{get_weather, WEATHER_SYNC_SUCCESS};
+use crate::sleep::{refresh_active_time, to_sleep};
+use crate::weather::{get_weather, sync_weather_success };
 use crate::widgets::calendar::Calendar;
 use crate::wifi::{finish_wifi, use_wifi, WIFI_STATE};
 use crate::worldtime::{get_clock, sync_time_success};
@@ -95,15 +96,9 @@ impl Page for  WeatherPage{
 
 
 
-                let mut wifi_finish = false;
-                if let Some(crate::wifi::WifiNetState::WifiConnecting) = *WIFI_STATE.lock().await {
-                    let _ = Text::new("正在连接网络...", Point::new(0,20), style.clone())
-                        .draw(display);
-                }else{
-                    wifi_finish = true;
-                }
+                
 
-                if *WEATHER_SYNC_SUCCESS.lock().await {
+                if sync_weather_success() {
                     if let Some(weather) = get_weather() {
 
                         if let Some(weather) = weather.daily_result.lock().await.as_mut() {
@@ -122,9 +117,18 @@ impl Page for  WeatherPage{
                         }
                     }
 
-                }else if(wifi_finish){
-                    let _ = Text::new("正在同步天气...", Point::new(0,40), style.clone())
-                        .draw(display);
+                }else {
+                    let mut wifi_finish = false;
+                    if let Some(crate::wifi::WifiNetState::WifiConnecting) = *WIFI_STATE.lock().await {
+                        let _ = Text::new("正在连接网络...", Point::new(0,20), style.clone())
+                            .draw(display);
+                    }else{
+                        wifi_finish = true;
+                    }
+                    if wifi_finish {
+                        let _ = Text::new("正在同步天气...", Point::new(0, 40), style.clone())
+                            .draw(display);
+                    }
                 }
                 if sync_time_success() {
                     if let Some(clock) = get_clock() {
@@ -157,9 +161,9 @@ impl Page for  WeatherPage{
                         let mut calendar = Calendar::new(Point::default(), Size::default(), year, month, today, Black, epd_waveshare::color::White);
                         calendar.position = calendar_rect.top_left;
                         calendar.size = calendar_rect.size;
-                        calendar.draw(display);
+                        let _ = calendar.draw(display);
                     }
-                }else if(wifi_finish){
+                }else{
                     let _ = Text::new("正在同步时间...", Point::new(0, 200), style.clone())
                         .draw(display);
                 }
@@ -174,6 +178,7 @@ impl Page for  WeatherPage{
         if let None = self.weather_data{
             //self.request().await;
         }
+        refresh_active_time().await;
         let mut last_refresh_time = Instant::now();
         self.need_render = true;
         let mut wait_sync_time =true;
@@ -191,23 +196,33 @@ impl Page for  WeatherPage{
                     last_refresh_time = Instant::now();
                 } 
             }else{
+                refresh_active_time().await;
                 if Instant::now().duration_since(last_refresh_time).as_secs() > 5 {
                     self.need_render = true;
                     last_refresh_time = Instant::now();
                 }
             }
+            
+            Timer::after(Duration::from_millis(1)).await;
             self.render().await;
-
+            if sync_time_success() && sync_weather_success() {
+                to_sleep(Duration::from_secs(60), Duration::from_secs(10)).await;
+            }
             Timer::after(Duration::from_millis(50)).await;
         }
     }
 
     async fn bind_event(&mut self) {
         event::clear().await;
-        event::on_target(EventType::KeyShort(1), Self::mut_to_ptr(self), move |ptr| {
+        event::on_target(EventType::KeyShort(1), Self::mut_to_ptr(self), move |info| {
             return Box::pin(async move {
                 if let Some(weather) = get_weather() {
                     weather.request().await;
+                    let mut_ref:&mut Self =  Self::mut_by_ptr(info.ptr).unwrap();
+                    crate::display::QUICKLY_LUT_CHANNEL.send(false).await;
+                    mut_ref.need_render = true;
+                    Timer::after(Duration::from_millis(50)).await;
+                    crate::display::QUICKLY_LUT_CHANNEL.send(true).await;
                 }
             });
         }).await;

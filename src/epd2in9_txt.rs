@@ -23,6 +23,7 @@ use u8g2_fonts::fonts;
 use u8g2_fonts::types::FontColor;
 use u8g2_fonts::types::HorizontalAlignment;
 use crate::epd2in9_txt::CharType::{Ascii, Other, Tail, Zh};
+use crate::pages::read_page::PAGE_INDEX;
 use crate::sd_mount::{ActualDirectory, TimeSource};
 
 #[cfg(feature = "epd2in9")]

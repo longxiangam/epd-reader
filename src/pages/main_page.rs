@@ -1,4 +1,6 @@
 use alloc::boxed::Box;
+use alloc::fmt::format;
+use alloc::string::ToString;
 use heapless::String;
 use heapless::Vec;
 use core::str::FromStr;
@@ -33,7 +35,7 @@ use crate::pages::weather_page::WeatherPage;
 static MAIN_PAGE:Mutex<CriticalSectionRawMutex,Option<MainPage> > = Mutex::new(None);
 
 #[ram(rtc_fast)]
-pub static mut PAGE_INDEX:i32 = -1;
+pub static mut PAGE_INDEX:i32 = 1;
 
 ///每个page 包含状态与绘制与逻辑处理
 ///状态通过事件改变，并触发绘制
@@ -49,7 +51,7 @@ impl MainPage {
 
     pub async fn init(spawner: Spawner){
         let mut page_index = unsafe{ PAGE_INDEX };
-
+        
         MAIN_PAGE.lock().await.replace(MainPage::new());
 
         Self::bind_event(MAIN_PAGE.lock().await.as_mut().unwrap()).await;
@@ -165,6 +167,10 @@ impl Page for  MainPage{
                 self.need_render = false;
 
                 let _ = display.clear_buffer(Color::White);
+                let style =
+                    U8g2TextStyle::new(fonts::u8g2_font_wqy12_t_gb2312b, Black);
+                let str = format_args!(" 进入主页 {}",unsafe{PAGE_INDEX}).to_string();
+                let _ = Text::new(&str, Point::new(0,250), style.clone()).draw(display);
                 let menus:Vec<&str,20> = self.menus.as_ref().unwrap().iter().map(|v|{ v.title.as_str() }).collect();
 
 

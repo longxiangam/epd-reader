@@ -11,7 +11,7 @@ use embedded_hal_bus::spi::{DeviceError, ExclusiveDevice};
 use esp_hal::riscv::_export::critical_section::Mutex;
 use core::{borrow::BorrowMut, cell::RefCell};
 
-use esp_hal::gpio::{Gpio1, Gpio5, Gpio6, Gpio7, Input, Level, Output, NO_PIN, Pull};
+use esp_hal::gpio::{Gpio1, Gpio5, Gpio6, Gpio7, Input, Level, Output, NO_PIN, Pull, Gpio20, Gpio3};
 use esp_hal::peripherals::SPI2;
 
 use epd_waveshare::color::{Black, Color, White};
@@ -52,12 +52,12 @@ pub static mut DISPLAY:Option<EpdDisplay>  = None;
 pub static RENDER_CHANNEL: Channel<CriticalSectionRawMutex,RenderInfo, 64> = Channel::new();
 pub static QUICKLY_LUT_CHANNEL: Channel<CriticalSectionRawMutex,bool, 64> = Channel::new();
 
-type ActualSpi = CriticalSectionDevice<'static,Spi<'static,SPI2, FullDuplexMode>, Output<'static,Gpio1>, Delay>;
+type ActualSpi = CriticalSectionDevice<'static,Spi<'static,SPI2, FullDuplexMode>, Output<'static,Gpio3>, Delay>;
 #[embassy_executor::task]
 pub async  fn render(mut spi_device: &'static mut ActualSpi,
                      mut busy:Gpio6 ,
                            rst:Gpio7,
-                           dc: Gpio5)
+                           dc: Gpio20)
 {
     let busy = Input::new(busy, Pull::Down);
     let rst = Output::new( rst, Level::High);
@@ -157,6 +157,7 @@ pub fn display_mut()->Option<&'static mut EpdDisplay>{
 }
 
 pub async fn show_error(error:&str,need_clear:bool) {
+    embassy_time::Timer::after_secs(1).await;
     if let Some(display) = display_mut() {
         let font: FontRenderer = FontRenderer::new::<fonts::u8g2_font_wqy15_t_gb2312>();
         let mut font = font.with_ignore_unknown_chars(true);
@@ -177,6 +178,29 @@ pub async fn show_error(error:&str,need_clear:bool) {
 
 
 
+
+        RENDER_CHANNEL.send(RenderInfo { time: 0,need_sleep:true }).await;
+        Timer::after_secs(1).await;
+    }
+}
+
+
+pub async fn show_sleep() {
+    embassy_time::Timer::after_secs(1).await;
+    if let Some(display) = display_mut() {
+        let font: FontRenderer = FontRenderer::new::<fonts::u8g2_font_wqy15_t_gb2312>();
+        let mut font = font.with_ignore_unknown_chars(true);
+
+        display.clear_buffer(Color::White);
+        
+        let _ = font.render_aligned(
+            "已进入睡眼状态",
+            Point::new(display.bounding_box().center().x, display.bounding_box().center().y),
+            VerticalPosition::Center,
+            HorizontalAlignment::Center,
+            FontColor::Transparent(Black),
+            display,
+        );
 
         RENDER_CHANNEL.send(RenderInfo { time: 0,need_sleep:true }).await;
         Timer::after_secs(1).await;
