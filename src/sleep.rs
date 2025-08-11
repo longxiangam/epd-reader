@@ -47,19 +47,19 @@ pub async fn to_sleep_tips(sleep_time:Duration,idle_time:Duration,show_sleep:boo
         if sleep_time.as_ticks() > 0{
             ws.push(&wakeup_source);
         }
-        if show_sleep { 
-            crate::display::show_sleep();
+        if show_sleep {
+            crate::display::show_sleep().await;
         }
-        
+
         unsafe {
             WHEN_SLEEP_RTC_MS = get_rtc_ms().await;
-            
+
             EINK_PWER_PIN.lock().await.take().unwrap().set_high();
             SD_PWER_PIN.lock().await.take().unwrap().set_high();
         }
 
         save_time_to_rtc().await;
-     
+
 
         let mut delay = Delay::new(unsafe{CLOCKS_REF.unwrap()});
         RTC_MANGE.lock().await.as_mut().unwrap().sleep_deep(ws.as_slice());

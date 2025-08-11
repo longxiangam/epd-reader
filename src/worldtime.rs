@@ -26,7 +26,7 @@ use crate::sleep::{get_rtc_ms, get_sleep_ms};
 use crate::wifi::{finish_wifi, use_wifi};
 
 
-const POOL_NTP_ADDR: &str = "cn.pool.ntp.org";
+const POOL_NTP_ADDR: [&str;3] = ["ntp.aliyun.com","ntp.tuna.tsinghua.edu.cn","ntp1.aliyun.com"];//cn.pool.ntp.org
 
 #[derive( Debug)]
 pub enum SntpcError {
@@ -37,6 +37,7 @@ pub enum SntpcError {
     DnsEmptyResponse,
     Sntc(sntpc::Error),
     BadNtpResponse,
+    TimeOut,
 }
 
 impl From<SntpcError> for sntpc::Error {
@@ -204,53 +205,69 @@ pub async fn ntp_request(
     clock: &'static Clock,
 ) -> Result<(), SntpcError> {
     println!("Prepare NTP request");
-    let mut addrs = if let Ok(v) =  stack.dns_query(POOL_NTP_ADDR, DnsQueryType::A).await {
-        v
-    }else{
-        return  Err(SntpcError::NoAddr)
-    };
-    let addr = addrs.pop().ok_or(SntpcError::DnsEmptyResponse)?;
-    println!("NTP DNS: {:?}", addr);
 
-    let octets = addr.as_bytes();
-    let ipv4_addr = Ipv4Addr::new(octets[0], octets[1], octets[2], octets[3]);
-    let sock_addr = SocketAddr::new(IpAddr::V4(ipv4_addr), 123);
-
-    let mut rx_buffer = [0; 4096];
-    let mut tx_buffer = [0; 4096];
-    let mut rx_meta = [PacketMetadata::EMPTY; 16];
-    let mut tx_meta = [PacketMetadata::EMPTY; 16];
-
-    let mut socket = UdpSocket::new(
-        stack,
-        &mut rx_meta,
-        &mut rx_buffer,
-        &mut tx_meta,
-        &mut tx_buffer,
-    );
-    socket.bind(1234).unwrap();
-
-    println!("NTP DNS request");
-    let ntp_socket = NtpSocket { sock: socket };
-    let ntp_context = NtpContext::new(TimestampGen::new(clock).await);
-
-    let  get_time_fut  = get_time(sock_addr, ntp_socket, ntp_context);
-    let timeout_fut = Timer::after_secs(5);
-    match select(get_time_fut,timeout_fut).await {
-        Either::First(ntp_result) => {
-            if let Ok(ntp_result) = ntp_result{
-                println!("NTP response seconds: {}", ntp_result.seconds);
-                let now =
-                    OffsetDateTime::from_unix_timestamp(ntp_result.seconds as i64).unwrap();
-                clock.set_time(now).await;
-
-                Ok(())
-            }else{
-                Err(SntpcError::BadNtpResponse)
-            }
+    let mut service_index = 0;
+    loop{
+        if service_index >= POOL_NTP_ADDR.len() {
+            return Err(SntpcError::NoAddr);
         }
-        Either::Second(_) => {
-            Err(SntpcError::BadNtpResponse)
+        let mut addrs = if let Ok(v) =  stack.dns_query(POOL_NTP_ADDR[service_index], DnsQueryType::A).await {
+            service_index +=1;
+            v
+        }else{
+            service_index +=1;
+            return  Err(SntpcError::NoAddr)
+        };
+        let addr = addrs.pop().ok_or(SntpcError::DnsEmptyResponse)?;
+        println!("NTP DNS: {:?}", addr);
+
+        let octets = addr.as_bytes();
+        let ipv4_addr = Ipv4Addr::new(octets[0], octets[1], octets[2], octets[3]);
+        let sock_addr = SocketAddr::new(IpAddr::V4(ipv4_addr), 123);
+
+        let mut rx_buffer = [0; 4096];
+        let mut tx_buffer = [0; 4096];
+        let mut rx_meta = [PacketMetadata::EMPTY; 16];
+        let mut tx_meta = [PacketMetadata::EMPTY; 16];
+
+        let mut socket = UdpSocket::new(
+            stack,
+            &mut rx_meta,
+            &mut rx_buffer,
+            &mut tx_meta,
+            &mut tx_buffer,
+        );
+        socket.bind(1234).unwrap();
+
+        println!("NTP DNS request");
+
+
+        let ntp_socket = NtpSocket { sock: socket };
+        let ntp_context = NtpContext::new(TimestampGen::new(clock).await);
+
+        let  get_time_fut  = get_time(sock_addr, ntp_socket, ntp_context);
+        let timeout_fut = Timer::after_secs(10);
+
+
+        match select(get_time_fut, timeout_fut).await {
+            Either::First(ntp_result) => {
+                return match ntp_result {
+                    Ok(ntp_result) => {
+                        println!("NTP response seconds: {}", ntp_result.seconds);
+                        let now =
+                            OffsetDateTime::from_unix_timestamp(ntp_result.seconds as i64).unwrap();
+                        clock.set_time(now).await;
+
+                        Ok(())
+                    }
+                    Err(e) => {
+                        Err(SntpcError::Sntc(e))
+                    }
+                }
+            }
+            Either::Second(_) => {
+               return Err(SntpcError::TimeOut)
+            }
         }
     }
 }
@@ -315,9 +332,9 @@ pub async fn ntp_worker() {
                     println!("NTP Request");
                     //init_page.append_log("NTP Request").await;
                     match ntp_request(stack, get_clock().unwrap()).await {
-                        Err(_) => {
+                        Err(e) => {
                             finish_wifi().await;
-                            println!("NTP error response");
+                            println!("NTP error response:{:?}",e);
                             if(err_times > 10){
                                 err_times = 0;
                                 sleep_sec = 10;
@@ -338,6 +355,7 @@ pub async fn ntp_worker() {
                     }
                 }
                 Err(e) => {
+                    finish_wifi().await;
                     println!("get stack err:{:?}", e);
                     sleep_sec = 1;
                 }

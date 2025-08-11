@@ -21,6 +21,8 @@ mod model;
 mod weather;
 mod request;
 mod random;
+//mod web_service;
+mod battery;
 
 extern crate alloc;
 use alloc::{format, vec};
@@ -95,6 +97,7 @@ use alloc::string::ToString;
 use esp_hal::analog::adc::{Adc, AdcCalCurve, AdcConfig, Attenuation};
 use esp_hal::riscv::asm::delay;
 use esp_hal::rtc_cntl::sleep::WakeupLevel;
+use crate::battery::Battery;
 use crate::sd_mount::{SdCsPin, SdMount};
 use crate::sleep::{add_rtcio, refresh_active_time, to_sleep, to_sleep_tips};
 
@@ -196,6 +199,8 @@ async fn main(spawner: Spawner) {
     let mut adc1_config = AdcConfig::new();
     let mut adc1_pin =
         adc1_config.enable_pin_with_cal::<_, AdcCal>(adc_pin, Attenuation::Attenuation11dB);
+    let bat_adc1_pin =  adc1_config.enable_pin_with_cal::<_, AdcCal>(io.pins.gpio4, Attenuation::Attenuation11dB); 
+    
     let adc1 = Adc::new(peripherals.ADC1, adc1_config);
     event::ADC_PER.lock().await.replace(adc1);
     event::ADC_PIN.lock().await.replace(adc1_pin);
@@ -203,6 +208,11 @@ async fn main(spawner: Spawner) {
     //let key3 =  io.pins.gpio11;
     spawner.spawn(event::run(key1,key2)).ok();
 
+    let battery = Battery::new();
+    battery::BATTERY.lock().await.replace(battery);
+    battery::ADC_PIN.lock().await.replace(bat_adc1_pin);
+    spawner.spawn(crate::battery::test_bat_adc()).ok();
+    
     let mut_spi = Mutex::new(RefCell::new(spi));
     let mut_spi_static = make_static!( Mutex<RefCell<Spi<SPI2, FullDuplexMode>>>,mut_spi);
 
@@ -237,6 +247,7 @@ async fn main(spawner: Spawner) {
     Timer::after_millis(10).await;
     spawner.spawn(pages::main_task(spawner.clone())).ok();
     spawner.spawn(crate::weather::weather_worker()).ok();
+
 
 
     let rtc_io = make_static!(Gpio2, rtc_pin);
@@ -275,7 +286,7 @@ async fn main_loop(){
 
 fn alloc(){
     // -------- Setup Allocator --------
-    const HEAP_SIZE: usize = 35 * 1024;
+    const HEAP_SIZE: usize = 45 * 1024;
     static mut HEAP: [u8; HEAP_SIZE] = [0; HEAP_SIZE];
     #[global_allocator]
     static ALLOCATOR: embedded_alloc::Heap = embedded_alloc::Heap::empty();

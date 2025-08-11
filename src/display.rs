@@ -31,6 +31,7 @@ use esp_hal::peripheral::Peripheral;
 use u8g2_fonts::fonts;
 use u8g2_fonts::FontRenderer;
 use u8g2_fonts::types::{FontColor, HorizontalAlignment, VerticalPosition};
+use crate::battery::BATTERY;
 
 pub struct RenderInfo{
     pub time:i32,
@@ -92,7 +93,7 @@ pub async  fn render(mut spi_device: &'static mut ActualSpi,
                     epd.wake_up(&mut spi_device,&mut Delay);
                     is_sleep = false;
                 }
-
+                draw_status().await;
                 let buffer = unsafe { DISPLAY.as_mut().unwrap().buffer() };
                 let len = buffer.len();
                 let mut need_force_full = false;
@@ -204,5 +205,22 @@ pub async fn show_sleep() {
 
         RENDER_CHANNEL.send(RenderInfo { time: 0,need_sleep:true }).await;
         Timer::after_secs(1).await;
+    }
+}
+
+pub async fn draw_status() {
+    if let Some(display) = display_mut() {
+        let font: FontRenderer = FontRenderer::new::<fonts::u8g2_font_wqy15_t_gb2312>();
+        let mut font = font.with_ignore_unknown_chars(true);
+        if let Some(bat) = BATTERY.lock().await.as_mut() {
+            let _ = font.render_aligned(
+                format_args!("电量：{}%", bat.percent),
+                Point::new(display.bounding_box().size.width as i32 - 50 as i32, 10),
+                VerticalPosition::Center,
+                HorizontalAlignment::Center,
+                FontColor::Transparent(Black),
+                display,
+            );
+        }
     }
 }

@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Configuration Tabs</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            background-color: #f4f4f4;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: calc(100vh - 20px );
+            margin: 0;
+            padding: 10px;
+        }
+        .container {
+            background: #fff;
+            border-radius: 8px;
+            box-shadow: 0 0 10px rgba(0, 0, 0, 0.1);
+            width: 100%;
+            max-width: 600px;
+            height: 100%;
+            display: flex;
+        }
+        .tabs {
+            display: flex;
+            flex-direction: column;
+            overflow-y: scroll;
+            border-right: 1px solid #ccc;
+            max-width: 50px; /* 宽度减小，侧边栏更窄 */
+        }
+        .tabs button {
+            flex: 0 0 auto;
+            padding: 10px;
+            cursor: pointer;
+            background: none;
+            border: none;
+            border-right: 2px solid transparent;
+            font-size: 16px;
+            outline: none;
+            writing-mode: vertical-rl; /* 垂直文本显示 */
+
+        }
+        .tabs button.active {
+            border-right: 2px solid #28a745;
+            font-weight: bold;
+            background-color: #f4f4f4;
+        }
+        .tab-content {
+            display: none;
+            padding: 20px;
+            flex-grow: 1;
+            overflow-y: auto;
+        }
+        .tab-content.active {
+            display: block;
+        }
+        form {
+            display: flex;
+            flex-direction: column;
+            height: 100%;
+        }
+        label {
+            margin-bottom: 8px;
+            font-weight: bold;
+        }
+        input[type="text"],
+        input[type="password"],
+        input[type="number"] {
+            padding: 8px;
+            margin-bottom: 10px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            box-sizing: border-box;
+        }
+        input[type="submit"] {
+            background-color: #28a745;
+            color: white;
+            padding: 10px 15px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 16px;
+            width: 100%;
+            box-sizing: border-box;
+            margin-top: auto;
+        }
+        input[type="submit"]:hover {
+            background-color: #218838;
+        }
+
+        .message {
+            margin-top: 10px;
+            padding: 10px;
+            border-radius: 4px;
+            display: none;
+        }
+        .message.success {
+            background-color: #d4edda;
+            color: #155724;
+        }
+        .message.error {
+            background-color: #f8d7da;
+            color: #721c24;
+        }
+    </style>
+</head>
+<body>
+<div class="container">
+    <div class="tabs">
+        <button class="tab-link active" data-tab="wifi">WiFi</button>
+       <!-- <button class="tab-link" data-tab="timer">定时功能</button>
+        <button class="tab-link" data-tab="weather">天气接口</button>-->
+
+    </div>
+    <div id="wifi" class="tab-content active">
+        <form id="wifiForm">
+            <label for="ssid">SSID:</label>
+            <input type="text" id="ssid" name="ssid" required />
+            <label for="password">Password:</label>
+            <input type="password" id="password" name="password" required />
+            <input type="submit" value="Configure" />
+            <div id="wifiMessage" class="message"></div>
+        </form>
+    </div>
+<!--    <div id="timer" class="tab-content">
+        <form action="/configure_timer" method="POST">
+            <label for="start-time">Start Time:</label>
+            <input type="text" id="start-time" name="start-time" required />
+            <label for="end-time">End Time:</label>
+            <input type="text" id="end-time" name="end-time" required />
+            <input type="submit" value="Set Timer" />
+        </form>
+    </div>
+    <div id="weather" class="tab-content">
+        <form action="/configure_weather" method="POST">
+            <label for="api-key">API Key:</label>
+            <input type="text" id="api-key" name="api-key" required />
+            <label for="location">Location:</label>
+            <input type="text" id="location" name="location" required />
+            <input type="submit" value="Set Weather API" />
+        </form>
+    </div>-->
+</div>
+
+<script>
+    document.querySelectorAll('.tab-link').forEach(button => {
+        button.addEventListener('click', () => {
+            const tabContents = document.querySelectorAll('.tab-content');
+            tabContents.forEach(content => content.classList.remove('active'));
+
+            const tabs = document.querySelectorAll('.tab-link');
+            tabs.forEach(tab => tab.classList.remove('active'));
+
+            const tabId = button.getAttribute('data-tab');
+            document.getElementById(tabId).classList.add('active');
+            button.classList.add('active');
+        });
+    });
+
+    // WiFi form submission with AJAX
+    const wifiForm = document.getElementById('wifiForm');
+    const wifiMessage = document.getElementById('wifiMessage');
+
+    wifiForm.addEventListener('submit', function(event) {
+        event.preventDefault();
+
+        const formData = new FormData(wifiForm);
+        fetch('/configure_wifi', {
+            method: 'POST',
+            body: formData
+        })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    wifiMessage.textContent = 'WiFi configuration saved successfully!';
+                    wifiMessage.className = 'message success';
+                } else {
+                    wifiMessage.textContent = 'Failed to save WiFi configuration.';
+                    wifiMessage.className = 'message error';
+                }
+                wifiMessage.style.display = 'block';
+            })
+            .catch(error => {
+                wifiMessage.textContent = 'An error occurred: ' + error.message;
+                wifiMessage.className = 'message error';
+                wifiMessage.style.display = 'block';
+            });
+    });
+
+</script>
+</body>
+</html>

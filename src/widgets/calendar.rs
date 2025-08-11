@@ -11,6 +11,7 @@ use embedded_layout::View;
 use time::{Date, Month};
 use u8g2_fonts::U8g2TextStyle;
 use u8g2_fonts::fonts;
+use crate::model::holiday::HolidayResponse;
 
 #[derive(Eq, PartialEq)]
 pub struct Calendar<C> {
@@ -104,9 +105,34 @@ impl<C> Drawable for Calendar<C>
             .draw(&mut clipped_display)?;
         let header_height = 12;
 
+
+
+        // 获取当月的第一天和最后一天
+        let first_day = Date::from_calendar_date(year, month, 1).unwrap();
+        
+        let last_day = (first_day + time::Duration::days(31))
+            .replace_day(1)
+            .unwrap()
+            .previous_day()
+            .unwrap();
+        let mut same_month = false;
+        let today_day = self.today.day();
+        if first_day.year() == self.today.year() && first_day.month() == self.today.month() {
+            same_month = true;
+        }
+
+        let begin_week_num =  first_day.weekday().number_days_from_sunday();
+        let last_day_num  = last_day.day();
+        let mut row_num = (begin_week_num + last_day_num)  / 7 ;
+        if (begin_week_num + last_day_num ) % 7 > 0 {
+            row_num +=1;
+        }
+
         //计算小格大小与位置
         let grid_width = self.size.width / 7; //7列
-        let grid_height = ( self.size.height - title_height - header_height ) / 6;//加表头6行
+        let grid_height = ( self.size.height - title_height - header_height ) / (row_num as u32 + 1 );//加 1 表头
+
+
         let mut rect = Rectangle::new(Point::zero(), Size::new(grid_width, grid_height));
 
 
@@ -121,19 +147,6 @@ impl<C> Drawable for Calendar<C>
                 .draw(&mut clipped_display)?;
         }
 
-
-        // 获取当月的第一天和最后一天
-        let first_day = Date::from_calendar_date(year, month, 1).unwrap();
-        let last_day = (first_day + time::Duration::days(31))
-            .replace_day(1)
-            .unwrap()
-            .previous_day()
-            .unwrap();
-        let mut same_month = false;
-        let today_day = self.today.day();
-        if first_day.year() == self.today.year() && first_day.month() == self.today.month() {
-            same_month = true;
-        }
 
         // 绘制日期
         let mut x = first_day.weekday().number_days_from_sunday() as i32 * grid_width as i32;
@@ -167,6 +180,37 @@ impl<C> Drawable for Calendar<C>
             }else{
                 Text::with_text_style(&day.to_string(), rect.top_left + Point::new( 8 , (grid_height / 2) as i32), style.clone(), text_style)
                     .draw(&mut clipped_display)?;
+            }
+            if crate::weather::sync_holiday_success(){
+                let holiday = crate::weather::get_holiday();
+                let mut holiday_response = embassy_futures::block_on(holiday.unwrap().daily_result.lock());
+                let holiday_response:Option<&HolidayResponse> =  holiday_response.as_ref(); 
+                if holiday_response.is_some() {
+                   
+                    let holidays = &holiday_response.unwrap().holidays;
+                    for holiday in holidays.iter() {
+                        let date = format_args!("{:04}{:02}{:02}",year,month as u8,day).to_string();
+                        let date_num: u32 = date.parse().unwrap_or(0);
+                       
+                        if holiday.date == date_num {
+                            let mut temp_style = style.clone();
+                            temp_style.set_text_color(Some(self.front_color));
+                            if same_month && day == today_day {
+                                temp_style.set_text_color(Some(self.back_color));
+                            }
+                                
+                            //crate::println!("date:{},date_num: {:?},is_off_day:{:?}", date,date_num, holiday.is_off_day);
+                            if holiday.is_off_day {
+                                    Text::with_text_style("休", rect.top_left + Point::new( 30 , (grid_height / 2) as i32), temp_style, text_style)
+                                        .draw(&mut clipped_display)?;
+                            }else{
+                               
+                                Text::with_text_style("班", rect.top_left + Point::new( 30 , (grid_height / 2) as i32), temp_style, text_style)
+                                    .draw(&mut clipped_display)?;
+                            }
+                        }
+                    }
+                }
             }
 
             x += grid_width as i32;

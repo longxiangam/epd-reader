@@ -239,6 +239,17 @@ const TIME_OUT_SECS: u64 = 10;
 static WIFI_LOCK:Mutex<CriticalSectionRawMutex,bool> = Mutex::new(false);
 pub async fn use_wifi() ->Result<&'static Stack<WifiDevice<'static, WifiStaDevice>>, WifiNetError>{
     let secs = Instant::now().as_secs();
+    loop {
+        if !*WIFI_LOCK.lock().await  {
+            break;
+        }
+        if Instant::now().as_secs() - secs > TIME_OUT_SECS  {
+            return Err(WifiNetError::TimeOut);
+        }
+        refresh_last_time().await;
+        Timer::after(Duration::from_millis(50)).await;
+    }
+    *WIFI_LOCK.lock().await = true;
 
     println!("wifi state: {:?}",*WIFI_STATE.lock().await);
     if *WIFI_STATE.lock().await == None {
@@ -271,17 +282,6 @@ pub async fn use_wifi() ->Result<&'static Stack<WifiDevice<'static, WifiStaDevic
             if let Some(v) = STACK_MUT {
                 if v.is_link_up() {
 
-                    loop {
-                        refresh_last_time().await;
-                        if !*WIFI_LOCK.lock().await  {
-                            break;
-                        }
-                        if Instant::now().as_secs() - secs > TIME_OUT_SECS  {
-                            return Err(WifiNetError::TimeOut);
-                        }
-                        Timer::after(Duration::from_millis(50)).await;
-                    }
-                    *WIFI_LOCK.lock().await = true;
                     v.wait_config_up().await;
                     return Ok(v);
 
