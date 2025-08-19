@@ -32,6 +32,7 @@ use u8g2_fonts::fonts;
 use u8g2_fonts::FontRenderer;
 use u8g2_fonts::types::{FontColor, HorizontalAlignment, VerticalPosition};
 use crate::battery::BATTERY;
+use esp_hal::macros::ram;
 
 pub struct RenderInfo{
     pub time:i32,
@@ -47,6 +48,10 @@ pub type EpdControl<SPI, BUSY, DC, RST, DELAY> = Epd2in9<SPI,  BUSY, DC, RST, DE
 pub type EpdDisplay = Display4in2;
 #[cfg(feature = "epd4in2")]
 pub type EpdControl<SPI, BUSY, DC, RST, DELAY> = Epd4in2<SPI, BUSY, DC, RST, DELAY>;
+
+
+#[ram(rtc_fast)]
+static mut RENDER_TIMES:u32 = 0;
 
 pub static mut DISPLAY:Option<EpdDisplay>  = None;
 
@@ -74,9 +79,12 @@ pub async  fn render(mut spi_device: &'static mut ActualSpi,
     unsafe {
         DISPLAY.replace(display);
     }
-    let mut render_times = 0;
-    let mut refresh_lut:RefreshLut=RefreshLut::Full;
+   
+    let mut refresh_lut:RefreshLut=RefreshLut::Quick;
     let mut is_sleep = false;
+    if refresh_lut ==  RefreshLut::Quick {
+        spi_device  = set_refresh_mode(RefreshLut::Quick,&mut epd,spi_device); 
+    }
 
     const FORCE_FULL_REFRESH_TIMES:u32 =  5;
     loop {
@@ -85,7 +93,7 @@ pub async  fn render(mut spi_device: &'static mut ActualSpi,
         let quickly_lut = quickly_lut.receive();
         match select(render_sign,quickly_lut).await {
             Either::First(render_info) => {
-                render_times +=1;
+                add_render_times();
                 println!("begin render");
 
                 if is_sleep {
@@ -97,7 +105,7 @@ pub async  fn render(mut spi_device: &'static mut ActualSpi,
                 let buffer = unsafe { DISPLAY.as_mut().unwrap().buffer() };
                 let len = buffer.len();
                 let mut need_force_full = false;
-                if render_times % FORCE_FULL_REFRESH_TIMES == 0 && refresh_lut == RefreshLut::Quick{
+                if get_render_times() % FORCE_FULL_REFRESH_TIMES == 0 && refresh_lut == RefreshLut::Quick{
                     need_force_full = true;
                     spi_device  = set_refresh_mode(RefreshLut::Full,&mut epd,spi_device);
                 }
@@ -113,9 +121,11 @@ pub async  fn render(mut spi_device: &'static mut ActualSpi,
                 }
 
                 if(refresh_lut == RefreshLut::Full){
-                    render_times = 0;
+                    unsafe {
+                        RENDER_TIMES = 0;
+                    }
                 }else{
-                    render_times += 1;
+                    add_render_times();
                 }
 
                 println!("end render");
@@ -133,6 +143,18 @@ pub async  fn render(mut spi_device: &'static mut ActualSpi,
         Timer::after(Duration::from_millis(50)).await;
     }
 
+}
+
+pub fn add_render_times(){
+    unsafe {
+        RENDER_TIMES +=1;
+    }
+}
+
+pub fn get_render_times()->u32{
+    unsafe {
+        RENDER_TIMES
+    }
 }
 
 pub fn set_refresh_mode< BUSY, DC, RST > (mode:RefreshLut,epd:&mut EpdControl<&'static mut ActualSpi, BUSY, DC, RST,Delay>,mut spi_device: &'static mut  ActualSpi)
@@ -192,11 +214,10 @@ pub async fn show_sleep() {
         let font: FontRenderer = FontRenderer::new::<fonts::u8g2_font_wqy15_t_gb2312>();
         let mut font = font.with_ignore_unknown_chars(true);
 
-        display.clear_buffer(Color::White);
         
         let _ = font.render_aligned(
-            "已进入睡眼状态",
-            Point::new(display.bounding_box().center().x, display.bounding_box().center().y),
+            "睡眠中",
+            Point::new(display.bounding_box().size.width as i32 - 110 as i32, 10),
             VerticalPosition::Center,
             HorizontalAlignment::Center,
             FontColor::Transparent(Black),

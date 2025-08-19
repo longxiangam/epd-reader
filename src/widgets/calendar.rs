@@ -8,9 +8,11 @@ use embedded_graphics::primitives::{Line, PrimitiveStyleBuilder, Rectangle, Stro
 use embedded_graphics::text::{Alignment, Baseline, Text, TextStyleBuilder};
 use embedded_graphics::text::renderer::CharacterStyle;
 use embedded_layout::View;
+use esp_println::println;
 use time::{Date, Month};
 use u8g2_fonts::U8g2TextStyle;
 use u8g2_fonts::fonts;
+use crate::model::lunar::Lunar;
 use crate::model::holiday::HolidayResponse;
 
 #[derive(Eq, PartialEq)]
@@ -84,7 +86,7 @@ impl<C> Drawable for Calendar<C>
         let year_text_style = TextStyleBuilder::new().baseline(Baseline::Middle)
             .alignment(Alignment::Center).build();
         
-        let style = U8g2TextStyle::new(fonts::u8g2_font_wqy12_t_gb2312b, self.front_color);
+        let style = U8g2TextStyle::new(fonts::u8g2_font_wqy12_t_gb2312, self.front_color);
         let text_style = TextStyleBuilder::new().baseline(Baseline::Middle)
             .alignment(Alignment::Center).build();
 
@@ -109,6 +111,7 @@ impl<C> Drawable for Calendar<C>
 
         // 获取当月的第一天和最后一天
         let first_day = Date::from_calendar_date(year, month, 1).unwrap();
+        let lunar = Lunar::new(year as u16, month as u8);
         
         let last_day = (first_day + time::Duration::days(31))
             .replace_day(1)
@@ -181,6 +184,43 @@ impl<C> Drawable for Calendar<C>
                 Text::with_text_style(&day.to_string(), rect.top_left + Point::new( 8 , (grid_height / 2) as i32), style.clone(), text_style)
                     .draw(&mut clipped_display)?;
             }
+            
+            let lunar_day = lunar.get_lunar_day(day);
+            if lunar_day.is_some() {
+                /* let lunar_day = lunar_day.unwrap();
+                let lunar_day_name = lunar_day.get_day_name();
+                let lunar_day_month_name = lunar_day.get_month_name();
+                let lunar_day_year = lunar_day.get_year();
+                
+                println!("date:{}-{}-{}",year,month as u8,day);
+                println!("lunar_day_name:{}",lunar_day_name);
+                println!("lunar_day_month_name:{}",lunar_day_month_name);
+                println!("lunar_day_year:{}",lunar_day_year); */
+                
+                //绘制农历
+                let lunar_day = lunar_day.unwrap();
+                let lunar_day_name = lunar_day.get_day_name();
+                let lunar_day_month_name = lunar_day.get_month_name();
+                let lunar_day_year = lunar_day.get_year();
+                
+                let mut temp_style = style.clone();
+                            temp_style.set_text_color(Some(self.front_color));
+                            if same_month && day == today_day {
+                                temp_style.set_text_color(Some(self.back_color));
+                            } 
+                if lunar_day_name.eq("初一") {
+                    Text::with_text_style(lunar_day_month_name, rect.top_left + Point::new( 30 , (grid_height / 2 + 7) as i32), temp_style, text_style)
+                    .draw(&mut clipped_display)?;
+                }else{
+                    Text::with_text_style(lunar_day_name, rect.top_left + Point::new( 30 , (grid_height / 2 +7) as i32), temp_style, text_style)
+                    .draw(&mut clipped_display)?;
+                }
+ 
+                
+                
+            }
+
+            
             if crate::weather::sync_holiday_success(){
                 let holiday = crate::weather::get_holiday();
                 let mut holiday_response = embassy_futures::block_on(holiday.unwrap().daily_result.lock());
@@ -201,11 +241,11 @@ impl<C> Drawable for Calendar<C>
                                 
                             //crate::println!("date:{},date_num: {:?},is_off_day:{:?}", date,date_num, holiday.is_off_day);
                             if holiday.is_off_day {
-                                    Text::with_text_style("休", rect.top_left + Point::new( 30 , (grid_height / 2) as i32), temp_style, text_style)
+                                    Text::with_text_style("休", rect.top_left + Point::new( 30 , (grid_height / 2 -7) as i32), temp_style, text_style)
                                         .draw(&mut clipped_display)?;
                             }else{
                                
-                                Text::with_text_style("班", rect.top_left + Point::new( 30 , (grid_height / 2) as i32), temp_style, text_style)
+                                Text::with_text_style("班", rect.top_left + Point::new( 30 , (grid_height / 2 -7) as i32), temp_style, text_style)
                                     .draw(&mut clipped_display)?;
                             }
                         }

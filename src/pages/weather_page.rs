@@ -30,7 +30,7 @@ use crate::event::EventType;
 use crate::model::seniverse::{DailyResult, form_json};
 use crate::pages::Page;
 use crate::request::RequestClient;
-use crate::sleep::{refresh_active_time, to_sleep};
+use crate::sleep::{refresh_active_time, to_sleep,to_sleep_tips};
 use crate::weather::{get_holiday, get_weather, sync_holiday_success, sync_weather_success};
 use crate::widgets::calendar::Calendar;
 use crate::wifi::{finish_wifi, use_wifi, WIFI_STATE};
@@ -268,7 +268,7 @@ impl Page for  WeatherPage{
             Timer::after(Duration::from_millis(1)).await;
             self.render().await;
             if sync_time_success() && sync_weather_success() {
-                to_sleep(Duration::from_secs(60), Duration::from_secs(5)).await;
+                to_sleep_tips(Duration::from_secs(60), Duration::from_secs(5),true).await;
             }
             Timer::after(Duration::from_millis(50)).await;
         }

@@ -33,6 +33,9 @@ pub async fn to_sleep(sleep_time:Duration,idle_time:Duration) {
 }
 
 pub async fn to_sleep_tips(sleep_time:Duration,idle_time:Duration,show_sleep:bool) {
+    if *LAST_ACTIVE_TIME.lock().await == Instant::MAX {
+        return;
+    }
     if Instant::now().duration_since(*LAST_ACTIVE_TIME.lock().await) > idle_time  {
         //不关wifi,唤醒时运行到wifi部分会卡着
         force_stop_wifi().await;

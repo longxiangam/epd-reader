@@ -98,7 +98,7 @@ use esp_hal::analog::adc::{Adc, AdcCalCurve, AdcConfig, Attenuation};
 use esp_hal::riscv::asm::delay;
 use esp_hal::rtc_cntl::sleep::WakeupLevel;
 use crate::battery::Battery;
-use crate::sd_mount::{SdCsPin, SdMount};
+use crate::sd_mount::{SdCsPin, SdMount, SD_MOUNT};
 use crate::sleep::{add_rtcio, refresh_active_time, to_sleep, to_sleep_tips};
 
 pub static mut CLOCKS_REF: Option<&'static Clocks>  =  None;
@@ -241,7 +241,10 @@ async fn main(spawner: Spawner) {
 
     let mut sd_mount = SdMount::new(volume_mgr);
     crate::sd_mount::SD_MOUNT.lock().await.replace(sd_mount);
-
+    //sd 上电后后要通信一次，不然对显示通信有干扰
+    if let Some(ref mut sd) =  *SD_MOUNT.lock().await {
+        let _  = sd.volume_manager.open_volume(embedded_sdmmc::VolumeIdx(0));
+    }
     refresh_active_time().await;
     spawner.spawn(crate::worldtime::ntp_worker()).ok();
     Timer::after_millis(10).await;
