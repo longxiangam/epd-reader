@@ -39,7 +39,6 @@ pub async fn web_service(){
             }
         }
     }
-
 }
 
 async fn  web_tcp_socket<D: esp_wifi::wifi::WifiDeviceMode> (stack:&Stack<WifiDevice<'_,D>>){

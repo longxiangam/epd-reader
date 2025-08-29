@@ -14,6 +14,7 @@ use u8g2_fonts::U8g2TextStyle;
 use u8g2_fonts::fonts;
 use crate::model::lunar::Lunar;
 use crate::model::holiday::HolidayResponse;
+use crate::weather::HolidayInfo;
 
 #[derive(Eq, PartialEq)]
 pub struct Calendar<C> {
@@ -222,8 +223,8 @@ impl<C> Drawable for Calendar<C>
 
             
             if crate::weather::sync_holiday_success(){
-                let holiday = crate::weather::get_holiday();
-                let mut holiday_response = embassy_futures::block_on(holiday.unwrap().daily_result.lock());
+                let holiday = HolidayInfo::get_holiday();
+                let mut holiday_response = embassy_futures::block_on(holiday);
                 let holiday_response:Option<&HolidayResponse> =  holiday_response.as_ref(); 
                 if holiday_response.is_some() {
                    

@@ -30,6 +30,7 @@ use crate::pages::PageEnum::{ECalendarPage, EChip8Page, EClockPage, EReadPage, E
 use crate::widgets::list_widget::ListWidget;
 use u8g2_fonts::fonts;
 use crate::pages::read_page::ReadPage;
+use crate::pages::setting_page::SettingPage;
 use crate::pages::weather_page::WeatherPage;
 
 static MAIN_PAGE:Mutex<CriticalSectionRawMutex,Option<MainPage> > = Mutex::new(None);
@@ -102,8 +103,7 @@ impl Page for  MainPage{
         menus.push(MenuItem::new(String::<20>::from_str("定时器").unwrap(), ETimerPage));*/
         menus.push(MenuItem::new(String::<20>::from_str("天气").unwrap(), EWeatherPage));
         menus.push(MenuItem::new(String::<20>::from_str("日历").unwrap(), ECalendarPage));
-       /* menus.push(MenuItem::new(String::<20>::from_str("游戏").unwrap(), EChip8Page));
-        menus.push(MenuItem::new(String::<20>::from_str("设置").unwrap(), ESettingPage));*/
+        menus.push(MenuItem::new(String::<20>::from_str("设置").unwrap(), ESettingPage));
 
         Self{
             current_page:None,
@@ -239,6 +239,9 @@ impl Page for  MainPage{
                     self.back().await;
                 }
                 ESettingPage =>{
+                    let mut qrcode_page = SettingPage::new();
+                    qrcode_page.bind_event().await;
+                    qrcode_page.run(spawner).await;
                     self.back().await;
                 }
                 _ => { self.back().await;}

@@ -11,6 +11,7 @@ pub struct Holiday {
 
 #[derive(Debug, Default)]
 pub struct HolidayResponse {
+    pub year: u32,
     pub holidays: Vec<Holiday, 40>,
 }
 
@@ -47,7 +48,7 @@ pub fn form_json(str: &[u8]) -> Option<HolidayResponse> {
                 }
                 holidays.push(temp);
             }
-            let resp = HolidayResponse { holidays };
+            let resp = HolidayResponse { year:0, holidays };
             println!("holiday format: {:?}", resp);
             Some(resp)
         }

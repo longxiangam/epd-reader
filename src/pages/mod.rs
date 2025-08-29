@@ -9,6 +9,7 @@ mod calendar_page;
 pub(crate) mod read_page;
 mod read_menu_page;
 mod weather_page;
+pub mod setting_page;
 
 enum PageEnum {
     EMainPage,

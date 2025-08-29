@@ -110,7 +110,7 @@ pub async fn connect_wifi(spawner: &Spawner,
         Stack::new(
         wifi_interface,
         config,
-        make_static!(StackResources::<3>,StackResources::<3>::new()),
+        make_static!(StackResources::<4>,StackResources::<4>::new()),
         seed
     ));
 
@@ -247,7 +247,7 @@ pub async fn use_wifi() ->Result<&'static Stack<WifiDevice<'static, WifiStaDevic
             return Err(WifiNetError::TimeOut);
         }
         refresh_last_time().await;
-        Timer::after(Duration::from_millis(50)).await;
+        Timer::after(Duration::from_millis(500)).await;
     }
     *WIFI_LOCK.lock().await = true;
 
@@ -262,7 +262,7 @@ pub async fn use_wifi() ->Result<&'static Stack<WifiDevice<'static, WifiStaDevic
             if Instant::now().as_secs() - secs > 3 {
                 return Err(WifiNetError::WaitConnecting);
             }
-            Timer::after_millis(10).await;
+            Timer::after_millis(500).await;
         }
     }
     if WIFI_STATE.lock().await.unwrap() != WifiNetState::WifiConnected {
@@ -304,6 +304,9 @@ pub async fn finish_wifi(){
     println!("finish_wifi");
 }
 
+pub async fn wifi_is_idle()->bool{
+     !*WIFI_LOCK.lock().await  
+}
 
 #[embassy_executor::task]
 async fn do_stop(){
@@ -453,11 +456,14 @@ async fn connection_wifi_ap(mut controller: WifiController<'static>) {
         }
         if !matches!(controller.is_started(), Ok(true)) {
             let client_config = Configuration::AccessPoint(AccessPointConfiguration {
-                ssid: "esp-wifi".try_into().unwrap(),
+                ssid: "esp_wifi".try_into().unwrap(),
                 password:String::from_str("123456789").unwrap(),
                 ..Default::default()
             });
-            controller.set_configuration(&client_config).unwrap();
+            let result = controller.set_configuration(&client_config);
+            if let Err(e) = result {
+                println!("Error setting Wifi configuration: {:?}", e);
+            }
             println!("Starting wifi");
             controller.start().await.unwrap();
             println!("Wifi started!");

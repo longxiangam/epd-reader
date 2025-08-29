@@ -31,7 +31,7 @@ use crate::model::seniverse::{DailyResult, form_json};
 use crate::pages::Page;
 use crate::request::RequestClient;
 use crate::sleep::{refresh_active_time, to_sleep,to_sleep_tips};
-use crate::weather::{get_holiday, get_weather, sync_holiday_success, sync_weather_success};
+use crate::weather::{ sync_holiday_success, sync_weather_success, HolidayInfo, Weather};
 use crate::widgets::calendar::Calendar;
 use crate::wifi::{finish_wifi, use_wifi, WIFI_STATE};
 use crate::worldtime::{get_clock, sync_time_success};
@@ -103,22 +103,19 @@ impl Page for  WeatherPage{
                 
 
                 if sync_weather_success() {
-                    if let Some(weather) = get_weather() {
+                    if let Some(weather) = Weather::get_weather().await {
 
-                        if let Some(weather) = weather.daily_result.lock().await.as_mut() {
-
-                            let x = 100;
-                            let mut y = display.size().height - 45;
-                            for one in weather.daily.iter() {
-                                let (year, date) = one.date.split_once('-').unwrap();
-                                let date = date.replace("-",".");
-                                let str = format_args!("{} {}/{},{}/{}℃,湿:{}%,风:{}"
-                                                       ,date,one.text_day,one.text_night,one.low,one.high,one.humidity,one.wind_scale).to_string();
-                                let _ = Text::new(str.as_str(), Point::new(x, y as i32), style.clone()).draw(display);
-                                y+=20;
-                            }
-
+                        let x = 100;
+                        let mut y = display.size().height - 45;
+                        for one in weather.daily.iter() {
+                            let (year, date) = one.date.split_once('-').unwrap();
+                            let date = date.replace("-",".");
+                            let str = format_args!("{} {}/{},{}/{}℃,湿:{}%,风:{}"
+                                                   ,date,one.text_day,one.text_night,one.low,one.high,one.humidity,one.wind_scale).to_string();
+                            let _ = Text::new(str.as_str(), Point::new(x, y as i32), style.clone()).draw(display);
+                            y+=20;
                         }
+                    
                     }
 
                 }else {
@@ -228,9 +225,7 @@ impl Page for  WeatherPage{
             }
 
             if sync_weather_success() {
-                if let Some(weather) = get_weather() {
-
-                    if let Some(weather) = weather.daily_result.lock().await.as_mut() {
+                if let Some(weather) = Weather::get_weather().await {
                         match weather_last_update {
                             Some(ref v)=>{
                                 if !v.eq(&weather.last_update) {
@@ -243,7 +238,7 @@ impl Page for  WeatherPage{
                                 weather_last_update = Some( weather.last_update.clone());
                             }
                         }
-                    }
+                    
                 }
             }else{
                 refresh_active_time().await;
@@ -323,28 +318,28 @@ impl Page for  WeatherPage{
         
         event::on_target(EventType::KeyShort(1), Self::mut_to_ptr(self), move |info| {
             return Box::pin(async move {
-                if let Some(weather) = get_weather() {
-                    weather.request().await;
-                    let mut_ref:&mut Self =  Self::mut_by_ptr(info.ptr).unwrap();
-                    crate::display::QUICKLY_LUT_CHANNEL.send(false).await;
-                    mut_ref.need_render = true;
-                    Timer::after(Duration::from_millis(50)).await;
-                    crate::display::QUICKLY_LUT_CHANNEL.send(true).await;
-                }
+                
+                let _ = Weather::request().await;
+                let mut_ref:&mut Self =  Self::mut_by_ptr(info.ptr).unwrap();
+                crate::display::QUICKLY_LUT_CHANNEL.send(false).await;
+                mut_ref.need_render = true;
+                Timer::after(Duration::from_millis(50)).await;
+                crate::display::QUICKLY_LUT_CHANNEL.send(true).await;
+
             });
         }).await;
         event::on_target(EventType::KeyShort(2), Self::mut_to_ptr(self), move |info| {
             return Box::pin(async move {
-                if let Some(holiday) = get_holiday() {
-                    let local = get_clock().unwrap().local().await;
-                    let year = local.year() as u32;
-                    let _= holiday.request(year).await;
-                    let mut_ref:&mut Self =  Self::mut_by_ptr(info.ptr).unwrap();
-                    crate::display::QUICKLY_LUT_CHANNEL.send(false).await;
-                    mut_ref.need_render = true;
-                    Timer::after(Duration::from_millis(50)).await;
-                    crate::display::QUICKLY_LUT_CHANNEL.send(true).await;
-                }
+               
+                let local = get_clock().unwrap().local().await;
+                let year = local.year() as u32;
+                let _= HolidayInfo::request().await;
+                let mut_ref:&mut Self =  Self::mut_by_ptr(info.ptr).unwrap();
+                crate::display::QUICKLY_LUT_CHANNEL.send(false).await;
+                mut_ref.need_render = true;
+                Timer::after(Duration::from_millis(50)).await;
+                crate::display::QUICKLY_LUT_CHANNEL.send(true).await;
+            
             });
         }).await;
         event::on_target(EventType::KeyShort(3),Self::mut_to_ptr(self),  move |info|  {

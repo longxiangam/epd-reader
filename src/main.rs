@@ -23,6 +23,8 @@ mod request;
 mod random;
 //mod web_service;
 mod battery;
+mod storage;
+mod web_service;
 
 extern crate alloc;
 use alloc::{format, vec};
@@ -100,6 +102,9 @@ use esp_hal::rtc_cntl::sleep::WakeupLevel;
 use crate::battery::Battery;
 use crate::sd_mount::{SdCsPin, SdMount, SD_MOUNT};
 use crate::sleep::{add_rtcio, refresh_active_time, to_sleep, to_sleep_tips};
+use crate::weather::{sync_weather_success, HolidayInfo, Weather};
+use crate::wifi::{wifi_is_idle, WifiModel, WIFI_MODEL};
+use crate::worldtime::sync_time_success;
 
 pub static mut CLOCKS_REF: Option<&'static Clocks>  =  None;
 
@@ -126,8 +131,11 @@ async fn main(spawner: Spawner) {
     use esp_hal::timer::systimer::{SystemTimer, Target};
     let systimer = esp_hal::timer::systimer::SystemTimer::new(peripherals.SYSTIMER).split::<Target>();
     esp_hal_embassy::init(&clocks, systimer.alarm0);
-
-
+    
+    //处理保存的空间
+    storage::enter_process().await;
+    //storage::init_storage_area();
+        
     //init_logger(log::LevelFilter::Trace);
     trace!("test trace");
 
@@ -135,9 +143,6 @@ async fn main(spawner: Spawner) {
     println!("reset reason: {:?}", reason);
     let wake_reason = get_wakeup_cause();
     println!("wake reason: {:?}", wake_reason);
-
-    spawner.spawn(main_loop()).ok();
-
  
     let mut io = Io::new(peripherals.GPIO, peripherals.IO_MUX);
     //Output::new(io.pins.gpio12,esp_hal::gpio::Level::Low ).set_low();
@@ -211,7 +216,7 @@ async fn main(spawner: Spawner) {
     let battery = Battery::new();
     battery::BATTERY.lock().await.replace(battery);
     battery::ADC_PIN.lock().await.replace(bat_adc1_pin);
-    spawner.spawn(crate::battery::test_bat_adc()).ok();
+   
     
     let mut_spi = Mutex::new(RefCell::new(spi));
     let mut_spi_static = make_static!( Mutex<RefCell<Spi<SPI2, FullDuplexMode>>>,mut_spi);
@@ -245,23 +250,64 @@ async fn main(spawner: Spawner) {
     if let Some(ref mut sd) =  *SD_MOUNT.lock().await {
         let _  = sd.volume_manager.open_volume(embedded_sdmmc::VolumeIdx(0));
     }
-    refresh_active_time().await;
-    spawner.spawn(crate::worldtime::ntp_worker()).ok();
-    Timer::after_millis(10).await;
-    spawner.spawn(pages::main_task(spawner.clone())).ok();
-    spawner.spawn(crate::weather::weather_worker()).ok();
+   
 
-
-
+    let mut need_ap = false;
+    loop {
+        println!("entry need_ap 1");
+        if let Some(wifi) = storage::WIFI_INFO.lock().await.as_ref(){
+            println!("wifi_finish:{:?}",wifi.wifi_finish);
+            println!("wifi_ssid:{:?}",wifi.wifi_ssid);
+            //println!("wifi_password:{:?}",wifi.wifi_password);
+            if !wifi.wifi_finish {
+                need_ap = true;
+            }
+            println!("entry need_ap 2");
+            break;
+        }
+        println!("entry need_ap");
+        Timer::after(Duration::from_millis(50)).await;
+    }
+  
     let rtc_io = make_static!(Gpio2, rtc_pin);
     add_rtcio( rtc_io,  WakeupLevel::Low).await;
 
-    let stack =  crate::wifi::connect_wifi(&spawner,
-                                           peripherals.TIMG0,
-                                           Rng::new(peripherals.RNG),
-                                           peripherals.WIFI,
-                                           peripherals.RADIO_CLK,
-                                           &clocks).await;
+    if  need_ap {
+        use crate::pages::Page;
+        println!("entry ap");
+        WIFI_MODEL.lock().await.replace(WifiModel::AP);
+        println!("wifi_model:{:?}",WIFI_MODEL.lock().await.as_ref());
+        let stack = crate::wifi::start_wifi_ap(&spawner,
+                                               peripherals.TIMG0,
+                                               Rng::new(peripherals.RNG),
+                                               peripherals.WIFI,
+                                               peripherals.RADIO_CLK,
+                                               clocks).await;
+
+        loop {
+            let mut qrcode_page = pages::setting_page::SettingPage::new();
+            qrcode_page.bind_event().await;
+            qrcode_page.run(spawner.clone()).await;
+            Timer::after(Duration::from_secs(50)).await;
+        }
+
+    }else {
+
+        spawner.spawn(crate::battery::test_bat_adc()).ok();
+        refresh_active_time().await;
+        spawner.spawn(crate::worldtime::ntp_worker()).ok();
+        Timer::after_millis(10).await;
+        spawner.spawn(pages::main_task(spawner.clone())).ok();
+        
+        WIFI_MODEL.lock().await.replace(WifiModel::STA);
+        let stack = crate::wifi::connect_wifi(&spawner,
+                                              peripherals.TIMG0,
+                                              Rng::new(peripherals.RNG),
+                                              peripherals.WIFI,
+                                              peripherals.RADIO_CLK,
+                                              &clocks).await;
+
+    }
    
     loop {
         if let Some(clock) = worldtime:: get_clock(){
@@ -273,23 +319,29 @@ async fn main(spawner: Spawner) {
 
             println!("Current_time: {} {}", clock.get_date_str().await,str);
         }
-        Timer::after(Duration::from_secs(10)).await;
 
-    }
-}
 
-#[embassy_executor::task]
-async fn main_loop(){
-    loop {
-        println!("main_loop");
+
+        //待时间完成
+        if sync_time_success() {
+
+            Weather::sync_weather().await;
+
+            HolidayInfo::sync_holiday().await;
+            
+        }
+
         to_sleep_tips(Duration::from_secs(0), Duration::from_secs(180),true).await;
-        Timer::after_secs(5).await;
+        
+        Timer::after(Duration::from_secs(5)).await;
+
     }
 }
+
 
 fn alloc(){
     // -------- Setup Allocator --------
-    const HEAP_SIZE: usize = 45 * 1024;
+    const HEAP_SIZE: usize = 40 * 1024;
     static mut HEAP: [u8; HEAP_SIZE] = [0; HEAP_SIZE];
     #[global_allocator]
     static ALLOCATOR: embedded_alloc::Heap = embedded_alloc::Heap::empty();
