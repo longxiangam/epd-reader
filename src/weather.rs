@@ -1,12 +1,13 @@
 use alloc::format;
 use esp_hal::macros::ram;
 use esp_println::println;
+use futures::future::err;
 use crate::model::seniverse::{DailyResult, form_json};
 use crate::request::RequestClient;
 use crate::wifi::{finish_wifi, use_wifi};
 use crate::worldtime::{get_clock};
 
-use crate::model::holiday::{HolidayResponse, form_json as form_holiday_json};
+use crate::model::holiday::{HolidayResponse, form_json as form_holiday_json, form_json_each};
 use crate::storage::{HolidayStorage, NvsStorage, WeatherStorage};
 pub struct Weather{
 }
@@ -58,7 +59,7 @@ impl Weather {
 
         let now_sec =  get_clock().unwrap().now().await.unix_timestamp() as u64;
         // 天气：5小时刷新一次
-        if !sync_weather_success() ||  now_sec - unsafe {WEATHER_SYNC_SECOND} > 3600 * 5 {
+        if !sync_weather_success() || now_sec - unsafe { WEATHER_SYNC_SECOND } > 3600 * 5 {
             let _ = Weather::request().await;
         }
     }
@@ -87,6 +88,7 @@ impl Weather {
 
 #[ram(rtc_fast)]
 pub static mut WEATHER_SYNC_SECOND:u64   =  0;
+pub static mut WEATHER_SYNC_SECOND_ERROR_SECOND:u64  = 0;
 
 pub fn sync_weather_success()->bool{
     unsafe {
@@ -117,7 +119,8 @@ impl HolidayInfo {
             
                 match result {
                     Ok(response) => {
-                        let holiday_result = form_holiday_json(&response.data[..response.length]);
+                        let holiday_result = form_json_each(&response.data[..response.length]);
+                        
                         if let Some(mut v) = holiday_result {
                             v.year = current_year;
                             Self::save(v).await;
@@ -151,9 +154,25 @@ impl HolidayInfo {
         }
 
         
+        // let current_second = get_clock().unwrap().now().await.unix_timestamp() as u64;
         // let current_year =  get_clock().unwrap().now().await.year() as u32;
         // if !sync_holiday_success()  || unsafe { HOLIDAY_SYNC_YEAR !=  current_year } {
-        //     let _ = HolidayInfo::request().await;
+        //     let error_second = unsafe{ HOLIDAY_SYNC_ERROR_SECOND };
+        //     if error_second ==0 || current_second - error_second > 60 {
+        //         let mut try_times = 3;
+        //         loop{
+        //             if let Ok(v) = HolidayInfo::request().await {
+        //                 break;
+        //             }else{
+        //                 try_times-=1;
+        //                 if try_times == 0 {
+        //                     unsafe{HOLIDAY_SYNC_ERROR_SECOND =  current_second};
+        //                     break;
+        //                 }
+        //             }
+        //             
+        //         }
+        //     }
         // }
     }
     pub async fn get_holiday()->Option<HolidayResponse>{
@@ -173,6 +192,8 @@ impl HolidayInfo {
             HOLIDAY_SYNC_SECOND = get_clock().unwrap().now().await.unix_timestamp() as u64;
         }
 
+        println!("HOLIDAY_SYNC_SECOND:{}", unsafe{HOLIDAY_SYNC_SECOND});
+
         let mut holiday_storage = HolidayStorage::read().unwrap();
         holiday_storage.holiday_response =  Some(holiday_response);
         holiday_storage.sync_time_second =  unsafe{HOLIDAY_SYNC_SECOND};
@@ -188,6 +209,7 @@ pub static mut HOLIDAY_SYNC_SECOND: u64 = 0;
 #[ram(rtc_fast)]
 pub static mut HOLIDAY_SYNC_YEAR: u32 = 0;
 
+pub static mut HOLIDAY_SYNC_ERROR_SECOND: u64 = 0;
 
 pub fn sync_holiday_success() -> bool {
     unsafe { HOLIDAY_SYNC_SECOND > 0 }

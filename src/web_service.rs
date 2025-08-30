@@ -1,3 +1,4 @@
+use crate::storage::NvsStorage;
 use core::str::{from_utf8, FromStr};
 use embassy_futures::select::{Either, select};
 use embassy_net::{IpListenEndpoint, Stack};
@@ -21,6 +22,7 @@ pub async fn web_service(){
                 if let Some(stack) = AP_STACK_MUT {
                     web_tcp_socket(stack).await;
                 }
+                Timer::after(Duration::from_millis(100)).await;
             }
         }
         WifiModel::STA => {
@@ -34,7 +36,7 @@ pub async fn web_service(){
                         }
                         Err(_) => {}
                     }
-                    Timer::after(Duration::from_millis(100));
+                    Timer::after(Duration::from_millis(100)).await;
                 }
             }
         }
@@ -102,10 +104,11 @@ async fn  web_tcp_socket<D: esp_wifi::wifi::WifiDeviceMode> (stack:&Stack<WifiDe
                     };
                 }
 
-                let r = socket.flush().await;
-                if let Err(e) = r {
-                    println!("flush error: {:?}", e);
-                }
+                //总是卡死，不知道原因
+                // let r = socket.flush().await;
+                // if let Err(e) = r {
+                //     println!("flush error: {:?}", e);
+                // }
                 Timer::after(Duration::from_millis(1000)).await;
 
                 socket.close();
@@ -121,35 +124,22 @@ async fn  web_tcp_socket<D: esp_wifi::wifi::WifiDeviceMode> (stack:&Stack<WifiDe
 async fn process_http(socket:&mut TcpSocket<'_>,buffer:&str) {
     use embedded_io_async::Write;
     use heapless::String;
-
     let mut headers = [httparse::EMPTY_HEADER; 64];
     let mut req = httparse::Request::new(&mut headers);
     req.parse(buffer.as_ref());
     println!("request:{:?}", req);
+
+    let content = concat!("HTTP/1.0 200 OK\r\n\r\n", include_str!("../files/config.html"));
     if let Some("GET") = req.method {
-        if let Some("/config") = req.path {
-            let content = concat!("HTTP/1.0 200 OK\r\n\r\n", include_str!("../files/config.html"));
-            let r = socket
-                .write_all(
-                    content.as_bytes()
-                )
-                .await;
+        let content = concat!("HTTP/1.0 200 OK\r\n\r\n", include_str!("../files/config.html"));
+        let r = socket
+            .write_all(
+                content.as_bytes()
+            )
+            .await;
 
-            if let Err(e) = r {
-                println!("write error: {:?}", e);
-            }
-        }else{
-            //默认
-            let content = concat!("HTTP/1.0 200 OK\r\n\r\n", include_str!("../files/config.html"));
-            let r = socket
-                .write_all(
-                    content.as_bytes()
-                )
-                .await;
-
-            if let Err(e) = r {
-                println!("write error: {:?}", e);
-            }
+        if let Err(e) = r {
+            println!("write error: {:?}", e);
         }
     }
     if let Some("POST") = req.method {
@@ -171,21 +161,21 @@ async fn process_http(socket:&mut TcpSocket<'_>,buffer:&str) {
                     }
                 }
 
-                // if let Some(wifi_info) = WIFI_INFO.lock().await.as_mut() {
-                //     println!("wifi_info:{:?}", wifi_info);
-                //     wifi_info.wifi_ssid = String::from_str(ssid.unwrap()).unwrap();
-                //     wifi_info.wifi_password = String::from_str(password.unwrap()).unwrap();
-                //     wifi_info.wifi_finish = true;
-                //     match wifi_info.write() {
-                //         Ok(_) => {
-                //             println!("保存成功");
-                //             software_reset();
-                //         }
-                //         Err(e) => {
-                //             println!("保存失败：{:?}", e);
-                //         }
-                //     }
-                // }
+                if let Some(mut wifi_info) = crate::storage::WIFI_INFO.lock().await.as_mut() {
+                    println!("wifi_info:{:?}", wifi_info);
+                    wifi_info.wifi_ssid = String::from_str(ssid.unwrap()).unwrap();
+                    wifi_info.wifi_password = String::from_str(password.unwrap()).unwrap();
+                    wifi_info.wifi_finish = true;
+                    match wifi_info.write() {
+                        Ok(_) => {
+                            println!("保存成功");
+                            software_reset();
+                        }
+                        Err(e) => {
+                            println!("保存失败：{:?}", e);
+                        }
+                    }
+                }
 
                 let r = socket
                     .write_all(
