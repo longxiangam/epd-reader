@@ -189,11 +189,17 @@ async fn connection_wifi(mut controller: WifiController<'static>) {
             _ => { WIFI_STATE.lock().await.replace(WifiNetState::WifiDisconnected);}
         }
         if !matches!(controller.is_started(), Ok(true)) {
+            let ssid = crate::storage::WIFI_INFO.lock().await.as_ref().unwrap().wifi_ssid.clone();
+            let password = crate::storage::WIFI_INFO.lock().await.as_ref().unwrap().wifi_password.clone();
+            println!("ssid: {}", ssid);
+            println!("password: {}", password); 
             loop {
 
                 let client_config = Configuration::Client(ClientConfiguration {
-                    ssid:SSID.try_into().unwrap(),//wifi_info.wifi_ssid.clone(), //SSID.try_into().unwrap(),
-                    password:PASSWORD.try_into().unwrap(),//wifi_info.wifi_password.clone(), //PASSWORD.try_into().unwrap(),
+                    ssid: ssid.clone(),
+                    password:password.clone(),
+                    //ssid:SSID.try_into().unwrap(),//wifi_info.wifi_ssid.clone(), //SSID.try_into().unwrap(),
+                    //password:PASSWORD.try_into().unwrap(),//wifi_info.wifi_password.clone(), //PASSWORD.try_into().unwrap(),
                     ..Default::default()
                 });
                 match controller.set_configuration(&client_config) {

@@ -62,6 +62,7 @@ async fn  web_tcp_socket<D: esp_wifi::wifi::WifiDeviceMode> (stack:&Stack<WifiDe
         match select(wait_stop,r).await{
             Either::First(_) => {
                 STOP_WEB_SERVICE.reset();
+                println!("STOP_WEB_SERVICE...");
                 break;
             }
             Either::Second(r) => {
