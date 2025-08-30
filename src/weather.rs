@@ -120,7 +120,7 @@ impl HolidayInfo {
                 match result {
                     Ok(response) => {
                         let holiday_result = form_json_each(&response.data[..response.length]);
-                        
+
                         if let Some(mut v) = holiday_result {
                             v.year = current_year;
                             Self::save(v).await;
@@ -153,27 +153,27 @@ impl HolidayInfo {
             Self::get_holiday().await;//加载同步时间
         }
 
+
+        let current_second = get_clock().unwrap().now().await.unix_timestamp() as u64;
+        let current_year =  get_clock().unwrap().now().await.year() as u32;
+        if !sync_holiday_success()  || unsafe { HOLIDAY_SYNC_YEAR !=  current_year } {
+            let error_second = unsafe{ HOLIDAY_SYNC_ERROR_SECOND };
+            if error_second ==0 || current_second - error_second > 60 {
+                let mut try_times = 3;
+                loop{
+                    if let Ok(v) = HolidayInfo::request().await {
+                        break;
+                    }else{
+                        try_times-=1;
+                        if try_times == 0 {
+                            unsafe{HOLIDAY_SYNC_ERROR_SECOND =  current_second};
+                            break;
+                        }
+                    }
         
-        // let current_second = get_clock().unwrap().now().await.unix_timestamp() as u64;
-        // let current_year =  get_clock().unwrap().now().await.year() as u32;
-        // if !sync_holiday_success()  || unsafe { HOLIDAY_SYNC_YEAR !=  current_year } {
-        //     let error_second = unsafe{ HOLIDAY_SYNC_ERROR_SECOND };
-        //     if error_second ==0 || current_second - error_second > 60 {
-        //         let mut try_times = 3;
-        //         loop{
-        //             if let Ok(v) = HolidayInfo::request().await {
-        //                 break;
-        //             }else{
-        //                 try_times-=1;
-        //                 if try_times == 0 {
-        //                     unsafe{HOLIDAY_SYNC_ERROR_SECOND =  current_second};
-        //                     break;
-        //                 }
-        //             }
-        //             
-        //         }
-        //     }
-        // }
+                }
+            }
+        }
     }
     pub async fn get_holiday()->Option<HolidayResponse>{
         let holiday_storage = HolidayStorage::read().unwrap();

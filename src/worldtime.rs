@@ -23,6 +23,7 @@ use time::{Duration, OffsetDateTime, UtcOffset, Weekday};
 /*use crate::pages::init_page::InitPage;*/
 
 use crate::sleep::{get_rtc_ms, get_sleep_ms};
+use crate::weather::{HolidayInfo, Weather};
 use crate::wifi::{finish_wifi, use_wifi};
 
 
@@ -364,6 +365,14 @@ pub async fn ntp_worker() {
             sleep_sec = 3600;
         }
 
+        //待时间完成后同步天气与节假日
+        if sync_time_success() {
+
+            Weather::sync_weather().await;
+
+            HolidayInfo::sync_holiday().await;
+
+        }
         embassy_time::Timer::after(embassy_time::Duration::from_secs(sleep_sec)).await;
     }
 }

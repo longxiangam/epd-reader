@@ -114,7 +114,7 @@ pub fn form_json_each(str: &[u8]) -> Option<HolidayResponse> {
             break;
         }
     }
-    println!("holiday_result: {:?}", holidays); 
+    
     if holidays.is_empty() {
         None
     } else {
@@ -135,7 +135,7 @@ fn parse_single_holiday(date_obj: &str, date_key: &str) -> Option<Holiday> {
    let yyyymmdd: &str = &date_str;
    let date_num: u32 = yyyymmdd.parse().unwrap_or(0);
    holiday.date = date_num;
-    println!("holiday_result date_obj: {:?}", date_obj);
+
     // 使用parse_json解析日期对象
     match parse_json(core::str::from_utf8(date_obj.as_bytes()).unwrap()) {
         Ok(json_data) => {
