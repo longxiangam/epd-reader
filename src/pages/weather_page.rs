@@ -278,11 +278,19 @@ impl Page for  WeatherPage{
                     
                     let year = clock.year();
                     let pre_month = clock.month().previous() ;
-                    if clock.month() as u8 > 1 {
-                        *clock = clock.replace_month(pre_month).unwrap();
-                    }else{
-                        *clock = clock.replace_year(year - 1).unwrap();
-                        *clock = clock.replace_month(pre_month).unwrap();
+                    if let Some(current_clock) = get_clock() {
+                        let now = current_clock.local().await;
+                        if now.month() == pre_month && now.year() == year {
+                            *clock = now;
+                        }
+                        else if clock.month() as u8 > 1 {
+                            *clock = clock.replace_day(1).unwrap();
+                            *clock = clock.replace_month(pre_month).unwrap();
+                        } else {
+                            *clock = clock.replace_year(year - 1).unwrap();
+                            *clock = clock.replace_day(1).unwrap();
+                            *clock = clock.replace_month(pre_month).unwrap();
+                        }
                     }
                     mut_ref.need_render = true;
                 }
@@ -295,11 +303,21 @@ impl Page for  WeatherPage{
 
                     let year = clock.year();
                     let next_month = clock.month().next() ;
-                    if 12 > clock.month() as u8  {
-                        *clock =   clock.replace_month(next_month).unwrap();
-                    }else{
-                        *clock =   clock.replace_year(year + 1).unwrap();
-                        *clock =   clock.replace_month(next_month).unwrap();
+                    if let Some(current_clock) = get_clock() {
+
+                        let now = current_clock.local().await;
+                        if now.month() == next_month && now.year() == year {
+                            *clock = now;
+                        }
+                        else if 12 > clock.month() as u8 {
+                            println!("{}", next_month);
+                            *clock = clock.replace_day(1).unwrap();
+                            *clock = clock.replace_month(next_month).unwrap();
+                        } else {
+                            *clock = clock.replace_year(year + 1).unwrap();
+                            *clock = clock.replace_day(1).unwrap();
+                            *clock = clock.replace_month(next_month).unwrap();
+                        }
                     }
                     println!("current_date:{}", clock.date());
                     mut_ref.need_render = true;
