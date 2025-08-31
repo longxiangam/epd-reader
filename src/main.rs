@@ -24,6 +24,7 @@ mod random;
 //mod web_service;
 mod battery;
 mod storage;
+mod panic;
 mod web_service;
 
 extern crate alloc;
@@ -40,7 +41,7 @@ use embedded_graphics::mono_font::MonoTextStyleBuilder;
 use embedded_graphics::prelude::Point;
 use embedded_graphics::text::{Baseline, LineHeight, Text, TextStyleBuilder};
 use embedded_sdmmc::{sdcard::AcquireOpts, SdCard, VolumeManager};
-use esp_backtrace as _;
+// use esp_backtrace as _; // 使用自定义panic处理器
 use esp_hal::{
     clock::ClockControl,
     peripherals::Peripherals,
@@ -102,6 +103,7 @@ use esp_hal::rtc_cntl::sleep::WakeupLevel;
 use crate::battery::Battery;
 use crate::sd_mount::{SdCsPin, SdMount, SD_MOUNT};
 use crate::sleep::{add_rtcio, refresh_active_time, to_sleep, to_sleep_tips};
+use crate::storage::{ErrorLogStorage, NvsStorage};
 use crate::weather::{sync_weather_success, HolidayInfo, Weather};
 use crate::wifi::{wifi_is_idle, WifiModel, WIFI_MODEL};
 use crate::worldtime::sync_time_success;
@@ -271,7 +273,6 @@ async fn main(spawner: Spawner) {
   
     let rtc_io = make_static!(Gpio2, rtc_pin);
     add_rtcio( rtc_io,  WakeupLevel::Low).await;
-
     if  need_ap {
         use crate::pages::Page;
         println!("entry ap");
@@ -309,6 +310,9 @@ async fn main(spawner: Spawner) {
 
     }
    
+    
+   
+    
     loop {
         if let Some(clock) = worldtime:: get_clock(){
             let local = clock.local().await;

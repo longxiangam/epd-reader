@@ -26,12 +26,14 @@ use crate::display::{display_mut,  RENDER_CHANNEL, RenderInfo};
 use crate::event::EventType;
 use crate::pages::{MenuItem, Page, PageEnum};
 use crate::pages::calendar_page::CalendarPage;
-use crate::pages::PageEnum::{ECalendarPage, EChip8Page, EClockPage, EReadPage, ESettingPage, ETimerPage, EWeatherPage};
+use crate::pages::PageEnum::{ECalendarPage,  EClockPage, EDebugPage, EReadPage, ESettingPage, ETimerPage, EWeatherPage};
 use crate::widgets::list_widget::ListWidget;
 use u8g2_fonts::fonts;
+use crate::pages::debug_page::DebugPage;
 use crate::pages::read_page::ReadPage;
 use crate::pages::setting_page::SettingPage;
 use crate::pages::weather_page::WeatherPage;
+use crate::storage::NvsStorage;
 
 static MAIN_PAGE:Mutex<CriticalSectionRawMutex,Option<MainPage> > = Mutex::new(None);
 
@@ -53,6 +55,19 @@ impl MainPage {
     pub async fn init(spawner: Spawner){
         let mut page_index = unsafe{ PAGE_INDEX };
         
+        
+        // 检查是否有错误日志，如果有则进入debug_page
+        #[cfg(feature = "enable_debug")]
+        if let Ok(error_log) = crate::storage::ErrorLogStorage::read() {
+            if error_log.error_count > 0 {
+                println!("=== 检测到错误日志，进入调试模式 ===");
+                println!("错误计数: {}", error_log.error_count);
+                println!("最新错误信息:");
+                println!("{}", error_log.last_error);
+                println!("================================");
+                page_index = 4;
+            }
+        } 
         MAIN_PAGE.lock().await.replace(MainPage::new());
 
         Self::bind_event(MAIN_PAGE.lock().await.as_mut().unwrap()).await;
@@ -104,6 +119,7 @@ impl Page for  MainPage{
         menus.push(MenuItem::new(String::<20>::from_str("天气").unwrap(), EWeatherPage));
         menus.push(MenuItem::new(String::<20>::from_str("日历").unwrap(), ECalendarPage));
         menus.push(MenuItem::new(String::<20>::from_str("设置").unwrap(), ESettingPage));
+        menus.push(MenuItem::new(String::<20>::from_str("调试").unwrap(), EDebugPage));
 
         Self{
             current_page:None,
@@ -242,6 +258,12 @@ impl Page for  MainPage{
                     let mut qrcode_page = SettingPage::new();
                     qrcode_page.bind_event().await;
                     qrcode_page.run(spawner).await;
+                    self.back().await;
+                }
+                EDebugPage =>{
+                    let mut debug_page = DebugPage::new();
+                    debug_page.bind_event().await;
+                    debug_page.run(spawner).await;
                     self.back().await;
                 }
                 _ => { self.back().await;}

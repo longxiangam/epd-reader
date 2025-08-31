@@ -119,9 +119,10 @@ pub struct HolidayStorage{
 
 const ERROR_LOG_OFFSET:usize = HOLIDAY_OFFSET + size_of::<HolidayStorage>();
 
-#[derive(Debug,Default)]
+#[derive(Debug,Default,Clone)]
 pub struct ErrorLogStorage{
-    pub last_error:heapless::String<500>,
+    pub error_count:u32,
+    pub last_error:heapless::String<200>,
 }
 
 
