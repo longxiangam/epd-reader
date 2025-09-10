@@ -4,7 +4,10 @@
 界面比较粗糙，以学习rust no_std编程为目标，只求实现指定功能。rust 生态资料还是太少了，每走一步都举步维艰，我也找不到比较好的参考所以也只能自己随意发挥了，另外我都是随意unwrap，panic 不要意外，我把错误直接显示在屏幕上了非常友好！！！
 
 
+
 硬件：https://oshwhub.com/longxiangam/epd_reader
+
+
 **待解决的问题:**
 显示部分还是同步方式，sd卡使用的 embedded-sdmmc-rs 读取不支持长文件名。
 
