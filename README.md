@@ -56,11 +56,7 @@
 - 异步任务处理
 - 低功耗设计
 
-## 编译
 
-```bash
-cargo build --release --target riscv32imc-unknown-none-elf
-```
 
 ## 许可证
 
