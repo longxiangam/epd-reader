@@ -13,7 +13,7 @@ use esp_hal::gpio::Output;
 use esp_hal::peripherals::SPI2;
 use esp_hal::spi::FullDuplexMode;
 use esp_hal::spi::master::Spi;
-use esp_println::println;
+use esp_println::{print, println};
 use heapless::{String, Vec};
 use log::debug;
 use u8g2_fonts::types::VerticalPosition;
@@ -316,7 +316,15 @@ impl TxtReader {
             buffer.push( value as u8);
         }
 
-        my_file.write(&buffer);
+        let result = my_file.write(&buffer);
+        match result {
+            Ok(_) => {  
+                println!("log:{:#?}",buffer);
+            }
+            Err(e)  => {
+                println!("log:{:#?}",e);
+            }
+        }
 
     }
     pub fn read_log<CS: esp_hal::gpio::OutputPin>(my_file: &mut FileObject<CS>)->Vec<u32,LOG_VEC_MAX>{

@@ -22,6 +22,7 @@ use crate::event::EventType;
 use crate::pages::{ Page};
 use crate::sd_mount::{ActualDirectory, SD_MOUNT, SdMount};
 use crate::sleep::{to_sleep, to_sleep_tips};
+use crate::storage::{NvsStorage, SleepStorage};
 use crate::widgets::list_widget::ListWidget;
 
 const PAGES_VEC_MAX:usize = epd2in9_txt::PAGES_VEC_MAX;
@@ -168,6 +169,8 @@ impl ReadPage{
                 if let Ok(mut f) = logfile {
                    epd2in9_txt::TxtReader::save_log(&mut f,self.log_vec.as_mut().unwrap(), self.page_index as u32, false);
                     f.close();
+                }else{
+                    println!("log error:{:#?}",logfile.unwrap_err());
                 }
             }
         }
@@ -337,7 +340,14 @@ impl Page for ReadPage{
                                     self.render().await;
 
 
-                                    to_sleep_tips(Duration::from_secs(0), Duration::from_secs(120),true).await;
+                                    // 从配置中读取阅读睡眠时间
+                                    let sleep_storage = crate::storage::SleepStorage::read().unwrap_or_default();
+                                    let read_sleep_seconds = if sleep_storage.read_sleep_seconds > 0 {
+                                        sleep_storage.read_sleep_seconds
+                                    } else {
+                                        120  // 默认值
+                                    };
+                                    to_sleep_tips(Duration::from_secs(0), Duration::from_secs(read_sleep_seconds),true).await;
                                     
                                     Timer::after_millis(50).await; 
                                 }

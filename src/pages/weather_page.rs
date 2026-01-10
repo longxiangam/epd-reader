@@ -31,6 +31,7 @@ use crate::model::seniverse::{DailyResult, form_json};
 use crate::pages::Page;
 use crate::request::RequestClient;
 use crate::sleep::{refresh_active_time, to_sleep,to_sleep_tips};
+use crate::storage::{NvsStorage, SleepStorage};
 use crate::weather::{ sync_holiday_success, sync_weather_success, HolidayInfo, Weather};
 use crate::widgets::calendar::Calendar;
 use crate::wifi::{finish_wifi, use_wifi, WIFI_STATE};
@@ -263,7 +264,14 @@ impl Page for  WeatherPage{
             Timer::after(Duration::from_millis(1)).await;
             self.render().await;
             if sync_time_success() && sync_weather_success() {
-                to_sleep_tips(Duration::from_secs(60), Duration::from_secs(5),true).await;
+                // 从配置中读取日历睡眠时间
+                let sleep_storage = crate::storage::SleepStorage::read().unwrap_or_default();
+                let weather_sleep_seconds = if sleep_storage.weather_sleep_seconds > 0 {
+                    sleep_storage.weather_sleep_seconds
+                } else {
+                    5  // 默认值
+                };
+                to_sleep_tips(Duration::from_secs(60), Duration::from_secs(weather_sleep_seconds),true).await;
             }
             Timer::after(Duration::from_millis(50)).await;
         }

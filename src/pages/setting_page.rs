@@ -22,6 +22,7 @@ use crate::event;
 use crate::event::EventType;
 use crate::pages::Page;
 use crate::storage::{init_storage_area, NvsStorage, WIFI_INFO};
+use crate::weather::Weather;
 use crate::widgets::qrcode_widget::QrcodeWidget;
 use crate::wifi::{finish_wifi, IP_ADDRESS, use_wifi, WIFI_MODEL, WifiNetError, WifiModel};
 use crate::web_service::{web_service,STOP_WEB_SERVICE};
@@ -137,6 +138,7 @@ impl Page for SettingPage {
     }
 
     async fn run(&mut self, spawner: Spawner) {
+        crate::display::QUICKLY_LUT_CHANNEL.send(false).await;
         STOP_WEB_SERVICE.reset();
         spawner.spawn(web_service()).ok();
         self.running = true;
@@ -168,10 +170,22 @@ impl Page for SettingPage {
 
         STOP_WEB_SERVICE.signal(());
 
+        crate::display::QUICKLY_LUT_CHANNEL.send(true).await;
     }
 
     async fn bind_event(&mut self) {
         event::clear().await;
+        event::on_target(EventType::KeyShort(1), Self::mut_to_ptr(self), move |info| {
+            return Box::pin(async move {
+
+                let mut_ref:&mut Self =  Self::mut_by_ptr(info.ptr).unwrap();
+                crate::display::QUICKLY_LUT_CHANNEL.send(false).await;
+                mut_ref.need_render = true;
+                Timer::after(Duration::from_millis(50)).await;
+                crate::display::QUICKLY_LUT_CHANNEL.send(true).await;
+
+            });
+        }).await;
 
         event::on_target(EventType::KeyShort(3),Self::mut_to_ptr(self),  move |info|  {
             return Box::pin(async move {

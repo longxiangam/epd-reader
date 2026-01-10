@@ -170,7 +170,8 @@ async fn connection_wifi(mut controller: WifiController<'static>) {
                 match select(disconnect,closeconnect).await {
                     Either::First(_) => {
                         WIFI_STATE.lock().await.replace(WifiNetState::WifiDisconnected);
-                        Timer::after(Duration::from_millis(1000)).await
+                        Timer::after(Duration::from_millis(1000)).await;
+                        println!("wifi disconnected...");
                     }
                     Either::Second(_) => {
                         STOP_WIFI_SIGNAL.reset();

@@ -96,7 +96,7 @@ fn panic_handler(info: &PanicInfo) -> ! {
     }
 
     // 重启系统
-    esp_hal::reset::software_reset();
+    //esp_hal::reset::software_reset();
     loop{
         
     }

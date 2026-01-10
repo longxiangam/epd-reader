@@ -3,7 +3,7 @@ use core::str::FromStr;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::mutex::Mutex;
 use embedded_hal_bus::spi::CriticalSectionDevice;
-use embedded_sdmmc::{Directory, Error, File, LfnBuffer, SdCard, Volume, VolumeManager};
+use embedded_sdmmc::{Directory, Error, File, LfnBuffer, Mode, SdCard, Volume, VolumeManager};
 use embassy_time::Delay;
 use esp_hal::gpio::Output;
 use esp_hal::peripherals::SPI2;
@@ -144,7 +144,18 @@ impl SdMount{
                 Err(SdError::FileNotFound)
             }
         } else {
-            Err(SdError::FileNotFound)
+            match mode {
+                Mode::ReadWriteCreate |
+                Mode::ReadWriteCreateOrTruncate |
+                Mode::ReadWriteCreateOrAppend => {
+                    if let Ok(temp) =  books_dir.open_file_in_dir(file_name,mode) {
+                        Ok(temp)
+                    }else{
+                        Err(FileNotFound)
+                    }
+                }
+                _ =>  Err(FileNotFound),
+            }
         }
     }
 }

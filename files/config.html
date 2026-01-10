@@ -111,8 +111,9 @@
 <div class="container">
     <div class="tabs">
         <button class="tab-link active" data-tab="wifi">WiFi</button>
-       <!-- <button class="tab-link" data-tab="timer">定时功能</button>
-        <button class="tab-link" data-tab="weather">天气接口</button>-->
+        <button class="tab-link" data-tab="weather">天气</button>
+        <button class="tab-link" data-tab="sleep">睡眠</button>
+       <!-- <button class="tab-link" data-tab="timer">定时功能</button>-->
 
     </div>
     <div id="wifi" class="tab-content active">
@@ -125,6 +126,26 @@
             <div id="wifiMessage" class="message"></div>
         </form>
     </div>
+    <div id="weather" class="tab-content">
+        <form id="weatherForm">
+            <label for="api-key">天气API Key:</label>
+            <input type="text" id="api-key" name="api-key" required />
+            <label for="location">城市:</label>
+            <input type="text" id="location" name="location" required />
+            <input type="submit" value="保存配置" />
+            <div id="weatherMessage" class="message"></div>
+        </form>
+    </div>
+    <div id="sleep" class="tab-content">
+        <form id="sleepForm">
+            <label for="read-sleep-seconds">阅读睡眠时间（秒）:</label>
+            <input type="number" id="read-sleep-seconds" name="read-sleep-seconds" min="0" required />
+            <label for="weather-sleep-seconds">日历睡眠时间（秒）:</label>
+            <input type="number" id="weather-sleep-seconds" name="weather-sleep-seconds" min="0" required />
+            <input type="submit" value="保存配置" />
+            <div id="sleepMessage" class="message"></div>
+        </form>
+    </div>
 <!--    <div id="timer" class="tab-content">
         <form action="/configure_timer" method="POST">
             <label for="start-time">Start Time:</label>
@@ -132,15 +153,6 @@
             <label for="end-time">End Time:</label>
             <input type="text" id="end-time" name="end-time" required />
             <input type="submit" value="Set Timer" />
-        </form>
-    </div>
-    <div id="weather" class="tab-content">
-        <form action="/configure_weather" method="POST">
-            <label for="api-key">API Key:</label>
-            <input type="text" id="api-key" name="api-key" required />
-            <label for="location">Location:</label>
-            <input type="text" id="location" name="location" required />
-            <input type="submit" value="Set Weather API" />
         </form>
     </div>-->
 </div>
@@ -187,6 +199,66 @@
                 wifiMessage.textContent = 'An error occurred: ' + error.message;
                 wifiMessage.className = 'message error';
                 wifiMessage.style.display = 'block';
+            });
+    });
+
+    // Weather form submission with AJAX
+    const weatherForm = document.getElementById('weatherForm');
+    const weatherMessage = document.getElementById('weatherMessage');
+
+    weatherForm.addEventListener('submit', function(event) {
+        event.preventDefault();
+
+        const formData = new FormData(weatherForm);
+        fetch('/configure_weather', {
+            method: 'POST',
+            body: formData
+        })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    weatherMessage.textContent = '天气配置保存成功!';
+                    weatherMessage.className = 'message success';
+                } else {
+                    weatherMessage.textContent = '保存天气配置失败.';
+                    weatherMessage.className = 'message error';
+                }
+                weatherMessage.style.display = 'block';
+            })
+            .catch(error => {
+                weatherMessage.textContent = '发生错误: ' + error.message;
+                weatherMessage.className = 'message error';
+                weatherMessage.style.display = 'block';
+            });
+    });
+
+    // Sleep form submission with AJAX
+    const sleepForm = document.getElementById('sleepForm');
+    const sleepMessage = document.getElementById('sleepMessage');
+
+    sleepForm.addEventListener('submit', function(event) {
+        event.preventDefault();
+
+        const formData = new FormData(sleepForm);
+        fetch('/configure_sleep', {
+            method: 'POST',
+            body: formData
+        })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    sleepMessage.textContent = '睡眠配置保存成功!';
+                    sleepMessage.className = 'message success';
+                } else {
+                    sleepMessage.textContent = '保存睡眠配置失败.';
+                    sleepMessage.className = 'message error';
+                }
+                sleepMessage.style.display = 'block';
+            })
+            .catch(error => {
+                sleepMessage.textContent = '发生错误: ' + error.message;
+                sleepMessage.className = 'message error';
+                sleepMessage.style.display = 'block';
             });
     });
 

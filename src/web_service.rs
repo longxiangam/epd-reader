@@ -198,6 +198,110 @@ async fn process_http(socket:&mut TcpSocket<'_>,buffer:&str) {
                 }
             }
         }
+        if let Some("/configure_weather") = req.path {
+            let form_fields = parse_form(&req, buffer);
+            println!("weather form_data:{:?}", form_fields);
+
+            if let Ok(fields) = form_fields {
+                let mut api_key: Option<&str> = None;
+                let mut location: Option<&str> = None;
+
+                for field in fields {
+                    if field.0 == "api-key" {
+                        api_key = Some(field.1);
+                        println!("api-key:{}", field.1);
+                    } else if field.0 == "location" {
+                        location = Some(field.1);
+                        println!("location:{}", field.1);
+                    }
+                }
+
+                if let (Some(key), Some(city)) = (api_key, location) {
+                    let mut weather_storage = crate::storage::WeatherStorage::read().unwrap_or_default();
+                    weather_storage.token = heapless::String::from_str(key).unwrap();
+                    weather_storage.city = heapless::String::from_str(city).unwrap();
+                    
+                    match weather_storage.write() {
+                        Ok(_) => {
+                            println!("天气配置保存成功");
+                            // 更新内存中的配置
+                            crate::storage::WEATHER_API.lock().await.replace(weather_storage);
+                        }
+                        Err(e) => {
+                            println!("天气配置保存失败：{:?}", e);
+                        }
+                    }
+                }
+
+                let r = socket
+                    .write_all(
+                        b"HTTP/1.0 200 OK\r\n\r\n\
+            <html>\
+                <body>\
+                    <h3>Weather config saved</h3>\
+                    <a href='/'>Back</a>\
+                </body>\
+            </html>\r\n",
+                    )
+                    .await;
+
+                if let Err(e) = r {
+                    println!("write error: {:?}", e);
+                }
+            }
+        }
+        if let Some("/configure_sleep") = req.path {
+            let form_fields = parse_form(&req, buffer);
+            println!("sleep form_data:{:?}", form_fields);
+
+            if let Ok(fields) = form_fields {
+                let mut read_sleep_seconds: Option<&str> = None;
+                let mut weather_sleep_seconds: Option<&str> = None;
+
+                for field in fields {
+                    if field.0 == "read-sleep-seconds" {
+                        read_sleep_seconds = Some(field.1);
+                        println!("read-sleep-seconds:{}", field.1);
+                    } else if field.0 == "weather-sleep-seconds" {
+                        weather_sleep_seconds = Some(field.1);
+                        println!("weather-sleep-seconds:{}", field.1);
+                    }
+                }
+
+                if let (Some(read_sec), Some(weather_sec)) = (read_sleep_seconds, weather_sleep_seconds) {
+                    if let (Ok(read_val), Ok(weather_val)) = (read_sec.parse::<u64>(), weather_sec.parse::<u64>()) {
+                        let mut sleep_storage = crate::storage::SleepStorage::read().unwrap_or_default();
+                        sleep_storage.read_sleep_seconds = read_val;
+                        sleep_storage.weather_sleep_seconds = weather_val;
+                        
+                        match sleep_storage.write() {
+                            Ok(_) => {
+                                println!("睡眠配置保存成功");
+                            }
+                            Err(e) => {
+                                println!("睡眠配置保存失败：{:?}", e);
+                            }
+                        }
+                    }
+                }
+
+                let r = socket
+                    .write_all(
+                        b"HTTP/1.0 200 OK\r\n\r\n\
+            <html>\
+                <body>\
+                    <h3>Sleep config saved</h3>\
+                    <a href='/'>Back</a>\
+                </body>\
+            </html>\r\n",
+                    )
+                    .await;
+
+                if let Err(e) = r {
+                    println!("write error: {:?}", e);
+                }
+            }
+        }
     }
 }
 fn parse_form<'a>(

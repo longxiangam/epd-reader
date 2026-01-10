@@ -1,13 +1,12 @@
 use alloc::format;
 use esp_hal::macros::ram;
 use esp_println::println;
-use futures::future::err;
 use crate::model::seniverse::{DailyResult, form_json};
 use crate::request::RequestClient;
 use crate::wifi::{finish_wifi, use_wifi};
 use crate::worldtime::{get_clock};
 
-use crate::model::holiday::{HolidayResponse, form_json as form_holiday_json, form_json_each};
+use crate::model::holiday::{HolidayResponse, form_json_each};
 use crate::storage::{HolidayStorage, NvsStorage, WeatherStorage};
 pub struct Weather{
 }
@@ -19,13 +18,28 @@ impl Weather {
         }
     }
     pub async fn request()->Result<(),()> {
+        // 从存储中读取配置
+        let weather_storage = WeatherStorage::read().unwrap_or_default();
+        let api_key = if weather_storage.token.is_empty() {
+            "SvRIiZPU5oGiqcHc1" // 默认值
+        } else {
+            weather_storage.token.as_str()
+        };
+        let city = if weather_storage.city.is_empty() {
+            "wuhan" // 默认值
+        } else {
+            weather_storage.city.as_str()
+        };
+        
+        let url = format!("http://api.seniverse.com/v3/weather/daily.json?key={}&location={}&language=zh-Hans&unit=c&start=0&days=5", api_key, city);
+        
         let stack = use_wifi().await;
         match stack {
             Ok(v) => {
                 println!("请求 stack 成功");
                 let mut request = RequestClient::new(v).await;
                 println!("开始请求成功");
-                let result = request.send_request("http://api.seniverse.com/v3/weather/daily.json?key=SvRIiZPU5oGiqcHc1&location=wuhan&language=zh-Hans&unit=c&start=0&days=5").await;
+                let result = request.send_request(url.as_str()).await;
                 match result {
                     Ok(response) => {
                         let mut daily_result = form_json(&response.data[..response.length]);
@@ -77,7 +91,7 @@ impl Weather {
             WEATHER_SYNC_SECOND = get_clock().unwrap().now().await.unix_timestamp() as u64;
         }
         
-        let mut weather_storage = WeatherStorage::read().unwrap();
+        let mut weather_storage = WeatherStorage::default();
         weather_storage.weather_data =  Some(daily_result);
         weather_storage.sync_time_second =  unsafe{WEATHER_SYNC_SECOND};
         weather_storage.write().unwrap();
@@ -146,7 +160,6 @@ impl HolidayInfo {
     }
 
 
-
     pub async fn sync_holiday(){
 
         if unsafe{HOLIDAY_SYNC_SECOND} == 0 {
@@ -187,6 +200,7 @@ impl HolidayInfo {
         holiday_storage.holiday_response
     }
 
+    #[inline(always)]
     pub async fn save(holiday_response: HolidayResponse){
         unsafe {
             HOLIDAY_SYNC_SECOND = get_clock().unwrap().now().await.unix_timestamp() as u64;
@@ -194,7 +208,7 @@ impl HolidayInfo {
 
         println!("HOLIDAY_SYNC_SECOND:{}", unsafe{HOLIDAY_SYNC_SECOND});
 
-        let mut holiday_storage = HolidayStorage::read().unwrap();
+        let mut holiday_storage = HolidayStorage::default();
         holiday_storage.holiday_response =  Some(holiday_response);
         holiday_storage.sync_time_second =  unsafe{HOLIDAY_SYNC_SECOND};
         holiday_storage.write().unwrap();
