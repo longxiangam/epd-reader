@@ -4,6 +4,7 @@ use embassy_executor::Spawner;
 use embassy_time::{Duration, Instant, Timer};
 use embedded_graphics::Drawable;
 use embedded_graphics::prelude::{Dimensions, Point, Size};
+use embedded_sdmmc::ShortFileName;
 use epd_waveshare::color::{Black, Color,White};
 use epd_waveshare::graphics::{Display, DisplayRotation};
 use esp_hal::macros::ram;
@@ -20,7 +21,7 @@ use crate::{display, epd2in9_txt, event};
 use crate::epd2in9_txt::{BookPages, TxtReader};
 use crate::event::EventType;
 use crate::pages::{ Page};
-use crate::sd_mount::{ActualDirectory, SD_MOUNT, SdMount};
+use crate::sd_mount::{ActualDirectory, SD_MOUNT, SdMount, BOOK_NAME_MAX};
 use crate::sleep::{to_sleep, to_sleep_tips};
 use crate::storage::{NvsStorage, SleepStorage};
 use crate::widgets::list_widget::ListWidget;
@@ -39,8 +40,8 @@ pub struct ReadPage{
     indexing_process:f32,
 
     choose_index:u32,
-    open_file_name:String<50>,
-    menus:Option<Vec<String<50>,40>>,
+    open_file_name:String<BOOK_NAME_MAX>,
+    menus:Option<Vec<String<BOOK_NAME_MAX>,40>>,
     book_pages:Option<BookPages>,
     log_vec:Option<Vec<u32,LOG_VEC_MAX>>,
     page_index:u32,
@@ -55,19 +56,28 @@ impl ReadPage{
         let book_name = self.menus.as_ref().unwrap()[self.choose_index as usize].clone();
 
         let file_name = format!("{}.txt", book_name);
-        let index_name = format!("{}.idx", book_name);
         let mut need_index = false;
         let mut file_len = 0;
         let mut book_pages = None;
+
+        // Resolve book's short name via LFN lookup
+        let book_short_name = match SdMount::find_entry_by_name(books_dir, &file_name) {
+            Some(entry) => entry.name,
+            None => {
+                println!("Book not found: {}", file_name);
+                return;
+            }
+        };
+
         {
-            let mut my_file = SdMount::open_file_by_name(books_dir,file_name.as_str(), embedded_sdmmc::Mode::ReadOnly).unwrap();
+            let mut my_file = books_dir.open_file_in_dir(book_short_name.clone(), embedded_sdmmc::Mode::ReadOnly).unwrap();
             file_len = my_file.length();
             my_file.close();
         }
 
         println!("file len:{}", file_len);
         {
-            let mut my_file_index = SdMount::open_file_by_name(books_dir,index_name.as_str(), embedded_sdmmc::Mode::ReadOnly);
+            let mut my_file_index = SdMount::open_idx_file(books_dir, &book_short_name, embedded_sdmmc::Mode::ReadOnly);
             if let Ok(mut mfi) = my_file_index {
                 println!("idx len:{}", mfi.length());
                 if (mfi.length() == 0) {
@@ -98,7 +108,8 @@ impl ReadPage{
 
             self.indexing = true;
             let self_ptr = Self::mut_to_ptr(self);
-            book_pages = TxtReader::generate_pages(books_dir,book_name.as_str(), |process|  {
+            let short_name_clone = book_short_name.clone();
+            book_pages = TxtReader::generate_pages(books_dir, book_name.as_str(), &short_name_clone, |process|  {
                 return Box::pin(async  move {
 
                     let mut_ref:&mut Self =  Self::mut_by_ptr(Some(self_ptr)).unwrap();
@@ -120,10 +131,16 @@ impl ReadPage{
     }
     async fn get_log_vec(&mut self,books_dir:&mut ActualDirectory<'_>) {
         let book_name = self.menus.as_ref().unwrap()[self.choose_index as usize].clone();
-        let log_name = format!("{}.log", book_name);
+        let file_name = format!("{}.txt", book_name);
+
+        // Resolve book's short name
+        let book_short_name = match SdMount::find_entry_by_name(books_dir, &file_name) {
+            Some(entry) => entry.name,
+            None => return,
+        };
         {
             //读日志
-            let mut my_file =  SdMount::open_file_by_name(books_dir,log_name.as_str(), embedded_sdmmc::Mode::ReadOnly);
+            let mut my_file =  SdMount::open_log_file(books_dir, &book_short_name, embedded_sdmmc::Mode::ReadOnly);
             if let Ok(mut f) = my_file {
                 self.log_vec = Some(TxtReader::read_log(&mut f));
                 if let Some(ref lv) = self.log_vec{
@@ -139,33 +156,35 @@ impl ReadPage{
     async fn get_page_content(&mut self,books_dir:&mut ActualDirectory<'_>){
 
         let book_name = self.menus.as_ref().unwrap()[self.choose_index as usize].clone();
-        //读sd卡目录
-
         let begin_secs = Instant::now().as_secs();
         println!("begin_time:{}", begin_secs);
 
         let file_name = format!("{}.txt", book_name);
-        let log_name = format!("{}.log", book_name);
-        let index_name = format!("{}.idx", book_name);
+
+        // Resolve book's short name
+        let book_short_name = match SdMount::find_entry_by_name(books_dir, &file_name) {
+            Some(entry) => entry.name,
+            None => return,
+        };
+
         if let Some( bp) = self.book_pages.as_mut() {
             let mut begin =  0;
             let mut end =  0;
             {
-                let mut index_file = SdMount::open_file_by_name(books_dir,index_name.as_str(), embedded_sdmmc::Mode::ReadOnly);
+                let mut index_file = SdMount::open_idx_file(books_dir, &book_short_name, embedded_sdmmc::Mode::ReadOnly);
                 if let Ok(mut index_file) = index_file {
                     (begin, end) = bp.get_page_content_position(&mut index_file);
                 }
             }
             {
-                //let mut my_file =books_dir.open_file_in_dir(file_name.as_str(), embedded_sdmmc::Mode::ReadOnly).unwrap();
-                let mut my_file =  SdMount::open_file_by_name(books_dir,file_name.as_str(), embedded_sdmmc::Mode::ReadOnly);
+                let mut my_file = books_dir.open_file_in_dir(book_short_name.clone(), embedded_sdmmc::Mode::ReadOnly);
                 if let Ok(mut my_file) = my_file {
                     self.page_content = TxtReader::get_page_content(&mut my_file, begin, end);
                     my_file.close();
                 }
             }
             {
-                let logfile = SdMount::open_file_by_name(books_dir,log_name.as_str(), embedded_sdmmc::Mode::ReadWriteCreateOrTruncate);
+                let logfile = SdMount::open_log_file(books_dir, &book_short_name, embedded_sdmmc::Mode::ReadWriteCreateOrTruncate);
                 if let Ok(mut f) = logfile {
                    epd2in9_txt::TxtReader::save_log(&mut f,self.log_vec.as_mut().unwrap(), self.page_index as u32, false);
                     f.close();

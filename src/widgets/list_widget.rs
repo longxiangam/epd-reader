@@ -10,6 +10,7 @@ use embedded_graphics::primitives::{PrimitiveStyleBuilder, Rectangle, StrokeAlig
 use u8g2_fonts::{FontRenderer};
 use u8g2_fonts::fonts;
 use u8g2_fonts::types::{FontColor, HorizontalAlignment, VerticalPosition};
+use crate::sd_mount::BOOK_NAME_MAX;
 use crate::widgets::scroll_bar::{ScrollBar, ScrollBarDirection};
 
 const ITEM_HEIGHT:u32 = 20;
@@ -32,7 +33,7 @@ impl <C: Clone> ListWidget<C>{
         let item_size = Size::new(size.width - SCROLL_WIDTH,ITEM_HEIGHT);
         for (index,item) in items.iter().enumerate() {
             let item_position =  Point::new(position.x,position.y + (index) as i32 * ITEM_HEIGHT as i32 );
-            let list_item = ListItemWidget::new(item_position,front_color.clone(),back_color.clone(),item_size,String::from_str(item).unwrap());
+            let list_item = ListItemWidget::new(item_position,front_color.clone(),back_color.clone(),item_size,String::from_str(item).unwrap_or_default());
             let _ = list_items.push(list_item);
         }
         Self{
@@ -148,7 +149,7 @@ impl <C> Drawable for  ListWidget<C> where C:PixelColor{
 
 
 pub struct ListItemWidget<C>{
-    label:String<50>,
+    label:String<BOOK_NAME_MAX>,
     position:Point,
     size:Size,
     front_color:C,
@@ -158,7 +159,7 @@ pub struct ListItemWidget<C>{
 }
 
 impl <C: Clone>ListItemWidget<C>{
-    fn new(position: Point, front_color:C, back_color:C, size: Size, label:String<50>) ->Self{
+    fn new(position: Point, front_color:C, back_color:C, size: Size, label:String<BOOK_NAME_MAX>) ->Self{
 
         Self{
             label,

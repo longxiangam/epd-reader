@@ -6,7 +6,7 @@ use core::pin::Pin;
 use embassy_time::{Instant, Timer};
 use embedded_graphics::prelude::Point;
 use embedded_hal_bus::spi::CriticalSectionDevice;
-use embedded_sdmmc::{File, SdCard};
+use embedded_sdmmc::{File, SdCard, ShortFileName};
 
 use embassy_time::Delay;
 use esp_hal::gpio::Output;
@@ -53,11 +53,20 @@ const LINE_OVERFLOW:u32 = 8;
 
 type FileObject<'a,'b,CS: esp_hal::gpio::OutputPin> = File<'b,SdCard<&'a mut CriticalSectionDevice<'a,Spi<'a,SPI2, FullDuplexMode>, Output<'a,CS>, Delay>, Delay>, TimeSource, 4, 4, 1>;
 impl TxtReader {
-     pub async fn generate_pages<F>(books_dir:&mut ActualDirectory<'_>,book_name:&str, mut process: F) ->Option<BookPages>
+     pub async fn generate_pages<F>(books_dir:&mut ActualDirectory<'_>,book_name:&str, book_short_name:&ShortFileName, mut process: F) ->Option<BookPages>
      where F:FnMut(f32) -> (Pin<Box<dyn Future<Output=()>>>)
      {
-         let file_name = format!("{}.txt", book_name);
-         let index_name = format!("{}.idx", book_name);
+         // Use short name for .txt file operations
+         let file_short_name = book_short_name.clone();
+
+         // Derive .idx short name from book's short name
+         let idx_short_name = match crate::sd_mount::SdMount::derive_short_name(book_short_name, "IDX") {
+             Some(n) => n,
+             None => {
+                 println!("Failed to derive idx short name from: {}", book_short_name);
+                 return None;
+             }
+         };
 
         let mut begin_position :u32= 0; //每一屏在文件中的开始位置
         let mut end_position:u32 = 0; //每一屏在文件中的结束位置
@@ -70,7 +79,7 @@ impl TxtReader {
 
          let mut file_length = 0;
          {
-             let mut my_file = books_dir.open_file_in_dir(file_name.as_str(), embedded_sdmmc::Mode::ReadOnly).unwrap();
+             let mut my_file = books_dir.open_file_in_dir(file_short_name.clone(), embedded_sdmmc::Mode::ReadOnly).unwrap();
              file_length = my_file.length();
              my_file.close();
          }
@@ -79,14 +88,14 @@ impl TxtReader {
         let begin_sec = Instant::now().as_secs();
         let mut last_sec = begin_sec;
 
-         //删除
-         if let Ok(dir_ent) =  books_dir.find_directory_entry(index_name.as_str()){
-             books_dir.delete_file_in_dir(index_name.as_str()).expect("index file delete fail");
+         //删除旧索引
+         if books_dir.find_directory_entry(idx_short_name.clone()).is_ok() {
+             let _ = books_dir.delete_file_in_dir(idx_short_name.clone());
              println!("删除旧索引");
          }
          while end_position != file_length {
              println!("end_position:{}",end_position);
-             let mut my_file =books_dir.open_file_in_dir(file_name.as_str(), embedded_sdmmc::Mode::ReadOnly).unwrap();
+             let mut my_file = books_dir.open_file_in_dir(file_short_name.clone(), embedded_sdmmc::Mode::ReadOnly).unwrap();
              if end_position > 0 {
                  my_file.seek_from_start(end_position);
                  last_borrow_chars = 0;
@@ -98,8 +107,6 @@ impl TxtReader {
              'outer: while !my_file.is_eof() {
                  let mut buffer = [0u8; BUFFER_LEN];
                  let num_read = my_file.read(&mut buffer).unwrap();
-                 /*  println!("buffer num:{}",num_read);
-            println!("buffer : {:?}",buffer );*/
 
                  let mut i = 0;
                  if last_borrow_chars > 0 {
@@ -133,7 +140,6 @@ impl TxtReader {
                              //不处理
                          }
                      }
-                     //println!("byte_num:{}",byte_num);
                      //步进一个字符的字节数
                      if byte_num > 0 {
                          end_position += byte_num as u32;
@@ -184,16 +190,16 @@ impl TxtReader {
 
 
              //写索引
-             let mut my_file_index =books_dir.open_file_in_dir(index_name.as_str(), embedded_sdmmc::Mode::ReadWriteCreateOrAppend);
+             let mut my_file_index = books_dir.open_file_in_dir(idx_short_name.clone(), embedded_sdmmc::Mode::ReadWriteCreateOrAppend);
              if let Ok(mut mfi) = my_file_index {
                  crate::epd2in9_txt::TxtReader::save_pages(&mut mfi, &all_page_position_vec);
                  mfi.close();
              }
 
          }
-         //写索引
+         //读索引长度
          let mut book_pages  = None;
-         let mut my_file_index =books_dir.open_file_in_dir(index_name.as_str(), embedded_sdmmc::Mode::ReadOnly);
+         let mut my_file_index = books_dir.open_file_in_dir(idx_short_name, embedded_sdmmc::Mode::ReadOnly);
          if let Ok(mut mfi) = my_file_index {
              book_pages = Some(BookPages::new(mfi.length()));
              mfi.close();
