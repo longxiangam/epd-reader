@@ -298,7 +298,9 @@ impl TxtReader {
         //let mut log_vec:Vec<u32,LOG_VEC_MAX> = Self::read_log(my_file);
 
         if is_favorite {
-            if !log_vec.contains(&page) && log_vec.len() < LOG_VEC_MAX{
+            // Only check bookmarks (index 1+), not last read position (index 0)
+            let already_bookmarked = log_vec.iter().skip(1).any(|&p| p == page);
+            if !already_bookmarked && log_vec.len() < LOG_VEC_MAX{
                 if(log_vec.len() == 0){
                     log_vec.push(page);
                 }
