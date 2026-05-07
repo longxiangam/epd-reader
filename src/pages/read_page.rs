@@ -38,7 +38,7 @@ const DISPLAY_HEIGHT: u32 = 300;
 const FONT_SIZE: u32 = 16;
 const PROGRESS_AREA_HEIGHT: u32 = 20;
 
-const MENU_ITEMS: &[&str] = &["重建索引", "收藏书签", "打开书签", "跳转页码", "旋转屏幕", "返回书单"];
+const MENU_ITEMS: &[&str] = &["返回书单", "收藏书签", "打开书签", "跳转页码", "旋转屏幕", "重建索引"];
 
 enum MenuState {
     Closed,
@@ -66,70 +66,20 @@ pub struct ReadPage{
     page_content:String<ONE_PAGE_CONTENT_LEN>,
     menu_state:MenuState,
     save_bookmark_flag:bool,
-    /// 0=Rotate0, 1=Rotate90, 2=Rotate180, 3=Rotate270
-    rotation_index:u8,
-    /// Quick mode: paginate on-the-fly from a byte offset (no full index)
-    quick_mode:bool,
-    quick_offset:u32,
-    quick_next_offset:u32,
-    /// History of previous page start offsets for backward navigation in quick mode
-    quick_history:Vec<u32,30>,
+    /// 0=Rotate90, 1=Rotate270 (upside-down portrait, same page indexing)
+    flipped:bool,
 }
 
 impl ReadPage{
     fn current_rotation(&self) -> DisplayRotation {
-        match self.rotation_index {
-            0 => DisplayRotation::Rotate0,
-            1 => DisplayRotation::Rotate90,
-            2 => DisplayRotation::Rotate180,
-            3 => DisplayRotation::Rotate270,
-            _ => DisplayRotation::Rotate90,
-        }
+        if self.flipped { DisplayRotation::Rotate270 } else { DisplayRotation::Rotate90 }
     }
 
-    fn is_portrait(&self) -> bool {
-        self.rotation_index % 2 == 1 // Rotate90(1), Rotate270(3)
-    }
-
-    fn visual_width(&self) -> u32 {
-        if self.is_portrait() { DISPLAY_HEIGHT } else { DISPLAY_WIDTH }
-    }
-
-    fn visual_height(&self) -> u32 {
-        if self.is_portrait() { DISPLAY_WIDTH } else { DISPLAY_HEIGHT }
-    }
+    fn visual_width(&self) -> u32 { DISPLAY_HEIGHT } // 300, always portrait
+    fn visual_height(&self) -> u32 { DISPLAY_WIDTH } // 400, always portrait
 
     fn page_lines(&self) -> u32 {
         (self.visual_height() - PROGRESS_AREA_HEIGHT) / FONT_SIZE - 1
-    }
-
-    /// Get the byte offset of the current page's start position
-    fn current_page_offset(&self) -> u32 {
-        if let Some(ref bp) = self.book_pages {
-            bp.current_page_start_offset()
-        } else {
-            self.quick_offset
-        }
-    }
-
-    /// Load one page in quick mode (no index, on-the-fly wrapping)
-    async fn quick_load_page(&mut self, books_dir: &mut ActualDirectory<'_>) {
-        let book_name = self.menus.as_ref().unwrap()[self.choose_index as usize].clone();
-        let file_name = format!("{}.txt", book_name);
-        if let Some(entry) = SdMount::find_entry_by_name(books_dir, &file_name) {
-            let short_name = entry.name;
-            if let Ok(mut my_file) = books_dir.open_file_in_dir(short_name, embedded_sdmmc::Mode::ReadOnly) {
-                let (content, end_offset, _is_eof) = TxtReader::get_page_from_offset(
-                    &mut my_file,
-                    self.quick_offset,
-                    self.visual_width(),
-                    self.page_lines(),
-                );
-                my_file.close();
-                self.page_content = content;
-                self.quick_next_offset = end_offset;
-            }
-        }
     }
 
     async fn back(&mut self){
@@ -311,7 +261,8 @@ impl ReadPage{
 
         match self.menu_state {
             MenuState::Popup { menu_index } => {
-                let menu_height = MENU_ITEMS.len() as u32 * menu_item_height + menu_padding * 2;
+                let page_info_height: u32 = 18;
+                let menu_height = MENU_ITEMS.len() as u32 * menu_item_height + page_info_height + menu_padding * 2;
                 let menu_x = ((vw - menu_width) / 2) as i32;
                 let menu_y = ((vh - menu_height) / 2) as i32;
 
@@ -353,16 +304,16 @@ impl ReadPage{
                     ).ok();
                 }
 
-                // Show page number below menu
+                // Show page number inside menu, at bottom
                 if let Some(ref bp) = self.book_pages {
                     let total = bp.total_page;
                     if total > 0 {
                         let current = if self.page_index > total { total } else { self.page_index };
-                        let bottom_text_y = menu_y + menu_height as i32 + 6;
+                        let page_text_y = menu_y + menu_height as i32 - menu_padding as i32;
                         font.render_aligned(
                             format_args!("{}/{}", current, total),
-                            Point::new(menu_x + menu_width as i32 / 2, bottom_text_y),
-                            VerticalPosition::Top,
+                            Point::new(menu_x + menu_width as i32 / 2, page_text_y),
+                            VerticalPosition::Bottom,
                             HorizontalAlignment::Center,
                             FontColor::Transparent(Black),
                             display,
@@ -544,11 +495,7 @@ impl Page for ReadPage{
             page_content: Default::default(),
             menu_state: MenuState::Closed,
             save_bookmark_flag: false,
-            rotation_index: 1,
-            quick_mode: false,
-            quick_offset: 0,
-            quick_next_offset: 0,
-            quick_history: Vec::new(),
+            flipped: false,
         };
 
         unsafe{
@@ -601,13 +548,13 @@ impl Page for ReadPage{
                             list_widget.choose(self.choose_index as usize);
                             let _ = list_widget.draw(display);
                         }
-                    } else if self.quick_mode || self.book_pages.is_some() {
+                    } else if self.book_pages.is_some() {
                         let font: FontRenderer = FontRenderer::new::<fonts::u8g2_font_wqy15_t_gb2312>();
                         let mut font = font.with_ignore_unknown_chars(true);
                         //显示选择书本对应页的内容
                         display.clear_buffer(Color::White);
                         {
-                            if !self.quick_mode && self.page_index == self.book_pages.as_ref().unwrap().total_page {
+                            if self.page_index == self.book_pages.as_ref().unwrap().total_page {
                                 let _ = font.render_aligned(
                                     "已是最后一页",
                                     center,
@@ -669,15 +616,11 @@ impl Page for ReadPage{
                                 loop {
                                     if !self.running { break; }
                                     if self.menus.as_ref().unwrap().len() > 0 {
-                                        // Quick mode: paginate on-the-fly, no full index needed
-                                        if self.quick_mode && self.need_render {
-                                            self.quick_load_page(&mut books_dir).await;
-                                            self.change_page = false;
-                                        } else if !self.quick_mode && self.book_pages.is_none() {
+                                        if let None = self.book_pages {
                                             self.get_page_vec(&mut books_dir).await;
                                             self.get_log_vec(&mut books_dir).await;
                                         }
-                                        if !self.quick_mode && self.change_page {
+                                        if self.change_page {
                                             println!("change_page : {}", self.page_index);
                                             self.change_page = false;
                                             self.book_pages.as_mut().unwrap().set_current_page(self.page_index);
@@ -743,13 +686,20 @@ impl Page for ReadPage{
     async fn bind_event(&mut self) {
         event::clear().await;
 
-        // Key3 long: close menu (if open) or exit ReadPage
+        // Key3 long: open/close menu (in reading mode) or exit ReadPage
         event::on_target(EventType::KeyLongEnd(3),Self::mut_to_ptr(self),  move |info|  {
             return Box::pin(async move {
                 let mut_ref:&mut Self =  Self::mut_by_ptr(info.ptr).unwrap();
-                if !matches!(mut_ref.menu_state, MenuState::Closed) {
-                    mut_ref.menu_state = MenuState::Closed;
-                    mut_ref.need_render = true;
+                if mut_ref.reading {
+                    if matches!(mut_ref.menu_state, MenuState::Closed) {
+                        // Open menu
+                        mut_ref.menu_state = MenuState::Popup { menu_index: 0 };
+                        mut_ref.need_render = true;
+                    } else {
+                        // Close menu
+                        mut_ref.menu_state = MenuState::Closed;
+                        mut_ref.need_render = true;
+                    }
                 } else {
                     mut_ref.back().await;
                 }
@@ -764,9 +714,9 @@ impl Page for ReadPage{
                     MenuState::Popup { menu_index } => {
                         match menu_index {
                             0 => {
-                                // 重建索引
-                                mut_ref.force_indexing = true;
-                                mut_ref.book_pages = None;
+                                // 返回书单
+                                mut_ref.reading = false;
+                                unsafe { PAGE_INDEX = None; }
                             }
                             1 => {
                                 // 收藏书签
@@ -785,25 +735,16 @@ impl Page for ReadPage{
                                 return;
                             }
                             4 => {
-                                // 旋转屏幕 — cycle through 4 rotations
-                                let was_portrait = mut_ref.is_portrait();
-                                mut_ref.rotation_index = (mut_ref.rotation_index + 1) % 4;
+                                // 旋转屏幕 — flip upside down (Rotate90 ↔ Rotate270)
+                                mut_ref.flipped = !mut_ref.flipped;
                                 if let Some(display) = display_mut() {
                                     display.set_rotation(mut_ref.current_rotation());
                                 }
-                                // Orientation changed → enter quick mode (no re-indexing)
-                                if was_portrait != mut_ref.is_portrait() {
-                                    mut_ref.quick_offset = mut_ref.current_page_offset();
-                                    mut_ref.quick_mode = true;
-                                    mut_ref.quick_history.clear();
-                                    mut_ref.book_pages = None;
-                                    mut_ref.page_index = 0;
-                                }
                             }
                             5 => {
-                                // 返回书单
-                                mut_ref.reading = false;
-                                unsafe { PAGE_INDEX = None; }
+                                // 重建索引
+                                mut_ref.force_indexing = true;
+                                mut_ref.book_pages = None;
                             }
                             _ => {}
                         }
@@ -844,13 +785,60 @@ impl Page for ReadPage{
             });
         }).await;
 
-        // Key1 long end: open menu (only in reading mode)
-        event::on_target(EventType::KeyLongEnd(1),Self::mut_to_ptr(self),  move |info|  {
+        // Key1 long hold: continuous scroll down (book list or menu)
+        event::on_target(EventType::KeyLongIng(1),Self::mut_to_ptr(self),  move |info|  {
             return Box::pin(async move {
                 let mut_ref:&mut Self =  Self::mut_by_ptr(info.ptr).unwrap();
-                if mut_ref.reading && matches!(mut_ref.menu_state, MenuState::Closed) {
-                    mut_ref.menu_state = MenuState::Popup { menu_index: 0 };
-                    mut_ref.need_render = true;
+                match mut_ref.menu_state {
+                    MenuState::Popup { ref mut menu_index } => {
+                        if *menu_index < (MENU_ITEMS.len() - 1) as u32 {
+                            *menu_index += 1;
+                        } else {
+                            *menu_index = 0;
+                        }
+                        mut_ref.need_render = true;
+                        Timer::after_millis(200).await;
+                    }
+                    MenuState::Closed => {
+                        if !mut_ref.reading {
+                            let max = mut_ref.menus.as_ref().map(|m| m.len()).unwrap_or(0);
+                            if max > 0 && mut_ref.choose_index < (max - 1) as u32 {
+                                mut_ref.choose_index += 1;
+                                mut_ref.need_render = true;
+                                Timer::after_millis(200).await;
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            });
+        }).await;
+
+        // Key2 long hold: continuous scroll up (book list or menu)
+        event::on_target(EventType::KeyLongIng(2),Self::mut_to_ptr(self),  move |info|  {
+            return Box::pin(async move {
+                let mut_ref:&mut Self =  Self::mut_by_ptr(info.ptr).unwrap();
+                match mut_ref.menu_state {
+                    MenuState::Popup { ref mut menu_index } => {
+                        if *menu_index > 0 {
+                            *menu_index -= 1;
+                        } else {
+                            *menu_index = (MENU_ITEMS.len() - 1) as u32;
+                        }
+                        mut_ref.need_render = true;
+                        Timer::after_millis(200).await;
+                    }
+                    MenuState::Closed => {
+                        if !mut_ref.reading {
+                            let max = mut_ref.menus.as_ref().map(|m| m.len()).unwrap_or(0);
+                            if max > 0 && mut_ref.choose_index > 0 {
+                                mut_ref.choose_index -= 1;
+                                mut_ref.need_render = true;
+                                Timer::after_millis(200).await;
+                            }
+                        }
+                    }
+                    _ => {}
                 }
             });
         }).await;
@@ -863,8 +851,10 @@ impl Page for ReadPage{
                     MenuState::Popup { ref mut menu_index } => {
                         if *menu_index < (MENU_ITEMS.len() - 1) as u32 {
                             *menu_index += 1;
-                            mut_ref.need_render = true;
+                        } else {
+                            *menu_index = 0;
                         }
+                        mut_ref.need_render = true;
                     }
                     MenuState::JumpInput { ref mut input_num } => {
                         let max_page = mut_ref.book_pages.as_ref().map(|b| b.total_page).unwrap_or(9999);
@@ -882,19 +872,17 @@ impl Page for ReadPage{
                     }
                     MenuState::Closed => {
                         if mut_ref.reading {
-                            if mut_ref.quick_mode {
-                                // Quick mode: advance to next page offset
-                                let _ = mut_ref.quick_history.push(mut_ref.quick_offset);
-                                mut_ref.quick_offset = mut_ref.quick_next_offset;
-                                mut_ref.need_render = true;
-                            } else {
-                                mut_ref.do_change_page(mut_ref.page_index + 1).await;
-                            }
+                            mut_ref.do_change_page(mut_ref.page_index + 1).await;
                         } else {
-                            if mut_ref.choose_index < mut_ref.menus.as_ref().unwrap().len() as u32 {
-                                mut_ref.choose_index += 1;
-                                mut_ref.need_render = true;
+                            let max = mut_ref.menus.as_ref().map(|m| m.len()).unwrap_or(0);
+                            if max > 0 {
+                                if mut_ref.choose_index < (max - 1) as u32 {
+                                    mut_ref.choose_index += 1;
+                                } else {
+                                    mut_ref.choose_index = 0;
+                                }
                             }
+                            mut_ref.need_render = true;
                         }
                     }
                 }
@@ -909,8 +897,10 @@ impl Page for ReadPage{
                     MenuState::Popup { ref mut menu_index } => {
                         if *menu_index > 0 {
                             *menu_index -= 1;
-                            mut_ref.need_render = true;
+                        } else {
+                            *menu_index = (MENU_ITEMS.len() - 1) as u32;
                         }
+                        mut_ref.need_render = true;
                     }
                     MenuState::JumpInput { ref mut input_num } => {
                         if *input_num > 0 {
@@ -926,20 +916,19 @@ impl Page for ReadPage{
                     }
                     MenuState::Closed => {
                         if mut_ref.reading {
-                            if mut_ref.quick_mode {
-                                // Quick mode: go back in history
-                                if let Some(prev) = mut_ref.quick_history.pop() {
-                                    mut_ref.quick_offset = prev;
-                                    mut_ref.need_render = true;
-                                }
-                            } else if mut_ref.page_index > 0 {
+                            if mut_ref.page_index > 0 {
                                 mut_ref.do_change_page(mut_ref.page_index - 1).await;
                             }
                         } else {
-                            if mut_ref.choose_index > 0 {
-                                mut_ref.choose_index -= 1;
-                                mut_ref.need_render = true;
+                            let max = mut_ref.menus.as_ref().map(|m| m.len()).unwrap_or(0);
+                            if max > 0 {
+                                if mut_ref.choose_index > 0 {
+                                    mut_ref.choose_index -= 1;
+                                } else {
+                                    mut_ref.choose_index = (max - 1) as u32;
+                                }
                             }
+                            mut_ref.need_render = true;
                         }
                     }
                 }
