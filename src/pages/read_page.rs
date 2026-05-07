@@ -68,6 +68,12 @@ pub struct ReadPage{
     save_bookmark_flag:bool,
     /// 0=Rotate0, 1=Rotate90, 2=Rotate180, 3=Rotate270
     rotation_index:u8,
+    /// Quick mode: paginate on-the-fly from a byte offset (no full index)
+    quick_mode:bool,
+    quick_offset:u32,
+    quick_next_offset:u32,
+    /// History of previous page start offsets for backward navigation in quick mode
+    quick_history:Vec<u32,30>,
 }
 
 impl ReadPage{
@@ -95,6 +101,35 @@ impl ReadPage{
 
     fn page_lines(&self) -> u32 {
         (self.visual_height() - PROGRESS_AREA_HEIGHT) / FONT_SIZE - 1
+    }
+
+    /// Get the byte offset of the current page's start position
+    fn current_page_offset(&self) -> u32 {
+        if let Some(ref bp) = self.book_pages {
+            bp.current_page_start_offset()
+        } else {
+            self.quick_offset
+        }
+    }
+
+    /// Load one page in quick mode (no index, on-the-fly wrapping)
+    async fn quick_load_page(&mut self, books_dir: &mut ActualDirectory<'_>) {
+        let book_name = self.menus.as_ref().unwrap()[self.choose_index as usize].clone();
+        let file_name = format!("{}.txt", book_name);
+        if let Some(entry) = SdMount::find_entry_by_name(books_dir, &file_name) {
+            let short_name = entry.name;
+            if let Ok(mut my_file) = books_dir.open_file_in_dir(short_name, embedded_sdmmc::Mode::ReadOnly) {
+                let (content, end_offset, _is_eof) = TxtReader::get_page_from_offset(
+                    &mut my_file,
+                    self.quick_offset,
+                    self.visual_width(),
+                    self.page_lines(),
+                );
+                my_file.close();
+                self.page_content = content;
+                self.quick_next_offset = end_offset;
+            }
+        }
     }
 
     async fn back(&mut self){
@@ -510,6 +545,10 @@ impl Page for ReadPage{
             menu_state: MenuState::Closed,
             save_bookmark_flag: false,
             rotation_index: 1,
+            quick_mode: false,
+            quick_offset: 0,
+            quick_next_offset: 0,
+            quick_history: Vec::new(),
         };
 
         unsafe{
@@ -562,13 +601,13 @@ impl Page for ReadPage{
                             list_widget.choose(self.choose_index as usize);
                             let _ = list_widget.draw(display);
                         }
-                    } else if self.book_pages.is_some() {
+                    } else if self.quick_mode || self.book_pages.is_some() {
                         let font: FontRenderer = FontRenderer::new::<fonts::u8g2_font_wqy15_t_gb2312>();
                         let mut font = font.with_ignore_unknown_chars(true);
                         //显示选择书本对应页的内容
                         display.clear_buffer(Color::White);
                         {
-                            if self.page_index == self.book_pages.as_ref().unwrap().total_page {
+                            if !self.quick_mode && self.page_index == self.book_pages.as_ref().unwrap().total_page {
                                 let _ = font.render_aligned(
                                     "已是最后一页",
                                     center,
@@ -630,11 +669,15 @@ impl Page for ReadPage{
                                 loop {
                                     if !self.running { break; }
                                     if self.menus.as_ref().unwrap().len() > 0 {
-                                        if let None = self.book_pages {
+                                        // Quick mode: paginate on-the-fly, no full index needed
+                                        if self.quick_mode && self.need_render {
+                                            self.quick_load_page(&mut books_dir).await;
+                                            self.change_page = false;
+                                        } else if !self.quick_mode && self.book_pages.is_none() {
                                             self.get_page_vec(&mut books_dir).await;
                                             self.get_log_vec(&mut books_dir).await;
                                         }
-                                        if self.change_page {
+                                        if !self.quick_mode && self.change_page {
                                             println!("change_page : {}", self.page_index);
                                             self.change_page = false;
                                             self.book_pages.as_mut().unwrap().set_current_page(self.page_index);
@@ -748,9 +791,11 @@ impl Page for ReadPage{
                                 if let Some(display) = display_mut() {
                                     display.set_rotation(mut_ref.current_rotation());
                                 }
-                                // Orientation changed → regenerate pages with new width/lines
+                                // Orientation changed → enter quick mode (no re-indexing)
                                 if was_portrait != mut_ref.is_portrait() {
-                                    mut_ref.force_indexing = true;
+                                    mut_ref.quick_offset = mut_ref.current_page_offset();
+                                    mut_ref.quick_mode = true;
+                                    mut_ref.quick_history.clear();
                                     mut_ref.book_pages = None;
                                     mut_ref.page_index = 0;
                                 }
@@ -837,7 +882,14 @@ impl Page for ReadPage{
                     }
                     MenuState::Closed => {
                         if mut_ref.reading {
-                            mut_ref.do_change_page(mut_ref.page_index + 1).await;
+                            if mut_ref.quick_mode {
+                                // Quick mode: advance to next page offset
+                                let _ = mut_ref.quick_history.push(mut_ref.quick_offset);
+                                mut_ref.quick_offset = mut_ref.quick_next_offset;
+                                mut_ref.need_render = true;
+                            } else {
+                                mut_ref.do_change_page(mut_ref.page_index + 1).await;
+                            }
                         } else {
                             if mut_ref.choose_index < mut_ref.menus.as_ref().unwrap().len() as u32 {
                                 mut_ref.choose_index += 1;
@@ -874,7 +926,13 @@ impl Page for ReadPage{
                     }
                     MenuState::Closed => {
                         if mut_ref.reading {
-                            if mut_ref.page_index > 0 {
+                            if mut_ref.quick_mode {
+                                // Quick mode: go back in history
+                                if let Some(prev) = mut_ref.quick_history.pop() {
+                                    mut_ref.quick_offset = prev;
+                                    mut_ref.need_render = true;
+                                }
+                            } else if mut_ref.page_index > 0 {
                                 mut_ref.do_change_page(mut_ref.page_index - 1).await;
                             }
                         } else {

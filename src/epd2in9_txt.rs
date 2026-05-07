@@ -208,6 +208,73 @@ impl TxtReader {
          return book_pages;
     }
 
+    /// Read and render one page starting from an arbitrary byte offset.
+    /// Returns (page_content, end_byte_offset, is_eof).
+    /// Does NOT require a pre-built index — computes line wraps on the fly.
+    pub fn get_page_from_offset<CS: esp_hal::gpio::OutputPin>(
+        my_file: &mut FileObject<CS>,
+        start_offset: u32,
+        display_width: u32,
+        display_lines: u32,
+    ) -> (String<ONE_PAGE_CONTENT_LEN>, u32, bool) {
+        let mut line_width: u32 = 0;
+        let mut lines_num: u32 = 0;
+        let mut end_position = start_offset;
+
+        my_file.seek_from_start(start_offset);
+        let mut buffer = [0u8; ONE_PAGE_CONTENT_LEN];
+        let num_read = my_file.read(&mut buffer).unwrap();
+        let mut txt: Vec<u8, ONE_PAGE_CONTENT_LEN> = Vec::new();
+
+        let mut i: usize = 0;
+        while i < num_read {
+            let byte = buffer[i];
+            let (char_type, byte_num) = char_type_width(byte);
+
+            match char_type {
+                Ascii => {
+                    let ch = char::from(byte);
+                    if ch == '\n' || ch == '\r' {
+                        if line_width > 0 {
+                            lines_num += 1;
+                            line_width = 0;
+                            txt.push(b'\n');
+                        }
+                    } else {
+                        line_width += ascii_width(ch);
+                    }
+                }
+                Zh => { line_width += ZH_WIDTH; }
+                Other => { line_width += ZH_WIDTH; }
+                Tail => {}
+            }
+
+            for j in 0..byte_num {
+                if (i + j as usize) < num_read {
+                    txt.push(buffer[i + j as usize]);
+                }
+            }
+
+            i += byte_num as usize;
+            end_position = start_offset + i as u32;
+
+            // Line wrap
+            if line_width > display_width && line_width - display_width > LINE_OVERFLOW {
+                line_width = 0;
+                txt.push(b'\n');
+                lines_num += 1;
+            }
+
+            // Page full
+            if lines_num >= display_lines {
+                break;
+            }
+        }
+
+        let is_eof = i >= num_read && my_file.is_eof();
+        (String::from_utf8(txt).unwrap_or_default(), end_position, is_eof)
+    }
+
     pub fn get_page_content<CS: esp_hal::gpio::OutputPin>(my_file: &mut FileObject<CS>,start_position:u32,end_position:u32,display_width:u32)->String<ONE_PAGE_CONTENT_LEN>{
 
         let mut line_width = 0;//当前行宽 用于换行
@@ -427,6 +494,21 @@ impl BookPages {
         }
         self.current_vec_num = vec_num;
 
+    }
+
+    /// Get the byte offset of the current page's start position.
+    /// Returns 0 if current_page is 0. Uses page_vec if loaded,
+    /// otherwise returns 0 as fallback.
+    pub fn current_page_start_offset(&self) -> u32 {
+        if self.current_page == 0 {
+            return self.prev_vec_last_page;
+        }
+        let idx = self.current_page as usize;
+        if idx > 0 && self.page_vec.len() >= idx {
+            self.page_vec[idx - 1]
+        } else {
+            0
+        }
     }
 
     pub fn get_end_page_position<CS: esp_hal::gpio::OutputPin>(&mut self,my_file: &mut FileObject<CS> )->u32{
