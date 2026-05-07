@@ -53,7 +53,7 @@ const LINE_OVERFLOW:u32 = 8;
 
 type FileObject<'a,'b,CS: esp_hal::gpio::OutputPin> = File<'b,SdCard<&'a mut CriticalSectionDevice<'a,Spi<'a,SPI2, FullDuplexMode>, Output<'a,CS>, Delay>, Delay>, TimeSource, 4, 4, 1>;
 impl TxtReader {
-     pub async fn generate_pages<F>(books_dir:&mut ActualDirectory<'_>,book_name:&str, book_short_name:&ShortFileName, mut process: F) ->Option<BookPages>
+     pub async fn generate_pages<F>(books_dir:&mut ActualDirectory<'_>,book_name:&str, book_short_name:&ShortFileName, display_width:u32, display_lines:u32, mut process: F) ->Option<BookPages>
      where F:FnMut(f32) -> (Pin<Box<dyn Future<Output=()>>>)
      {
          // Use short name for .txt file operations
@@ -148,13 +148,13 @@ impl TxtReader {
 
 
                      //换行
-                     if line_width > WIDTH && line_width - WIDTH > LINE_OVERFLOW {
+                     if line_width > display_width && line_width - display_width > LINE_OVERFLOW {
                          lines_num += 1;
                          line_width = 0;
                      }
 
                      //换屏 保存分页
-                     if lines_num == LINES_NUM {
+                     if lines_num == display_lines {
                          all_page_position_vec.push(end_position);
                          //重置下一屏的位置
                          begin_position = end_position;
@@ -208,7 +208,7 @@ impl TxtReader {
          return book_pages;
     }
 
-    pub fn get_page_content<CS: esp_hal::gpio::OutputPin>(my_file: &mut FileObject<CS>,start_position:u32,end_position:u32)->String<ONE_PAGE_CONTENT_LEN>{
+    pub fn get_page_content<CS: esp_hal::gpio::OutputPin>(my_file: &mut FileObject<CS>,start_position:u32,end_position:u32,display_width:u32)->String<ONE_PAGE_CONTENT_LEN>{
 
         let mut line_width = 0;//当前行宽 用于换行
         let mut lines_num = 0;//当前行数 用于换屏
@@ -262,7 +262,7 @@ impl TxtReader {
             i += byte_num as usize;
 
             //换行
-            if line_width > WIDTH && line_width - WIDTH > LINE_OVERFLOW{
+            if line_width > display_width && line_width - display_width > LINE_OVERFLOW{
                 line_width = 0;
                 //txt.push(b'\r');
                 txt.push(b'\n');
