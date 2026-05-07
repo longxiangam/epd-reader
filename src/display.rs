@@ -157,6 +157,12 @@ pub fn get_render_times()->u32{
     }
 }
 
+pub fn reset_render_times(){
+    unsafe {
+        RENDER_TIMES = 0;
+    }
+}
+
 pub fn set_refresh_mode< BUSY, DC, RST > (mode:RefreshLut,epd:&mut EpdControl<&'static mut ActualSpi, BUSY, DC, RST,Delay>,mut spi_device: &'static mut  ActualSpi)
 -> &'static mut ActualSpi
 where BUSY: embedded_hal::digital::InputPin, DC: embedded_hal::digital::OutputPin,  RST: embedded_hal::digital::OutputPin

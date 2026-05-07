@@ -38,6 +38,16 @@ const DISPLAY_HEIGHT: u32 = 300;
 const FONT_SIZE: u32 = 16;
 const PROGRESS_AREA_HEIGHT: u32 = 20;
 
+/// Accelerating step size for page jump long press.
+/// 0-4 ticks: 1, 5-9: 5, 10-19: 10, 20-34: 50, 35+: 100
+fn accel_step(tick: u32) -> u32 {
+    if tick < 5 { 1 }
+    else if tick < 10 { 5 }
+    else if tick < 20 { 10 }
+    else if tick < 35 { 50 }
+    else { 100 }
+}
+
 const MENU_ITEMS: &[&str] = &["返回书单", "收藏书签", "打开书签", "跳转页码", "旋转屏幕", "重建索引"];
 
 enum MenuState {
@@ -68,6 +78,7 @@ pub struct ReadPage{
     save_bookmark_flag:bool,
     /// 0=Rotate90, 1=Rotate270 (upside-down portrait, same page indexing)
     flipped:bool,
+    jump_accel:u32,
 }
 
 impl ReadPage{
@@ -348,8 +359,9 @@ impl ReadPage{
                     display,
                 ).ok();
 
+                let total = self.book_pages.as_ref().map(|b| b.total_page).unwrap_or(0);
                 font.render_aligned(
-                    format_args!("{}", input_num),
+                    format_args!("{} / {}", input_num, total),
                     Point::new(center_x, jump_y + 48),
                     VerticalPosition::Center,
                     HorizontalAlignment::Center,
@@ -496,6 +508,7 @@ impl Page for ReadPage{
             menu_state: MenuState::Closed,
             save_bookmark_flag: false,
             flipped: false,
+            jump_accel: 0,
         };
 
         unsafe{
@@ -731,6 +744,7 @@ impl Page for ReadPage{
                             3 => {
                                 // 跳转页码 — 进入数字输入
                                 mut_ref.menu_state = MenuState::JumpInput { input_num: mut_ref.page_index };
+                                mut_ref.jump_accel = 0;
                                 mut_ref.need_render = true;
                                 return;
                             }
@@ -785,7 +799,7 @@ impl Page for ReadPage{
             });
         }).await;
 
-        // Key1 long hold: continuous scroll down (book list or menu)
+        // Key1 long hold: continuous scroll down (book list or menu) / accelerating page jump
         event::on_target(EventType::KeyLongIng(1),Self::mut_to_ptr(self),  move |info|  {
             return Box::pin(async move {
                 let mut_ref:&mut Self =  Self::mut_by_ptr(info.ptr).unwrap();
@@ -796,14 +810,29 @@ impl Page for ReadPage{
                         } else {
                             *menu_index = 0;
                         }
+                        display::reset_render_times();
                         mut_ref.need_render = true;
                         Timer::after_millis(200).await;
+                    }
+                    MenuState::JumpInput { ref mut input_num } => {
+                        let max_page = mut_ref.book_pages.as_ref().map(|b| b.total_page).unwrap_or(9999);
+                        let step = accel_step(mut_ref.jump_accel);
+                        mut_ref.jump_accel += 1;
+                        if *input_num + step <= max_page {
+                            *input_num += step;
+                        } else {
+                            *input_num = max_page;
+                        }
+                        display::reset_render_times();
+                        mut_ref.need_render = true;
+                        Timer::after_millis(75).await;
                     }
                     MenuState::Closed => {
                         if !mut_ref.reading {
                             let max = mut_ref.menus.as_ref().map(|m| m.len()).unwrap_or(0);
                             if max > 0 && mut_ref.choose_index < (max - 1) as u32 {
                                 mut_ref.choose_index += 1;
+                                display::reset_render_times();
                                 mut_ref.need_render = true;
                                 Timer::after_millis(200).await;
                             }
@@ -814,7 +843,7 @@ impl Page for ReadPage{
             });
         }).await;
 
-        // Key2 long hold: continuous scroll up (book list or menu)
+        // Key2 long hold: continuous scroll up (book list or menu) / accelerating page jump
         event::on_target(EventType::KeyLongIng(2),Self::mut_to_ptr(self),  move |info|  {
             return Box::pin(async move {
                 let mut_ref:&mut Self =  Self::mut_by_ptr(info.ptr).unwrap();
@@ -825,14 +854,28 @@ impl Page for ReadPage{
                         } else {
                             *menu_index = (MENU_ITEMS.len() - 1) as u32;
                         }
+                        display::reset_render_times();
                         mut_ref.need_render = true;
                         Timer::after_millis(200).await;
+                    }
+                    MenuState::JumpInput { ref mut input_num } => {
+                        let step = accel_step(mut_ref.jump_accel);
+                        mut_ref.jump_accel += 1;
+                        if *input_num >= step {
+                            *input_num -= step;
+                        } else {
+                            *input_num = 0;
+                        }
+                        display::reset_render_times();
+                        mut_ref.need_render = true;
+                        Timer::after_millis(75).await;
                     }
                     MenuState::Closed => {
                         if !mut_ref.reading {
                             let max = mut_ref.menus.as_ref().map(|m| m.len()).unwrap_or(0);
                             if max > 0 && mut_ref.choose_index > 0 {
                                 mut_ref.choose_index -= 1;
+                                display::reset_render_times();
                                 mut_ref.need_render = true;
                                 Timer::after_millis(200).await;
                             }
@@ -860,6 +903,7 @@ impl Page for ReadPage{
                         let max_page = mut_ref.book_pages.as_ref().map(|b| b.total_page).unwrap_or(9999);
                         if *input_num < max_page {
                             *input_num += 1;
+                            mut_ref.jump_accel = 0;
                             mut_ref.need_render = true;
                         }
                     }
@@ -905,6 +949,7 @@ impl Page for ReadPage{
                     MenuState::JumpInput { ref mut input_num } => {
                         if *input_num > 0 {
                             *input_num -= 1;
+                            mut_ref.jump_accel = 0;
                             mut_ref.need_render = true;
                         }
                     }
