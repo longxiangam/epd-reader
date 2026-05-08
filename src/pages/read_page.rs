@@ -41,14 +41,16 @@ const PROGRESS_AREA_HEIGHT: u32 = 20;
 /// Accelerating step size for page jump long press.
 /// 0-4 ticks: 1, 5-9: 5, 10-19: 10, 20-34: 50, 35+: 100
 fn accel_step(tick: u32) -> u32 {
-    if tick < 5 { 1 }
-    else if tick < 10 { 5 }
-    else if tick < 20 { 10 }
-    else if tick < 35 { 50 }
-    else { 100 }
+    if tick < 3 { 1 }
+    else if tick < 5 { 5 }
+    else if tick < 8 { 10 }
+    else if tick < 10 { 50 }
+    else if tick < 15 { 100 }
+    else if tick < 20 { 200 }
+    else { 400 }
 }
 
-const MENU_ITEMS: &[&str] = &["返回书单", "收藏书签", "打开书签", "跳转页码", "旋转屏幕", "重建索引"];
+const MENU_ITEMS: &[&str] = &["返回书单", "收藏书签", "打开书签", "跳转页码", "旋转屏幕", "重建索引", "取消"];
 
 enum MenuState {
     Closed,
@@ -370,7 +372,7 @@ impl ReadPage{
                 ).ok();
 
                 font.render_aligned(
-                    "1+ 2- 3确认",
+                    "1+ 2- 3确认 长按取消",
                     Point::new(center_x, jump_y + 72),
                     VerticalPosition::Center,
                     HorizontalAlignment::Center,
@@ -379,13 +381,14 @@ impl ReadPage{
                 ).ok();
             }
             MenuState::BookmarkList { bm_index } => {
-                // Show bookmark list from log_vec[1..] (index 0 is last read position)
+                // Show bookmark list from log_vec[1..] (index 0 is last read position) + cancel item
                 let bookmarks: Vec<u32, LOG_VEC_MAX> = self.log_vec.as_ref()
                     .map(|lv| lv.iter().skip(1).copied().collect())
                     .unwrap_or_default();
 
                 let bm_count = bookmarks.len() as u32;
-                let list_height = if bm_count > 0 { bm_count * menu_item_height + menu_padding * 2 } else { 50 };
+                let total_items = if bm_count > 0 { bm_count + 1 } else { 1 };
+                let list_height = total_items * menu_item_height + menu_padding * 2;
                 let list_x = ((vw - menu_width) / 2) as i32;
                 let list_y = ((vh - list_height) / 2) as i32;
 
@@ -404,7 +407,7 @@ impl ReadPage{
                 if bm_count == 0 {
                     font.render_aligned(
                         "暂无书签",
-                        Point::new((vw / 2) as i32, list_y + 25),
+                        Point::new((vw / 2) as i32, list_y + menu_padding as i32 + menu_item_height as i32 / 2),
                         VerticalPosition::Center,
                         HorizontalAlignment::Center,
                         FontColor::Transparent(Black),
@@ -437,6 +440,29 @@ impl ReadPage{
                         ).ok();
                     }
                 }
+
+                // Cancel item (always shown)
+                let cancel_y = list_y + menu_padding as i32 + (total_items - 1) as i32 * menu_item_height as i32;
+                let is_cancel_selected = bm_index == total_items - 1;
+                if is_cancel_selected {
+                    let highlight = Rectangle::new(
+                        Point::new(list_x + 4, cancel_y),
+                        Size::new(menu_width - 8, menu_item_height),
+                    );
+                    highlight.into_styled(
+                        PrimitiveStyleBuilder::new().fill_color(Black).build()
+                    ).draw(display).ok();
+                }
+                let cancel_color = if is_cancel_selected { FontColor::Transparent(White) } else { FontColor::Transparent(Black) };
+                let cancel_prefix = if is_cancel_selected { "> " } else { "  " };
+                font.render_aligned(
+                    format_args!("{}取消", cancel_prefix),
+                    Point::new(list_x + menu_padding as i32, cancel_y + menu_item_height as i32 / 2),
+                    VerticalPosition::Center,
+                    HorizontalAlignment::Left,
+                    cancel_color,
+                    display,
+                ).ok();
             }
             MenuState::Closed => {}
         }
@@ -703,23 +729,33 @@ impl Page for ReadPage{
         event::on_target(EventType::KeyLongEnd(3),Self::mut_to_ptr(self),  move |info|  {
             return Box::pin(async move {
                 let mut_ref:&mut Self =  Self::mut_by_ptr(info.ptr).unwrap();
-                if mut_ref.reading {
-                    if matches!(mut_ref.menu_state, MenuState::Closed) {
-                        // Open menu
+                match mut_ref.menu_state {
+                    MenuState::JumpInput { .. } => {
+                        // 取消跳转，返回菜单
                         mut_ref.menu_state = MenuState::Popup { menu_index: 0 };
                         mut_ref.need_render = true;
-                    } else {
-                        // Close menu
-                        mut_ref.menu_state = MenuState::Closed;
+                    }
+                    MenuState::BookmarkList { .. } => {
+                        // 取消书签列表，返回菜单
+                        mut_ref.menu_state = MenuState::Popup { menu_index: 0 };
                         mut_ref.need_render = true;
                     }
-                } else {
-                    mut_ref.back().await;
+                    _ => {
+                        if mut_ref.reading {
+                            // 长按退出阅读，回到书单
+                            mut_ref.reading = false;
+                            unsafe { PAGE_INDEX = None; }
+                            mut_ref.menu_state = MenuState::Closed;
+                            mut_ref.need_render = true;
+                        } else {
+                            mut_ref.back().await;
+                        }
+                    }
                 }
             });
         }).await;
 
-        // Key3 short: select menu item / confirm jump / toggle reading mode
+        // Key3 short: open/close menu / select menu item / confirm jump / toggle reading mode
         event::on_target(EventType::KeyShort(3),Self::mut_to_ptr(self),  move |info|  {
             return Box::pin(async move {
                 let mut_ref:&mut Self =  Self::mut_by_ptr(info.ptr).unwrap();
@@ -772,28 +808,34 @@ impl Page for ReadPage{
                         mut_ref.need_render = true;
                     }
                     MenuState::BookmarkList { bm_index } => {
-                        // 选择书签，跳转到对应页
-                        if let Some(ref lv) = mut_ref.log_vec {
+                        let bm_count = mut_ref.log_vec.as_ref().map(|lv| if lv.len() > 0 { lv.len() - 1 } else { 0 }).unwrap_or(0) as u32;
+                        let total_items = if bm_count > 0 { bm_count + 1 } else { 1 };
+                        if bm_index == total_items - 1 {
+                            // 取消 — 返回菜单
+                            mut_ref.menu_state = MenuState::Popup { menu_index: 0 };
+                            mut_ref.need_render = true;
+                        } else if let Some(ref lv) = mut_ref.log_vec {
                             let bookmarks: Vec<u32, LOG_VEC_MAX> = lv.iter().skip(1).copied().collect();
                             if (bm_index as usize) < bookmarks.len() {
                                 mut_ref.do_change_page(bookmarks[bm_index as usize]).await;
                             }
+                            mut_ref.menu_state = MenuState::Closed;
+                            mut_ref.need_render = true;
                         }
-                        mut_ref.menu_state = MenuState::Closed;
-                        mut_ref.need_render = true;
                     }
                     MenuState::Closed => {
                         if mut_ref.reading {
-                            mut_ref.reading = false;
-                            unsafe { PAGE_INDEX = None; }
+                            // 短按打开菜单
+                            mut_ref.menu_state = MenuState::Popup { menu_index: 0 };
+                            mut_ref.need_render = true;
                         } else {
                             mut_ref.reading = true;
                             mut_ref.change_page = true;
                             mut_ref.page_index = 0;
                             mut_ref.book_pages = None;
                             unsafe { PAGE_INDEX = Some(mut_ref.choose_index); }
+                            mut_ref.need_render = true;
                         }
-                        mut_ref.need_render = true;
                     }
                 }
             });
@@ -908,8 +950,9 @@ impl Page for ReadPage{
                         }
                     }
                     MenuState::BookmarkList { ref mut bm_index } => {
-                        let bm_count = mut_ref.log_vec.as_ref().map(|lv| if lv.len() > 0 { lv.len() - 1 } else { 0 }).unwrap_or(0);
-                        if (*bm_index as usize) < bm_count.saturating_sub(1) {
+                        let bm_count = mut_ref.log_vec.as_ref().map(|lv| if lv.len() > 0 { lv.len() - 1 } else { 0 }).unwrap_or(0) as u32;
+                        let total_items = if bm_count > 0 { bm_count + 1 } else { 1 };
+                        if *bm_index < total_items - 1 {
                             *bm_index += 1;
                             mut_ref.need_render = true;
                         }

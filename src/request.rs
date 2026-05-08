@@ -1,3 +1,5 @@
+use alloc::vec;
+use alloc::vec::Vec;
 use core::num::ParseIntError;
 use embassy_net::{IpAddress,  Stack};
 use embassy_net::dns::DnsQueryType;
@@ -45,14 +47,14 @@ impl From<TlsError> for RequestError {
 pub struct RequestClient{
     stack:&'static Stack<WifiDevice<'static,WifiStaDevice>>,
     rng: RngWrapper,
-    rx_buffer:[u8;BUFFER_SIZE],
-    tx_buffer:[u8;BUFFER_SIZE],
-    tls_rx_buffer:[u8;BUFFER_SIZE],
-    tls_tx_buffer:[u8;BUFFER_SIZE],
+    rx_buffer: Vec<u8>,
+    tx_buffer: Vec<u8>,
+    tls_rx_buffer: Vec<u8>,
+    tls_tx_buffer: Vec<u8>,
 }
 
 pub struct ResponseData {
-   pub data:[u8;BUFFER_SIZE],
+   pub data: Vec<u8>,
    pub length:usize,
 }
 
@@ -63,10 +65,10 @@ impl RequestClient{
         RequestClient{
             stack,
             rng:RngWrapper::from(rng),
-            rx_buffer: [0u8;BUFFER_SIZE],
-            tx_buffer: [0u8;BUFFER_SIZE],
-            tls_rx_buffer: [0u8;BUFFER_SIZE],
-            tls_tx_buffer: [0u8;BUFFER_SIZE],
+            rx_buffer: vec![0u8;BUFFER_SIZE],
+            tx_buffer: vec![0u8;BUFFER_SIZE],
+            tls_rx_buffer: vec![0u8;BUFFER_SIZE],
+            tls_tx_buffer: vec![0u8;BUFFER_SIZE],
         }
     }
     pub async fn send_request(&mut self, url: &str) -> Result<ResponseData, RequestError> {
@@ -122,8 +124,8 @@ impl RequestClient{
         request.write(&mut socket).await?;
 
 
-        let mut headers_buf = [0_u8; 1024];
-        let mut buf = [0_u8; 4096];
+        let mut headers_buf = vec![0u8; 1024];
+        let mut buf = vec![0u8; BUFFER_SIZE];
         let response = Response::read(&mut socket, Method::GET, &mut headers_buf).await?;
 
         println!("Response status: {:?}", response.status);
@@ -175,8 +177,8 @@ impl RequestClient{
         let request = Request::get(url).host(host).build();
         request.write(&mut tls).await?;
 
-        let mut headers_buf = [0_u8; 1024];
-        let mut buf = [0_u8; 4096];
+        let mut headers_buf = vec![0u8; 1024];
+        let mut buf = vec![0u8; BUFFER_SIZE];
         let response = Response::read(&mut tls, Method::GET, &mut headers_buf).await?;
 
         println!("Response status: {:?}", response.status);
