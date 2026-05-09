@@ -55,6 +55,12 @@ static mut RENDER_TIMES:u32 = 0;
 
 pub static mut DISPLAY:Option<EpdDisplay>  = None;
 
+static mut SLEEP_RENDERER: Option<fn(&mut EpdDisplay)> = None;
+
+pub fn set_sleep_renderer(renderer: Option<fn(&mut EpdDisplay)>) {
+    unsafe { SLEEP_RENDERER = renderer; }
+}
+
 pub static RENDER_CHANNEL: Channel<CriticalSectionRawMutex,RenderInfo, 64> = Channel::new();
 pub static QUICKLY_LUT_CHANNEL: Channel<CriticalSectionRawMutex,bool, 64> = Channel::new();
 
@@ -217,19 +223,21 @@ pub async fn show_error(error:&str,need_clear:bool) {
 pub async fn show_sleep() {
     embassy_time::Timer::after_secs(1).await;
     if let Some(display) = display_mut() {
-        let font: FontRenderer = FontRenderer::new::<fonts::u8g2_font_wqy15_t_gb2312>();
-        let mut font = font.with_ignore_unknown_chars(true);
-
-        
-        let _ = font.render_aligned(
-            "睡眠中",
-            Point::new(display.bounding_box().size.width as i32 - 110 as i32, 10),
-            VerticalPosition::Center,
-            HorizontalAlignment::Center,
-            FontColor::Transparent(Black),
-            display,
-        );
-
+        let renderer = unsafe { SLEEP_RENDERER };
+        if let Some(r) = renderer {
+            r(display);
+        } else {
+            let font: FontRenderer = FontRenderer::new::<fonts::u8g2_font_wqy15_t_gb2312>();
+            let mut font = font.with_ignore_unknown_chars(true);
+            let _ = font.render_aligned(
+                "睡眠中",
+                Point::new(10, 10),
+                VerticalPosition::Center,
+                HorizontalAlignment::Left,
+                FontColor::Transparent(Black),
+                display,
+            );
+        }
         RENDER_CHANNEL.send(RenderInfo { time: 0,need_sleep:true }).await;
         Timer::after_secs(1).await;
     }

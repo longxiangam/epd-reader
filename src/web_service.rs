@@ -11,6 +11,7 @@ use esp_wifi::wifi::WifiDevice;
 use esp_hal::reset::software_reset;
 use heapless::Vec;
 use crate::wifi::{AP_STACK_MUT, finish_wifi,  use_wifi, WIFI_MODEL, WifiModel};
+use crate::sd_mount::{SdMount, SD_MOUNT, url_decode, BOOK_NAME_MAX};
 // use crate::storage::{NvsStorage, WIFI_INFO};
 
 pub static STOP_WEB_SERVICE: Signal<CriticalSectionRawMutex,()> = Signal::new();
@@ -79,24 +80,24 @@ async fn  web_tcp_socket<D: esp_wifi::wifi::WifiDeviceMode> (stack:&Stack<WifiDe
                 let mut buffer = [0u8; 2048];
                 let mut pos = 0;
                 loop {
-                    match socket.read(&mut buffer).await {
+                    match socket.read(&mut buffer[pos..]).await {
                         Ok(0) => {
                             println!("read EOF");
                             break;
                         }
                         Ok(len) => {
+                            pos += len;
                             let to_print =
-                                unsafe { core::str::from_utf8_unchecked(&buffer[..(pos + len)]) };
+                                unsafe { core::str::from_utf8_unchecked(&buffer[..pos]) };
 
                             if to_print.contains("\r\n\r\n") {
                                 print!("{}", to_print);
                                 println!();
 
-                                process_http(&mut socket,to_print).await;
+                                process_http(&mut socket, &buffer[..pos]).await;
                                 break;
                             }
 
-                            pos += len;
                         }
                         Err(e) => {
                             println!("read error: {:?}", e);
@@ -122,190 +123,455 @@ async fn  web_tcp_socket<D: esp_wifi::wifi::WifiDeviceMode> (stack:&Stack<WifiDe
     }
 
 }
-async fn process_http(socket:&mut TcpSocket<'_>,buffer:&str) {
+
+async fn process_http(socket:&mut TcpSocket<'_>, header_data: &[u8]) {
     use embedded_io_async::Write;
     use heapless::String;
+
+    let header_str = match from_utf8(header_data) {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+
     let mut headers = [httparse::EMPTY_HEADER; 64];
     let mut req = httparse::Request::new(&mut headers);
-    req.parse(buffer.as_ref());
+    if let Err(_) = req.parse(header_str.as_bytes()) {
+        return;
+    }
     println!("request:{:?}", req);
 
-    let content = concat!("HTTP/1.0 200 OK\r\n\r\n", include_str!("../files/config.html"));
-    if let Some("GET") = req.method {
-        let content = concat!("HTTP/1.0 200 OK\r\n\r\n", include_str!("../files/config.html"));
-        let r = socket
-            .write_all(
-                content.as_bytes()
-            )
-            .await;
-
-        if let Err(e) = r {
-            println!("write error: {:?}", e);
+    match (req.method, req.path) {
+        (Some("GET"), Some("/books")) => {
+            handle_get_books(socket).await;
+        }
+        (Some("POST"), Some("/delete")) => {
+            handle_delete(socket, &req, header_str).await;
+        }
+        (Some("POST"), Some(path)) if path.starts_with("/upload") => {
+            handle_upload(socket, &req, header_str, header_data).await;
+        }
+        (Some("GET"), Some("/")) | (Some("GET"), Some("/index.html")) => {
+            let content = concat!("HTTP/1.0 200 OK\r\n\r\n", include_str!("../files/config.html"));
+            let _ = socket.write_all(content.as_bytes()).await;
+        }
+        (Some("POST"), Some("/configure_wifi")) => {
+            handle_configure_wifi(socket, &req, header_str).await;
+        }
+        (Some("POST"), Some("/configure_weather")) => {
+            handle_configure_weather(socket, &req, header_str).await;
+        }
+        (Some("POST"), Some("/configure_sleep")) => {
+            handle_configure_sleep(socket, &req, header_str).await;
+        }
+        _ => {
+            let _ = socket.write_all(b"HTTP/1.0 404 Not Found\r\n\r\n").await;
         }
     }
-    if let Some("POST") = req.method {
-        if let Some("/configure_wifi") = req.path {
-            let form_fields = parse_form(&req, buffer);
-            println!("form_data:{:?}", form_fields);
+}
 
-            if let Ok(fields) = form_fields {
-                let mut ssid: Option<&str> = None;
-                let mut password: Option<&str> = None;
+async fn handle_get_books(socket: &mut TcpSocket<'_>) {
+    use embedded_io_async::Write;
 
-                for field in fields {
-                    if field.0 == "ssid" {
-                        ssid = Some(field.1);
-                        println!("ssid:{}", field.1);
-                    } else if field.0 == "password" {
-                        password = Some(field.1);
-                        println!("password:{}", field.1);
-                    }
-                }
+    let mut sd_guard = SD_MOUNT.lock().await;
+    let Some(ref mut sd) = *sd_guard else {
+        let _ = socket.write_all(b"HTTP/1.0 200 OK\r\nContent-Type: application/json\r\n\r\n{\"books\":[],\"error\":\"SD not ready\"}").await;
+        return;
+    };
 
-                if let Some(mut wifi_info) = crate::storage::WIFI_INFO.lock().await.as_mut() {
-                    println!("wifi_info:{:?}", wifi_info);
-                    wifi_info.wifi_ssid = String::from_str(ssid.unwrap()).unwrap();
-                    wifi_info.wifi_password = String::from_str(password.unwrap()).unwrap();
-                    wifi_info.wifi_finish = true;
-                    match wifi_info.write() {
-                        Ok(_) => {
-                            println!("保存成功");
-                            software_reset();
-                        }
-                        Err(e) => {
-                            println!("保存失败：{:?}", e);
-                        }
-                    }
-                }
+    let mut volume0 = match sd.volume_manager.open_volume(embedded_sdmmc::VolumeIdx(0)) {
+        Ok(v) => v,
+        Err(e) => {
+            println!("open_volume error: {:?}", e);
+            let _ = socket.write_all(b"HTTP/1.0 200 OK\r\nContent-Type: application/json\r\n\r\n{\"books\":[],\"error\":\"open volume failed\"}").await;
+            return;
+        }
+    };
 
-                let r = socket
-                    .write_all(
-                        b"HTTP/1.0 200 OK\r\n\r\n\
-            <html>\
-                <body>\
-                   <form action='/restart' method='POST'>\
-                    <br/>\
-                    <br/>\
-                    <input type='submit' value='' />\
-                   </form>\
-                </body>\
-            </html>\r\n",
-                    )
-                    .await;
+    let mut root = match volume0.open_root_dir() {
+        Ok(r) => r,
+        Err(e) => {
+            println!("open_root error: {:?}", e);
+            let _ = socket.write_all(b"HTTP/1.0 200 OK\r\nContent-Type: application/json\r\n\r\n{\"books\":[],\"error\":\"open root failed\"}").await;
+            return;
+        }
+    };
 
-                if let Err(e) = r {
-                    println!("write error: {:?}", e);
-                }
+    let mut books_dir = match root.open_dir("books") {
+        Ok(d) => d,
+        Err(e) => {
+            println!("open_dir books error: {:?}", e);
+            let _ = socket.write_all(b"HTTP/1.0 200 OK\r\nContent-Type: application/json\r\n\r\n{\"books\":[],\"error\":\"open books dir failed\"}").await;
+            return;
+        }
+    };
+
+    let books = SdMount::get_books(&mut books_dir).unwrap_or_default();
+
+    // Send response in parts to fit tx_buffer
+    let _ = socket.write_all(b"HTTP/1.0 200 OK\r\nContent-Type: application/json\r\n\r\n{\"books\":[").await;
+
+    for (i, book) in books.iter().enumerate() {
+        if i > 0 {
+            let _ = socket.write_all(b",").await;
+        }
+        // Escape basic JSON special chars in book name
+        let mut json_name = heapless::String::<{ BOOK_NAME_MAX + 10 }>::new();
+        json_name.push('"').ok();
+        for c in book.chars() {
+            match c {
+                '"' => { json_name.push_str("\\\"").ok(); }
+                '\\' => { json_name.push_str("\\\\").ok(); }
+                '\n' => { json_name.push_str("\\n").ok(); }
+                '\r' => { json_name.push_str("\\r").ok(); }
+                _ => { json_name.push(c).ok(); }
             }
         }
-        if let Some("/configure_weather") = req.path {
-            let form_fields = parse_form(&req, buffer);
-            println!("weather form_data:{:?}", form_fields);
+        json_name.push('"').ok();
+        let _ = socket.write_all(json_name.as_bytes()).await;
+    }
 
-            if let Ok(fields) = form_fields {
-                let mut api_key: Option<&str> = None;
-                let mut location: Option<&str> = None;
+    let _ = socket.write_all(b"]}").await;
+}
 
-                for field in fields {
-                    if field.0 == "api-key" {
-                        api_key = Some(field.1);
-                        println!("api-key:{}", field.1);
-                    } else if field.0 == "location" {
-                        location = Some(field.1);
-                        println!("location:{}", field.1);
-                    }
-                }
+async fn handle_delete(socket: &mut TcpSocket<'_>, req: &httparse::Request<'_, '_>, header_str: &str) {
+    use embedded_io_async::Write;
 
-                if let (Some(key), Some(city)) = (api_key, location) {
-                    let mut weather_storage = crate::storage::WeatherStorage::read().unwrap_or_default();
-                    weather_storage.token = heapless::String::from_str(key).unwrap();
-                    weather_storage.city = heapless::String::from_str(city).unwrap();
-                    
-                    match weather_storage.write() {
-                        Ok(_) => {
-                            println!("天气配置保存成功");
-                            // 更新内存中的配置
-                            crate::storage::WEATHER_API.lock().await.replace(weather_storage);
-                        }
-                        Err(e) => {
-                            println!("天气配置保存失败：{:?}", e);
-                        }
-                    }
-                }
+    // Extract body
+    let body = match header_str.split_once("\r\n\r\n") {
+        Some((_, b)) => b,
+        None => {
+            let _ = socket.write_all(b"HTTP/1.0 200 OK\r\nContent-Type: application/json\r\n\r\n{\"success\":false}").await;
+            return;
+        }
+    };
 
-                let r = socket
-                    .write_all(
-                        b"HTTP/1.0 200 OK\r\n\r\n\
-            <html>\
-                <body>\
-                    <h3>Weather config saved</h3>\
-                    <a href='/'>Back</a>\
-                </body>\
-            </html>\r\n",
-                    )
-                    .await;
+    // Parse name=ENCODED_NAME from body
+    let name_encoded = body.strip_prefix("name=").unwrap_or("").trim_end_matches('&');
+    let book_name = match url_decode(name_encoded) {
+        Some(n) => n,
+        None => {
+            let _ = socket.write_all(b"HTTP/1.0 200 OK\r\nContent-Type: application/json\r\n\r\n{\"success\":false,\"error\":\"invalid name\"}").await;
+            return;
+        }
+    };
+    println!("delete book: {}", book_name);
 
-                if let Err(e) = r {
-                    println!("write error: {:?}", e);
-                }
+    let mut sd_guard = SD_MOUNT.lock().await;
+    let Some(ref mut sd) = *sd_guard else {
+        let _ = socket.write_all(b"HTTP/1.0 200 OK\r\nContent-Type: application/json\r\n\r\n{\"success\":false,\"error\":\"SD not ready\"}").await;
+        return;
+    };
+
+    let mut volume0 = match sd.volume_manager.open_volume(embedded_sdmmc::VolumeIdx(0)) {
+        Ok(v) => v,
+        Err(_) => {
+            let _ = socket.write_all(b"HTTP/1.0 200 OK\r\nContent-Type: application/json\r\n\r\n{\"success\":false,\"error\":\"open volume failed\"}").await;
+            return;
+        }
+    };
+    let mut root = match volume0.open_root_dir() {
+        Ok(r) => r,
+        Err(_) => {
+            let _ = socket.write_all(b"HTTP/1.0 200 OK\r\nContent-Type: application/json\r\n\r\n{\"success\":false,\"error\":\"open root failed\"}").await;
+            return;
+        }
+    };
+    let mut books_dir = match root.open_dir("books") {
+        Ok(d) => d,
+        Err(_) => {
+            let _ = socket.write_all(b"HTTP/1.0 200 OK\r\nContent-Type: application/json\r\n\r\n{\"success\":false,\"error\":\"open books dir failed\"}").await;
+            return;
+        }
+    };
+
+    // Find the txt file to get short name, then delete all related files
+    let txt_file_name = alloc::format!("{}.txt", book_name);
+    if let Some(entry) = SdMount::find_entry_by_name(&mut books_dir, &txt_file_name) {
+        let short_name = entry.name;
+        // Delete .txt
+        let _ = books_dir.delete_file_in_dir(short_name.clone());
+        // Delete .idx if exists
+        let _ = SdMount::delete_idx_file(&mut books_dir, &short_name);
+        // Delete .log if exists
+        if let Some(log_name) = SdMount::derive_short_name(&short_name, "LOG") {
+            let _ = books_dir.delete_file_in_dir(log_name);
+        }
+        let _ = socket.write_all(b"HTTP/1.0 200 OK\r\nContent-Type: application/json\r\n\r\n{\"success\":true}").await;
+    } else {
+        let _ = socket.write_all(b"HTTP/1.0 200 OK\r\nContent-Type: application/json\r\n\r\n{\"success\":false,\"error\":\"book not found\"}").await;
+    }
+}
+
+async fn handle_upload(socket: &mut TcpSocket<'_>, req: &httparse::Request<'_, '_>, header_str: &str, header_data: &[u8]) {
+    use embedded_io_async::Write;
+
+    // Parse query params from URL: /upload?name=ENCODED&chunk=N
+    let path = req.path.unwrap_or("");
+    let (mut file_name_encoded, mut chunk_index_str) = ("", "0");
+    if let Some(query) = path.split('?').nth(1) {
+        for param in query.split('&') {
+            if let Some(val) = param.strip_prefix("name=") {
+                file_name_encoded = val;
+            } else if let Some(val) = param.strip_prefix("chunk=") {
+                chunk_index_str = val;
             }
         }
-        if let Some("/configure_sleep") = req.path {
-            let form_fields = parse_form(&req, buffer);
-            println!("sleep form_data:{:?}", form_fields);
+    }
 
-            if let Ok(fields) = form_fields {
-                let mut read_sleep_seconds: Option<&str> = None;
-                let mut weather_sleep_seconds: Option<&str> = None;
+    let mut content_length: usize = 0;
+    for h in req.headers.iter() {
+        if h.name.eq_ignore_ascii_case("Content-Length") {
+            if let Ok(s) = from_utf8(h.value) {
+                content_length = s.trim().parse::<usize>().unwrap_or(0);
+            }
+        }
+    }
 
-                for field in fields {
-                    if field.0 == "read-sleep-seconds" {
-                        read_sleep_seconds = Some(field.1);
-                        println!("read-sleep-seconds:{}", field.1);
-                    } else if field.0 == "weather-sleep-seconds" {
-                        weather_sleep_seconds = Some(field.1);
-                        println!("weather-sleep-seconds:{}", field.1);
-                    }
+    if file_name_encoded.is_empty() {
+        let _ = socket.write_all(b"HTTP/1.0 200 OK\r\nContent-Type: application/json\r\n\r\n{\"success\":false,\"error\":\"missing name\"}").await;
+        return;
+    }
+
+    let chunk_index: u32 = chunk_index_str.trim().parse().unwrap_or(0);
+
+    let file_name = match url_decode(file_name_encoded) {
+        Some(n) => n,
+        None => {
+            let _ = socket.write_all(b"HTTP/1.0 200 OK\r\nContent-Type: application/json\r\n\r\n{\"success\":false,\"error\":\"invalid file name\"}").await;
+            return;
+        }
+    };
+    println!("upload: {} chunk={} len={}", file_name, chunk_index, content_length);
+
+    // Calculate body offset in header_data
+    let header_end = match header_str.find("\r\n\r\n") {
+        Some(pos) => pos + 4,
+        None => {
+            let _ = socket.write_all(b"HTTP/1.0 200 OK\r\nContent-Type: application/json\r\n\r\n{\"success\":false}").await;
+            return;
+        }
+    };
+    let body_already_read = header_data.len().saturating_sub(header_end);
+
+    // Lock SD
+    let mut sd_guard = SD_MOUNT.lock().await;
+    let Some(ref mut sd) = *sd_guard else {
+        let _ = socket.write_all(b"HTTP/1.0 200 OK\r\nContent-Type: application/json\r\n\r\n{\"success\":false,\"error\":\"SD not ready\"}").await;
+        return;
+    };
+
+    let mode = if chunk_index == 0 {
+        embedded_sdmmc::Mode::ReadWriteCreateOrTruncate
+    } else {
+        embedded_sdmmc::Mode::ReadWriteCreateOrAppend
+    };
+
+    // Step 1: For chunk 0 with non-ASCII name, create file with LFN first
+    if chunk_index == 0 && !file_name.is_ascii() {
+        match SdMount::create_file_with_lfn(&mut sd.volume_manager, &file_name) {
+            Ok((short_name, _block, _offset)) => {
+                println!("LFN created: {} -> {}", file_name, short_name);
+            }
+            Err(_) => {
+                let _ = socket.write_all(b"HTTP/1.0 200 OK\r\nContent-Type: application/json\r\n\r\n{\"success\":false,\"error\":\"create lfn failed\"}").await;
+                return;
+            }
+        }
+    }
+
+    // Step 2: Open volume/root/books_dir and get file handle
+    let mut volume0 = match sd.volume_manager.open_volume(embedded_sdmmc::VolumeIdx(0)) {
+        Ok(v) => v,
+        Err(_) => {
+            let _ = socket.write_all(b"HTTP/1.0 200 OK\r\nContent-Type: application/json\r\n\r\n{\"success\":false,\"error\":\"open volume failed\"}").await;
+            return;
+        }
+    };
+    let mut root = match volume0.open_root_dir() {
+        Ok(r) => r,
+        Err(_) => {
+            let _ = socket.write_all(b"HTTP/1.0 200 OK\r\nContent-Type: application/json\r\n\r\n{\"success\":false,\"error\":\"open root failed\"}").await;
+            return;
+        }
+    };
+    let mut books_dir = match root.open_dir("books") {
+        Ok(d) => d,
+        Err(_) => {
+            let _ = socket.write_all(b"HTTP/1.0 200 OK\r\nContent-Type: application/json\r\n\r\n{\"success\":false,\"error\":\"open books dir failed\"}").await;
+            return;
+        }
+    };
+
+    let mut file = match SdMount::open_file_by_name(&mut books_dir, &file_name, mode) {
+        Ok(f) => f,
+        Err(_) => {
+            let _ = socket.write_all(b"HTTP/1.0 200 OK\r\nContent-Type: application/json\r\n\r\n{\"success\":false,\"error\":\"open file failed\"}").await;
+            return;
+        }
+    };
+
+    // Write body data already read with header
+    if body_already_read > 0 && content_length > 0 {
+        let write_len = body_already_read.min(content_length);
+        let _ = file.write(&header_data[header_end..header_end + write_len]);
+    }
+
+    // Read remaining body from socket
+    let mut remaining = content_length.saturating_sub(body_already_read);
+    let mut body_buf = [0u8; 512];
+    while remaining > 0 {
+        let to_read = remaining.min(body_buf.len());
+        match socket.read(&mut body_buf[..to_read]).await {
+            Ok(len) => {
+                if len == 0 { break; }
+                let _ = file.write(&body_buf[..len]);
+                remaining -= len;
+            }
+            Err(e) => {
+                println!("upload read error: {:?}", e);
+                break;
+            }
+        }
+    }
+
+    file.close();
+    drop(books_dir);
+    drop(root);
+    drop(volume0);
+    drop(sd_guard);
+
+    let _ = socket.write_all(b"HTTP/1.0 200 OK\r\nContent-Type: application/json\r\n\r\n{\"success\":true,\"chunk\":").await;
+    let mut num_buf = heapless::String::<10>::new();
+    let _ = core::fmt::Write::write_fmt(&mut num_buf, format_args!("{}", chunk_index));
+    let _ = socket.write_all(num_buf.as_bytes()).await;
+    let _ = socket.write_all(b"}").await;
+}
+
+async fn handle_configure_wifi(socket: &mut TcpSocket<'_>, req: &httparse::Request<'_, '_>, header_str: &str) {
+    use embedded_io_async::Write;
+    use heapless::String;
+
+    let form_fields = parse_form(req, header_str);
+    println!("form_data:{:?}", form_fields);
+
+    if let Ok(fields) = form_fields {
+        let mut ssid: Option<&str> = None;
+        let mut password: Option<&str> = None;
+
+        for field in fields {
+            if field.0 == "ssid" {
+                ssid = Some(field.1);
+                println!("ssid:{}", field.1);
+            } else if field.0 == "password" {
+                password = Some(field.1);
+                println!("password:{}", field.1);
+            }
+        }
+
+        if let Some(mut wifi_info) = crate::storage::WIFI_INFO.lock().await.as_mut() {
+            println!("wifi_info:{:?}", wifi_info);
+            wifi_info.wifi_ssid = String::from_str(ssid.unwrap()).unwrap();
+            wifi_info.wifi_password = String::from_str(password.unwrap()).unwrap();
+            wifi_info.wifi_finish = true;
+            match wifi_info.write() {
+                Ok(_) => {
+                    println!("保存成功");
+                    let _ = socket.write_all(b"HTTP/1.0 200 OK\r\nContent-Type: application/json\r\n\r\n{\"success\":true}").await;
+                    Timer::after(Duration::from_millis(100)).await;
+                    software_reset();
                 }
-
-                if let (Some(read_sec), Some(weather_sec)) = (read_sleep_seconds, weather_sleep_seconds) {
-                    if let (Ok(read_val), Ok(weather_val)) = (read_sec.parse::<u64>(), weather_sec.parse::<u64>()) {
-                        let mut sleep_storage = crate::storage::SleepStorage::read().unwrap_or_default();
-                        sleep_storage.read_sleep_seconds = read_val;
-                        sleep_storage.weather_sleep_seconds = weather_val;
-                        
-                        match sleep_storage.write() {
-                            Ok(_) => {
-                                println!("睡眠配置保存成功");
-                            }
-                            Err(e) => {
-                                println!("睡眠配置保存失败：{:?}", e);
-                            }
-                        }
-                    }
-                }
-
-                let r = socket
-                    .write_all(
-                        b"HTTP/1.0 200 OK\r\n\r\n\
-            <html>\
-                <body>\
-                    <h3>Sleep config saved</h3>\
-                    <a href='/'>Back</a>\
-                </body>\
-            </html>\r\n",
-                    )
-                    .await;
-
-                if let Err(e) = r {
-                    println!("write error: {:?}", e);
+                Err(e) => {
+                    println!("保存失败：{:?}", e);
+                    let _ = socket.write_all(b"HTTP/1.0 200 OK\r\nContent-Type: application/json\r\n\r\n{\"success\":false}").await;
                 }
             }
         }
     }
 }
+
+async fn handle_configure_weather(socket: &mut TcpSocket<'_>, req: &httparse::Request<'_, '_>, header_str: &str) {
+    use embedded_io_async::Write;
+
+    let form_fields = parse_form(req, header_str);
+    println!("weather form_data:{:?}", form_fields);
+
+    if let Ok(fields) = form_fields {
+        let mut api_key: Option<&str> = None;
+        let mut location: Option<&str> = None;
+
+        for field in fields {
+            if field.0 == "api-key" {
+                api_key = Some(field.1);
+                println!("api-key:{}", field.1);
+            } else if field.0 == "location" {
+                location = Some(field.1);
+                println!("location:{}", field.1);
+            }
+        }
+
+        if let (Some(key), Some(city)) = (api_key, location) {
+            let mut weather_storage = crate::storage::WeatherStorage::read().unwrap_or_default();
+            weather_storage.token = heapless::String::from_str(key).unwrap();
+            weather_storage.city = heapless::String::from_str(city).unwrap();
+
+            match weather_storage.write() {
+                Ok(_) => {
+                    println!("天气配置保存成功");
+                    crate::storage::WEATHER_API.lock().await.replace(weather_storage);
+                }
+                Err(e) => {
+                    println!("天气配置保存失败：{:?}", e);
+                }
+            }
+        }
+
+        let _ = socket.write_all(b"HTTP/1.0 200 OK\r\nContent-Type: application/json\r\n\r\n{\"success\":true}").await;
+    }
+}
+
+async fn handle_configure_sleep(socket: &mut TcpSocket<'_>, req: &httparse::Request<'_, '_>, header_str: &str) {
+    use embedded_io_async::Write;
+
+    let form_fields = parse_form(req, header_str);
+    println!("sleep form_data:{:?}", form_fields);
+
+    if let Ok(fields) = form_fields {
+        let mut read_sleep_seconds: Option<&str> = None;
+        let mut weather_sleep_seconds: Option<&str> = None;
+
+        for field in fields {
+            if field.0 == "read-sleep-seconds" {
+                read_sleep_seconds = Some(field.1);
+                println!("read-sleep-seconds:{}", field.1);
+            } else if field.0 == "weather-sleep-seconds" {
+                weather_sleep_seconds = Some(field.1);
+                println!("weather-sleep-seconds:{}", field.1);
+            }
+        }
+
+        if let (Some(read_sec), Some(weather_sec)) = (read_sleep_seconds, weather_sleep_seconds) {
+            if let (Ok(read_val), Ok(weather_val)) = (read_sec.parse::<u64>(), weather_sec.parse::<u64>()) {
+                let mut sleep_storage = crate::storage::SleepStorage::read().unwrap_or_default();
+                sleep_storage.read_sleep_seconds = read_val;
+                sleep_storage.weather_sleep_seconds = weather_val;
+
+                match sleep_storage.write() {
+                    Ok(_) => {
+                        println!("睡眠配置保存成功");
+                    }
+                    Err(e) => {
+                        println!("睡眠配置保存失败：{:?}", e);
+                    }
+                }
+            }
+        }
+
+        let _ = socket.write_all(b"HTTP/1.0 200 OK\r\nContent-Type: application/json\r\n\r\n{\"success\":true}").await;
+    }
+}
+
 fn parse_form<'a>(
-    req: &httparse::Request,
+    req: &httparse::Request<'_, '_>,
     buffer: &'a str,
 ) -> Result<Vec<(&'a str, &'a str), 20>, &'static str> {
     let (_, body) = buffer.split_once("\r\n\r\n").ok_or("Invalid request format")?;
@@ -361,4 +627,3 @@ fn parse_form<'a>(
         Ok(result)
     }
 }
-

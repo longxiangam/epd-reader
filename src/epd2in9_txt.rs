@@ -93,7 +93,7 @@ impl TxtReader {
              let _ = books_dir.delete_file_in_dir(idx_short_name.clone());
              println!("删除旧索引");
          }
-         while end_position != file_length {
+         while end_position < file_length {
              println!("end_position:{}",end_position);
              let mut my_file = books_dir.open_file_in_dir(file_short_name.clone(), embedded_sdmmc::Mode::ReadOnly).unwrap();
              if end_position > 0 {
@@ -107,6 +107,7 @@ impl TxtReader {
              'outer: while !my_file.is_eof() {
                  let mut buffer = [0u8; BUFFER_LEN];
                  let num_read = my_file.read(&mut buffer).unwrap();
+                 if num_read == 0 { break 'outer; }
 
                  let mut i = 0;
                  if last_borrow_chars > 0 {
@@ -194,6 +195,9 @@ impl TxtReader {
              if let Ok(mut mfi) = my_file_index {
                  crate::epd2in9_txt::TxtReader::save_pages(&mut mfi, &all_page_position_vec);
                  mfi.close();
+             } else {
+                 println!("索引写入失败，终止");
+                 break;
              }
 
          }
@@ -272,7 +276,7 @@ impl TxtReader {
         }
 
 
-        String::from_utf8(txt).unwrap()
+        String::from_utf8(txt).unwrap_or_default()
 
     }
 
@@ -291,6 +295,27 @@ impl TxtReader {
 
         my_file.write(&buffer);
 
+    }
+
+    pub fn save_log_raw<CS: esp_hal::gpio::OutputPin>(my_file: &mut FileObject<CS>, log_vec:&Vec<u32,LOG_VEC_MAX>){
+        const LEN:usize = LOG_VEC_MAX * 4;
+        let mut buffer:Vec<u8, LEN> = Vec::new() ;
+        for i in 0..log_vec.len() {
+            let value = log_vec[i];
+            buffer.push((value >> 24) as u8);
+            buffer.push( (value >> 16) as u8);
+            buffer.push((value >> 8) as u8);
+            buffer.push( value as u8);
+        }
+        let result = my_file.write(&buffer);
+        match result {
+            Ok(_) => {
+                println!("log:{:#?}",buffer);
+            }
+            Err(e)  => {
+                println!("log:{:#?}",e);
+            }
+        }
     }
 
     pub fn save_log<CS: esp_hal::gpio::OutputPin>(my_file: &mut FileObject<CS>, log_vec:&mut Vec<u32,LOG_VEC_MAX>,page:u32,is_favorite:bool){
@@ -326,7 +351,7 @@ impl TxtReader {
 
         let result = my_file.write(&buffer);
         match result {
-            Ok(_) => {  
+            Ok(_) => {
                 println!("log:{:#?}",buffer);
             }
             Err(e)  => {
@@ -494,6 +519,7 @@ impl BookPages {
     }
 
 }
+
 
 
 

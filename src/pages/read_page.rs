@@ -32,6 +32,24 @@ const PAGES_VEC_MAX:usize = epd2in9_txt::PAGES_VEC_MAX;
 const LOG_VEC_MAX:usize = epd2in9_txt::LOG_VEC_MAX;
 const ONE_PAGE_CONTENT_LEN:usize = epd2in9_txt::ONE_PAGE_CONTENT_LEN;
 
+fn sleep_renderer(display: &mut crate::display::EpdDisplay) {
+    display.clear_buffer(Color::White);
+    let font: FontRenderer = FontRenderer::new::<fonts::u8g2_font_wqy15_t_gb2312>();
+    let mut font = font.with_ignore_unknown_chars(true);
+    let center = Point::new(
+        display.bounding_box().size.width as i32 / 2,
+        display.bounding_box().size.height as i32 / 2,
+    );
+    let _ = font.render_aligned(
+        "睡眠中",
+        center,
+        VerticalPosition::Center,
+        HorizontalAlignment::Center,
+        FontColor::Transparent(Black),
+        display,
+    );
+}
+
 /// Physical display dimensions (epd4in2)
 const DISPLAY_WIDTH: u32 = 400;
 const DISPLAY_HEIGHT: u32 = 300;
@@ -50,13 +68,13 @@ fn accel_step(tick: u32) -> u32 {
     else { 400 }
 }
 
-const MENU_ITEMS: &[&str] = &["返回书单", "收藏书签", "打开书签", "跳转页码", "旋转屏幕", "重建索引", "取消"];
+const MENU_ITEMS: &[&str] = &["返回书单", "收藏书签", "打开书签", "删除书签", "跳转页码", "旋转屏幕", "重建索引", "睡眠", "取消"];
 
 enum MenuState {
     Closed,
     Popup { menu_index: u32 },
     JumpInput { input_num: u32 },
-    BookmarkList { bm_index: u32 },
+    BookmarkList { bm_index: u32, deleting: bool },
 }
 
 pub struct ReadPage{
@@ -78,9 +96,13 @@ pub struct ReadPage{
     page_content:String<ONE_PAGE_CONTENT_LEN>,
     menu_state:MenuState,
     save_bookmark_flag:bool,
+    delete_bookmark_flag:bool,
+    need_load_preview:bool,
+    bookmark_preview:String<ONE_PAGE_CONTENT_LEN>,
     /// 0=Rotate90, 1=Rotate270 (upside-down portrait, same page indexing)
     flipped:bool,
     jump_accel:u32,
+    book_progress:Vec<String<16>,40>,
 }
 
 impl ReadPage{
@@ -250,6 +272,44 @@ impl ReadPage{
 
     }
 
+    fn load_book_progress(&mut self, books_dir: &mut ActualDirectory<'_>) {
+        self.book_progress.clear();
+        if let Some(ref menus) = self.menus {
+            for book_name in menus.iter() {
+                let file_name = alloc::format!("{}.txt", book_name);
+                let short_name = match SdMount::find_entry_by_name(books_dir, &file_name) {
+                    Some(entry) => entry.name,
+                    None => {
+                        let _ = self.book_progress.push(String::new());
+                        continue;
+                    }
+                };
+                let current_page: u32 = {
+                    let log_result = SdMount::open_log_file(books_dir, &short_name, embedded_sdmmc::Mode::ReadOnly);
+                    if let Ok(mut f) = log_result {
+                        let log = TxtReader::read_log(&mut f);
+                        f.close();
+                        if !log.is_empty() { log[0] } else { 0 }
+                    } else { 0 }
+                };
+                let total_page: u32 = {
+                    let idx_result = SdMount::open_idx_file(books_dir, &short_name, embedded_sdmmc::Mode::ReadOnly);
+                    if let Ok(mut f) = idx_result {
+                        let len = f.length();
+                        f.close();
+                        len / 4
+                    } else { 0 }
+                };
+                let mut s: String<16> = String::new();
+                if total_page > 0 {
+                    use core::fmt::Write;
+                    let _ = write!(s, "{}%", current_page * 100 / total_page);
+                }
+                let _ = self.book_progress.push(s);
+            }
+        }
+    }
+
     async fn do_change_page(&mut self,page_index:u32){
         if self.book_pages.is_none() { return; }
 
@@ -380,18 +440,21 @@ impl ReadPage{
                     display,
                 ).ok();
             }
-            MenuState::BookmarkList { bm_index } => {
-                // Show bookmark list from log_vec[1..] (index 0 is last read position) + cancel item
+            MenuState::BookmarkList { bm_index, deleting } => {
                 let bookmarks: Vec<u32, LOG_VEC_MAX> = self.log_vec.as_ref()
                     .map(|lv| lv.iter().skip(1).copied().collect())
                     .unwrap_or_default();
 
                 let bm_count = bookmarks.len() as u32;
-                let total_items = if bm_count > 0 { bm_count + 1 } else { 1 };
+                // Max 4 bookmark items + cancel
+                let max_visible = 4u32;
+                let visible_bm = if bm_count > max_visible { max_visible } else { bm_count };
+                let total_items = if visible_bm > 0 { visible_bm + 1 } else { 1 };
                 let list_height = total_items * menu_item_height + menu_padding * 2;
                 let list_x = ((vw - menu_width) / 2) as i32;
-                let list_y = ((vh - list_height) / 2) as i32;
+                let list_y = 20;
 
+                // List border
                 let rect = Rectangle::new(
                     Point::new(list_x, list_y),
                     Size::new(menu_width, list_height),
@@ -404,19 +467,35 @@ impl ReadPage{
                     .build();
                 rect.into_styled(style).draw(display).ok();
 
+                // Title
+                let title = if deleting { "删除书签" } else { "书签列表" };
+                font.render_aligned(
+                    title,
+                    Point::new(list_x + menu_width as i32 / 2, list_y + 10),
+                    VerticalPosition::Center,
+                    HorizontalAlignment::Center,
+                    FontColor::Transparent(Black),
+                    display,
+                ).ok();
+
                 if bm_count == 0 {
                     font.render_aligned(
                         "暂无书签",
-                        Point::new((vw / 2) as i32, list_y + menu_padding as i32 + menu_item_height as i32 / 2),
+                        Point::new(list_x + menu_width as i32 / 2, list_y + menu_padding as i32 + menu_item_height as i32 + menu_item_height as i32 / 2),
                         VerticalPosition::Center,
                         HorizontalAlignment::Center,
                         FontColor::Transparent(Black),
                         display,
                     ).ok();
                 } else {
-                    for (i, &page) in bookmarks.iter().enumerate() {
-                        let item_y = list_y + menu_padding as i32 + (i as u32 * menu_item_height) as i32;
-                        let is_selected = i as u32 == bm_index;
+                    // Scroll offset
+                    let scroll_offset = if bm_index >= max_visible { bm_index - max_visible + 1 } else { 0 };
+                    for vi in 0..visible_bm {
+                        let bi = vi + scroll_offset;
+                        if bi >= bm_count { break; }
+                        let page = bookmarks[bi as usize];
+                        let item_y = list_y + menu_padding as i32 + ((vi + 1) as u32 * menu_item_height) as i32;
+                        let is_selected = bi == bm_index;
 
                         if is_selected {
                             let highlight = Rectangle::new(
@@ -430,8 +509,9 @@ impl ReadPage{
 
                         let text_color = if is_selected { FontColor::Transparent(White) } else { FontColor::Transparent(Black) };
                         let prefix = if is_selected { "> " } else { "  " };
+                        let delete_mark = if deleting && is_selected { " ×" } else { "" };
                         font.render_aligned(
-                            format_args!("{}书签 第{}页", prefix, page),
+                            format_args!("{}第{}页{}", prefix, page, delete_mark),
                             Point::new(list_x + menu_padding as i32, item_y + menu_item_height as i32 / 2),
                             VerticalPosition::Center,
                             HorizontalAlignment::Left,
@@ -441,9 +521,9 @@ impl ReadPage{
                     }
                 }
 
-                // Cancel item (always shown)
-                let cancel_y = list_y + menu_padding as i32 + (total_items - 1) as i32 * menu_item_height as i32;
-                let is_cancel_selected = bm_index == total_items - 1;
+                // Cancel item
+                let cancel_y = list_y + menu_padding as i32 + (total_items as i32) * menu_item_height as i32;
+                let is_cancel_selected = bm_index >= bm_count;
                 if is_cancel_selected {
                     let highlight = Rectangle::new(
                         Point::new(list_x + 4, cancel_y),
@@ -463,6 +543,40 @@ impl ReadPage{
                     cancel_color,
                     display,
                 ).ok();
+
+                // Preview area below the list
+                if bm_count > 0 && bm_index < bm_count && !self.bookmark_preview.is_empty() {
+                    let preview_y = list_y + list_height as i32 + 10;
+                    let preview_height = vh as i32 - preview_y - 10;
+                    if preview_height > 30 {
+                        let preview_rect = Rectangle::new(
+                            Point::new(list_x, preview_y),
+                            Size::new(menu_width, preview_height as u32),
+                        );
+                        let preview_style = PrimitiveStyleBuilder::new()
+                            .fill_color(White)
+                            .stroke_color(Black)
+                            .stroke_alignment(StrokeAlignment::Outside)
+                            .stroke_width(1)
+                            .build();
+                        preview_rect.into_styled(preview_style).draw(display).ok();
+
+                        use embedded_graphics::draw_target::DrawTargetExt;
+                        let clipped = Rectangle::new(
+                            Point::new(list_x + 4, preview_y + 4),
+                            Size::new(menu_width - 8, (preview_height - 8) as u32),
+                        );
+                        let mut clipped_display = display.clipped(&clipped);
+                        font.render_aligned(
+                            self.bookmark_preview.as_str(),
+                            Point::new(list_x + 6, preview_y + 14),
+                            VerticalPosition::Top,
+                            HorizontalAlignment::Left,
+                            FontColor::Transparent(Black),
+                            &mut clipped_display,
+                        ).ok();
+                    }
+                }
             }
             MenuState::Closed => {}
         }
@@ -533,8 +647,12 @@ impl Page for ReadPage{
             page_content: Default::default(),
             menu_state: MenuState::Closed,
             save_bookmark_flag: false,
+            delete_bookmark_flag: false,
+            need_load_preview: false,
+            bookmark_preview: Default::default(),
             flipped: false,
             jump_accel: 0,
+            book_progress: Vec::new(),
         };
 
         unsafe{
@@ -586,6 +704,37 @@ impl Page for ReadPage{
                             );
                             list_widget.choose(self.choose_index as usize);
                             let _ = list_widget.draw(display);
+
+                            // Draw book progress right-aligned
+                            if self.book_progress.len() == self.menus.as_ref().unwrap().len() {
+                                let font: FontRenderer = FontRenderer::new::<fonts::u8g2_font_wqy16_t_gb2312>();
+                                let mut font = font.with_ignore_unknown_chars(true);
+                                let item_height: u32 = 20;
+                                let scroll_width: u32 = 10;
+                                let total_items = self.book_progress.len();
+                                let content_h = total_items as u32 * item_height;
+                                let scroll_offset: i32 = if content_h <= vh { 0 } else {
+                                    let half = vh / 2;
+                                    let max_off = content_h - vh;
+                                    let cy = self.choose_index as u32 * item_height;
+                                    if cy <= half { 0 }
+                                    else if cy >= max_off + half { max_off as i32 }
+                                    else { (cy - half) as i32 }
+                                };
+                                for bi in 0..total_items {
+                                    if self.book_progress[bi].is_empty() { continue; }
+                                    let item_y = bi as i32 * item_height as i32 - scroll_offset;
+                                    if item_y < 0 || item_y + item_height as i32 > vh as i32 { continue; }
+                                    font.render_aligned(
+                                        self.book_progress[bi].as_str(),
+                                        Point::new((vw - scroll_width - 5) as i32, item_y + 5),
+                                        VerticalPosition::Top,
+                                        HorizontalAlignment::Right,
+                                        FontColor::Transparent(Black),
+                                        display,
+                                    ).ok();
+                                }
+                            }
                         }
                     } else if self.book_pages.is_some() {
                         let font: FontRenderer = FontRenderer::new::<fonts::u8g2_font_wqy15_t_gb2312>();
@@ -630,6 +779,7 @@ impl Page for ReadPage{
     
 
     async fn run(&mut self, spawner: Spawner) {
+        display::set_sleep_renderer(Some(sleep_renderer));
         if let Some(display) = display_mut() {
            display.set_rotation(self.current_rotation());
         }
@@ -649,8 +799,7 @@ impl Page for ReadPage{
                             if let Ok(mut books_dir) = books_dir_res {
                                 let books = SdMount::get_books(&mut books_dir).unwrap();
                                 self.menus = Some(books);
-
-
+                                self.load_book_progress(&mut books_dir);
 
                                 loop {
                                     if !self.running { break; }
@@ -687,6 +836,97 @@ impl Page for ReadPage{
                                         }
                                     }
 
+                                    // Handle bookmark delete (needs books_dir)
+                                    if self.delete_bookmark_flag {
+                                        self.delete_bookmark_flag = false;
+                                        if let Some(ref mut lv) = self.log_vec {
+                                            let bm_idx = match self.menu_state {
+                                                MenuState::BookmarkList { bm_index, .. } => bm_index,
+                                                _ => 0,
+                                            } as usize;
+                                            // bookmarks are at lv[1..], so delete at bm_idx + 1
+                                            let del_idx = bm_idx + 1;
+                                            if del_idx < lv.len() {
+                                                lv.remove(del_idx);
+                                                // Write updated log
+                                                let book_name = self.menus.as_ref().unwrap()[self.choose_index as usize].clone();
+                                                let file_name = format!("{}.txt", book_name);
+                                                if let Some(entry) = SdMount::find_entry_by_name(&mut books_dir, &file_name) {
+                                                    let short_name = entry.name;
+                                                    let logfile = SdMount::open_log_file(&mut books_dir, &short_name, embedded_sdmmc::Mode::ReadWriteCreateOrTruncate);
+                                                    if let Ok(mut f) = logfile {
+                                                        TxtReader::save_log_raw(&mut f, lv);
+                                                        f.close();
+                                                    }
+                                                }
+                                                // Adjust bm_index if needed
+                                                let new_bm_count = if lv.len() > 1 { lv.len() - 1 } else { 0 };
+                                                if let MenuState::BookmarkList { ref mut bm_index, .. } = self.menu_state {
+                                                    if *bm_index as usize >= new_bm_count && *bm_index > 0 {
+                                                        *bm_index -= 1;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        self.bookmark_preview.clear();
+                                        self.need_render = true;
+                                    }
+
+                                    // Handle bookmark preview loading (needs books_dir)
+                                    if self.need_load_preview {
+                                        self.need_load_preview = false;
+                                        self.bookmark_preview.clear();
+                                        let bm_page = match self.menu_state {
+                                            MenuState::BookmarkList { bm_index, .. } => {
+                                                self.log_vec.as_ref()
+                                                    .and_then(|lv| lv.iter().skip(1).nth(bm_index as usize).copied())
+                                            },
+                                            _ => None,
+                                        };
+                                        if let Some(page) = bm_page {
+                                            if self.book_pages.is_some() {
+                                                let book_name = self.menus.as_ref().unwrap()[self.choose_index as usize].clone();
+                                                let file_name = format!("{}.txt", book_name);
+                                                if let Some(entry) = SdMount::find_entry_by_name(&mut books_dir, &file_name) {
+                                                    let short_name = entry.name;
+                                                    // Read page position from index file (own block to release borrow)
+                                                    let page_pos = {
+                                                        let mut idx_file = SdMount::open_idx_file(&mut books_dir, &short_name, embedded_sdmmc::Mode::ReadOnly);
+                                                        if let Ok(mut idx_file) = idx_file {
+                                                            let begin_pos = if page == 0 { 0u32 } else {
+                                                                idx_file.seek_from_start((page - 1) * 4);
+                                                                let mut buf = [0u8; 4];
+                                                                let _ = idx_file.read(&mut buf);
+                                                                ((buf[0] as u32) << 24) | ((buf[1] as u32) << 16) | ((buf[2] as u32) << 8) | buf[3] as u32
+                                                            };
+                                                            idx_file.seek_from_start(page * 4);
+                                                            let mut buf = [0u8; 4];
+                                                            let end_pos = if idx_file.read(&mut buf).unwrap_or(0) == 4 {
+                                                                ((buf[0] as u32) << 24) | ((buf[1] as u32) << 16) | ((buf[2] as u32) << 8) | buf[3] as u32
+                                                            } else { 0 };
+                                                            idx_file.close();
+                                                            Some((begin_pos, end_pos))
+                                                        } else { None }
+                                                    };
+
+                                                    if let Some((begin_pos, end_pos)) = page_pos {
+                                                        if end_pos > begin_pos {
+                                                            let mut my_file = books_dir.open_file_in_dir(short_name, embedded_sdmmc::Mode::ReadOnly);
+                                                            if let Ok(mut my_file) = my_file {
+                                                                self.bookmark_preview = TxtReader::get_page_content(&mut my_file, begin_pos, end_pos, self.visual_width());
+                                                                my_file.close();
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        self.need_render = true;
+                                    }
+
+                                    if !matches!(self.menu_state, MenuState::Closed) {
+                                        display::reset_render_times();
+                                    }
                                     self.render().await;
 
                                     // Skip sleep timer when menu is open
@@ -717,6 +957,7 @@ impl Page for ReadPage{
             }
         }
         //*event::ENABLE_DOUBLE.lock().await = false;
+        display::set_sleep_renderer(None);
         if let Some(display) = display_mut() {
             display.set_rotation(DisplayRotation::Rotate0);
         }
@@ -772,29 +1013,43 @@ impl Page for ReadPage{
                                 mut_ref.save_bookmark_flag = true;
                             }
                             2 => {
-                                // 打开书签 — 进入书签列表
-                                mut_ref.menu_state = MenuState::BookmarkList { bm_index: 0 };
+                                // 打开书签 — 正常模式
+                                mut_ref.menu_state = MenuState::BookmarkList { bm_index: 0, deleting: false };
+                                mut_ref.need_load_preview = true;
                                 mut_ref.need_render = true;
                                 return;
                             }
                             3 => {
+                                // 删除书签 — 删除模式
+                                mut_ref.menu_state = MenuState::BookmarkList { bm_index: 0, deleting: true };
+                                mut_ref.bookmark_preview.clear();
+                                mut_ref.need_render = true;
+                                return;
+                            }
+                            4 => {
                                 // 跳转页码 — 进入数字输入
                                 mut_ref.menu_state = MenuState::JumpInput { input_num: mut_ref.page_index };
                                 mut_ref.jump_accel = 0;
                                 mut_ref.need_render = true;
                                 return;
                             }
-                            4 => {
+                            5 => {
                                 // 旋转屏幕 — flip upside down (Rotate90 ↔ Rotate270)
                                 mut_ref.flipped = !mut_ref.flipped;
                                 if let Some(display) = display_mut() {
                                     display.set_rotation(mut_ref.current_rotation());
                                 }
                             }
-                            5 => {
+                            6 => {
                                 // 重建索引
                                 mut_ref.force_indexing = true;
                                 mut_ref.book_pages = None;
+                            }
+                            7 => {
+                                // 睡眠
+                                crate::sleep::refresh_active_time().await;
+                                crate::sleep::to_sleep_tips(Duration::from_secs(0), Duration::from_secs(0), true).await;
+                                return;
                             }
                             _ => {}
                         }
@@ -807,12 +1062,16 @@ impl Page for ReadPage{
                         mut_ref.menu_state = MenuState::Closed;
                         mut_ref.need_render = true;
                     }
-                    MenuState::BookmarkList { bm_index } => {
+                    MenuState::BookmarkList { bm_index, deleting } => {
                         let bm_count = mut_ref.log_vec.as_ref().map(|lv| if lv.len() > 0 { lv.len() - 1 } else { 0 }).unwrap_or(0) as u32;
-                        let total_items = if bm_count > 0 { bm_count + 1 } else { 1 };
-                        if bm_index == total_items - 1 {
+                        if bm_index >= bm_count {
                             // 取消 — 返回菜单
                             mut_ref.menu_state = MenuState::Popup { menu_index: 0 };
+                            mut_ref.bookmark_preview.clear();
+                            mut_ref.need_render = true;
+                        } else if deleting {
+                            // 删除选中书签
+                            mut_ref.delete_bookmark_flag = true;
                             mut_ref.need_render = true;
                         } else if let Some(ref lv) = mut_ref.log_vec {
                             let bookmarks: Vec<u32, LOG_VEC_MAX> = lv.iter().skip(1).copied().collect();
@@ -852,7 +1111,6 @@ impl Page for ReadPage{
                         } else {
                             *menu_index = 0;
                         }
-                        display::reset_render_times();
                         mut_ref.need_render = true;
                         Timer::after_millis(200).await;
                     }
@@ -865,9 +1123,17 @@ impl Page for ReadPage{
                         } else {
                             *input_num = max_page;
                         }
-                        display::reset_render_times();
                         mut_ref.need_render = true;
                         Timer::after_millis(75).await;
+                    }
+                    MenuState::BookmarkList { ref mut bm_index, deleting } => {
+                        let bm_count = mut_ref.log_vec.as_ref().map(|lv| if lv.len() > 0 { lv.len() - 1 } else { 0 }).unwrap_or(0) as u32;
+                        if *bm_index < bm_count {
+                            *bm_index += 1;
+                            if !deleting { mut_ref.need_load_preview = true; }
+                            mut_ref.need_render = true;
+                            Timer::after_millis(200).await;
+                        }
                     }
                     MenuState::Closed => {
                         if !mut_ref.reading {
@@ -896,7 +1162,6 @@ impl Page for ReadPage{
                         } else {
                             *menu_index = (MENU_ITEMS.len() - 1) as u32;
                         }
-                        display::reset_render_times();
                         mut_ref.need_render = true;
                         Timer::after_millis(200).await;
                     }
@@ -908,9 +1173,16 @@ impl Page for ReadPage{
                         } else {
                             *input_num = 0;
                         }
-                        display::reset_render_times();
                         mut_ref.need_render = true;
                         Timer::after_millis(75).await;
+                    }
+                    MenuState::BookmarkList { ref mut bm_index, deleting } => {
+                        if *bm_index > 0 {
+                            *bm_index -= 1;
+                            if !deleting { mut_ref.need_load_preview = true; }
+                            mut_ref.need_render = true;
+                            Timer::after_millis(200).await;
+                        }
                     }
                     MenuState::Closed => {
                         if !mut_ref.reading {
@@ -949,11 +1221,11 @@ impl Page for ReadPage{
                             mut_ref.need_render = true;
                         }
                     }
-                    MenuState::BookmarkList { ref mut bm_index } => {
+                    MenuState::BookmarkList { ref mut bm_index, deleting } => {
                         let bm_count = mut_ref.log_vec.as_ref().map(|lv| if lv.len() > 0 { lv.len() - 1 } else { 0 }).unwrap_or(0) as u32;
-                        let total_items = if bm_count > 0 { bm_count + 1 } else { 1 };
-                        if *bm_index < total_items - 1 {
+                        if *bm_index < bm_count {
                             *bm_index += 1;
+                            if !deleting { mut_ref.need_load_preview = true; }
                             mut_ref.need_render = true;
                         }
                     }
@@ -996,9 +1268,10 @@ impl Page for ReadPage{
                             mut_ref.need_render = true;
                         }
                     }
-                    MenuState::BookmarkList { ref mut bm_index } => {
+                    MenuState::BookmarkList { ref mut bm_index, deleting } => {
                         if *bm_index > 0 {
                             *bm_index -= 1;
+                            if !deleting { mut_ref.need_load_preview = true; }
                             mut_ref.need_render = true;
                         }
                     }

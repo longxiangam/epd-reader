@@ -105,6 +105,58 @@
             background-color: #f8d7da;
             color: #721c24;
         }
+        .book-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 8px 0;
+            border-bottom: 1px solid #eee;
+        }
+        .book-item span {
+            flex: 1;
+            word-break: break-all;
+        }
+        .book-item button {
+            background-color: #dc3545;
+            color: white;
+            border: none;
+            padding: 4px 12px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 13px;
+            margin-left: 8px;
+        }
+        .book-item button:hover {
+            background-color: #c82333;
+        }
+        #uploadProgress {
+            margin-top: 8px;
+            font-size: 14px;
+            color: #555;
+        }
+        #uploadBtn {
+            background-color: #28a745;
+            color: white;
+            padding: 8px 16px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+            margin-top: 8px;
+            width: 100%;
+        }
+        #uploadBtn:hover {
+            background-color: #218838;
+        }
+        #uploadBtn:disabled {
+            background-color: #aaa;
+            cursor: not-allowed;
+        }
+        #bookFile {
+            margin-top: 8px;
+            width: 100%;
+            box-sizing: border-box;
+        }
     </style>
 </head>
 <body>
@@ -113,6 +165,7 @@
         <button class="tab-link active" data-tab="wifi">WiFi</button>
         <button class="tab-link" data-tab="weather">天气</button>
         <button class="tab-link" data-tab="sleep">睡眠</button>
+        <button class="tab-link" data-tab="books">书籍</button>
        <!-- <button class="tab-link" data-tab="timer">定时功能</button>-->
 
     </div>
@@ -146,6 +199,16 @@
             <div id="sleepMessage" class="message"></div>
         </form>
     </div>
+    <div id="books" class="tab-content">
+        <h3 style="margin-top:0;">书籍列表</h3>
+        <div id="bookList"></div>
+        <hr style="margin:16px 0;">
+        <h3>上传书籍</h3>
+        <input type="file" id="bookFile" accept=".txt">
+        <button id="uploadBtn" disabled>上传书籍</button>
+        <div id="uploadProgress"></div>
+        <div id="bookMessage" class="message"></div>
+    </div>
 <!--    <div id="timer" class="tab-content">
         <form action="/configure_timer" method="POST">
             <label for="start-time">Start Time:</label>
@@ -169,6 +232,10 @@
             const tabId = button.getAttribute('data-tab');
             document.getElementById(tabId).classList.add('active');
             button.classList.add('active');
+
+            if (tabId === 'books') {
+                loadBooks();
+            }
         });
     });
 
@@ -261,6 +328,121 @@
                 sleepMessage.style.display = 'block';
             });
     });
+
+    // ===== Books Management =====
+    const CHUNK_SIZE = 1024;
+
+    async function loadBooks() {
+        const listEl = document.getElementById('bookList');
+        listEl.innerHTML = '加载中...';
+        try {
+            const resp = await fetch('/books');
+            const data = await resp.json();
+            if (!data.books || data.books.length === 0) {
+                listEl.innerHTML = '<p>暂无书籍</p>';
+                return;
+            }
+            listEl.innerHTML = '';
+            data.books.forEach(name => {
+                const item = document.createElement('div');
+                item.className = 'book-item';
+                const span = document.createElement('span');
+                span.textContent = name;
+                const btn = document.createElement('button');
+                btn.textContent = '删除';
+                btn.onclick = () => deleteBook(name, item);
+                item.appendChild(span);
+                item.appendChild(btn);
+                listEl.appendChild(item);
+            });
+        } catch (e) {
+            listEl.innerHTML = '<p>加载失败: ' + e.message + '</p>';
+        }
+    }
+
+    async function deleteBook(name, itemEl) {
+        if (!confirm('确定删除 "' + name + '" 吗？')) return;
+        try {
+            const resp = await fetch('/delete', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                body: 'name=' + encodeURIComponent(name)
+            });
+            const data = await resp.json();
+            if (data.success) {
+                itemEl.remove();
+                showBookMessage('已删除: ' + name, 'success');
+            } else {
+                showBookMessage('删除失败: ' + (data.error || '未知错误'), 'error');
+            }
+        } catch (e) {
+            showBookMessage('删除出错: ' + e.message, 'error');
+        }
+    }
+
+    const bookFileInput = document.getElementById('bookFile');
+    const uploadBtn = document.getElementById('uploadBtn');
+    const uploadProgress = document.getElementById('uploadProgress');
+
+    bookFileInput.addEventListener('change', () => {
+        uploadBtn.disabled = !bookFileInput.files.length;
+    });
+
+    uploadBtn.addEventListener('click', async () => {
+        const file = bookFileInput.files[0];
+        if (!file) return;
+
+        let fileName = file.name;
+        // Ensure .txt extension
+        if (!fileName.toLowerCase().endsWith('.txt')) {
+            fileName += '.txt';
+        }
+
+        uploadBtn.disabled = true;
+        uploadProgress.textContent = '准备上传...';
+
+        const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
+
+        try {
+            for (let i = 0; i < totalChunks; i++) {
+                const start = i * CHUNK_SIZE;
+                const end = Math.min(start + CHUNK_SIZE, file.size);
+                const chunk = file.slice(start, end);
+                const buf = await chunk.arrayBuffer();
+
+                const resp = await fetch('/upload?name=' + encodeURIComponent(fileName) + '&chunk=' + i, {
+                    method: 'POST',
+                    body: buf
+                });
+
+                const data = await resp.json();
+                if (!data.success) {
+                    throw new Error(data.error || '上传失败');
+                }
+
+                const pct = Math.round(((i + 1) / totalChunks) * 100);
+                uploadProgress.textContent = '上传进度: ' + pct + '% (' + (i + 1) + '/' + totalChunks + ')';
+            }
+
+            showBookMessage('上传成功: ' + fileName, 'success');
+            uploadProgress.textContent = '';
+            bookFileInput.value = '';
+            uploadBtn.disabled = true;
+            loadBooks();
+        } catch (e) {
+            showBookMessage('上传失败: ' + e.message, 'error');
+        } finally {
+            uploadBtn.disabled = false;
+        }
+    });
+
+    function showBookMessage(text, type) {
+        const el = document.getElementById('bookMessage');
+        el.textContent = text;
+        el.className = 'message ' + type;
+        el.style.display = 'block';
+        setTimeout(() => { el.style.display = 'none'; }, 3000);
+    }
 
 </script>
 </body>
