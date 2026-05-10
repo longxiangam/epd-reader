@@ -1,4 +1,3 @@
-use crate::storage::NvsStorage;
 use core::str::{from_utf8, FromStr};
 use embassy_futures::select::{Either, select};
 use embassy_net::{IpListenEndpoint, Stack};
@@ -13,6 +12,7 @@ use heapless::Vec;
 use crate::wifi::{AP_STACK_MUT, finish_wifi,  use_wifi, WIFI_MODEL, WifiModel};
 use crate::sd_mount::{SdMount, SD_MOUNT, url_decode, BOOK_NAME_MAX};
 // use crate::storage::{NvsStorage, WIFI_INFO};
+use crate::storage::NvsStorage;
 
 pub static STOP_WEB_SERVICE: Signal<CriticalSectionRawMutex,()> = Signal::new();
 #[embassy_executor::task]
@@ -75,47 +75,50 @@ async fn  web_tcp_socket<D: esp_wifi::wifi::WifiDeviceMode> (stack:&Stack<WifiDe
                     continue;
                 }
 
-                use embedded_io_async::Write;
-
-                let mut buffer = [0u8; 2048];
-                let mut pos = 0;
+                // Keep-alive: process multiple HTTP requests on the same TCP connection
                 loop {
-                    match socket.read(&mut buffer[pos..]).await {
-                        Ok(0) => {
-                            println!("read EOF");
-                            break;
-                        }
-                        Ok(len) => {
-                            pos += len;
-                            let to_print =
-                                unsafe { core::str::from_utf8_unchecked(&buffer[..pos]) };
+                    let mut buffer = [0u8; 2048];
+                    let mut pos = 0;
+                    let mut header_found = false;
 
-                            if to_print.contains("\r\n\r\n") {
-                                print!("{}", to_print);
-                                println!();
-
-                                process_http(&mut socket, &buffer[..pos]).await;
+                    loop {
+                        match socket.read(&mut buffer[pos..]).await {
+                            Ok(0) => {
+                                println!("read EOF");
                                 break;
                             }
+                            Ok(len) => {
+                                pos += len;
+                                for i in 0..pos.saturating_sub(3) {
+                                    if buffer[i] == b'\r' && buffer[i+1] == b'\n'
+                                        && buffer[i+2] == b'\r' && buffer[i+3] == b'\n' {
+                                        header_found = true;
+                                        break;
+                                    }
+                                }
+                                if header_found { break; }
+                            }
+                            Err(e) => {
+                                println!("read error: {:?}", e);
+                                break;
+                            }
+                        };
+                    }
 
-                        }
-                        Err(e) => {
-                            println!("read error: {:?}", e);
-                            break;
-                        }
-                    };
+                    if !header_found {
+                        break; // Connection closed or error, accept new connection
+                    }
+
+                    let to_print = unsafe { core::str::from_utf8_unchecked(&buffer[..pos]) };
+                    print!("{}", to_print);
+                    println!();
+
+                    process_http(&mut socket, &buffer[..pos]).await;
+                    // Loop back to read next request on same connection (keep-alive)
                 }
 
-                //总是卡死，不知道原因
-                // let r = socket.flush().await;
-                // if let Err(e) = r {
-                //     println!("flush error: {:?}", e);
-                // }
-                Timer::after(Duration::from_millis(1000)).await;
-
                 socket.close();
-                Timer::after(Duration::from_millis(1000)).await;
-
+                Timer::after(Duration::from_millis(1)).await;
                 socket.abort();
 
             }
@@ -124,13 +127,41 @@ async fn  web_tcp_socket<D: esp_wifi::wifi::WifiDeviceMode> (stack:&Stack<WifiDe
 
 }
 
+fn find_header_end(data: &[u8]) -> Option<usize> {
+    for i in 0..data.len().saturating_sub(3) {
+        if data[i] == b'\r' && data[i + 1] == b'\n' && data[i + 2] == b'\r' && data[i + 3] == b'\n' {
+            return Some(i + 4);
+        }
+    }
+    None
+}
+
+/// Send JSON response with HTTP/1.1 keep-alive and Content-Length.
+async fn send_json(socket: &mut TcpSocket<'_>, body: &[u8]) {
+    use embedded_io_async::Write;
+    let header = alloc::format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: keep-alive\r\n\r\n",
+        body.len()
+    );
+    let _ = socket.write_all(header.as_bytes()).await;
+    let _ = socket.write_all(body).await;
+}
+
 async fn process_http(socket:&mut TcpSocket<'_>, header_data: &[u8]) {
     use embedded_io_async::Write;
-    use heapless::String;
 
+    let header_end = match find_header_end(header_data) {
+        Some(pos) => pos,
+        None => return,
+    };
+
+    // Body may contain binary data (file uploads), so validate only header if full check fails
     let header_str = match from_utf8(header_data) {
         Ok(s) => s,
-        Err(_) => return,
+        Err(_) => match from_utf8(&header_data[..header_end]) {
+            Ok(s) => s,
+            Err(_) => return,
+        },
     };
 
     let mut headers = [httparse::EMPTY_HEADER; 64];
@@ -151,8 +182,13 @@ async fn process_http(socket:&mut TcpSocket<'_>, header_data: &[u8]) {
             handle_upload(socket, &req, header_str, header_data).await;
         }
         (Some("GET"), Some("/")) | (Some("GET"), Some("/index.html")) => {
-            let content = concat!("HTTP/1.0 200 OK\r\n\r\n", include_str!("../files/config.html"));
-            let _ = socket.write_all(content.as_bytes()).await;
+            let html = include_str!("../files/config.html");
+            let header = alloc::format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: keep-alive\r\n\r\n",
+                html.as_bytes().len()
+            );
+            let _ = socket.write_all(header.as_bytes()).await;
+            let _ = socket.write_all(html.as_bytes()).await;
         }
         (Some("POST"), Some("/configure_wifi")) => {
             handle_configure_wifi(socket, &req, header_str).await;
@@ -164,7 +200,7 @@ async fn process_http(socket:&mut TcpSocket<'_>, header_data: &[u8]) {
             handle_configure_sleep(socket, &req, header_str).await;
         }
         _ => {
-            let _ = socket.write_all(b"HTTP/1.0 404 Not Found\r\n\r\n").await;
+            send_json(socket, b"404 Not Found").await;
         }
     }
 }
@@ -174,7 +210,7 @@ async fn handle_get_books(socket: &mut TcpSocket<'_>) {
 
     let mut sd_guard = SD_MOUNT.lock().await;
     let Some(ref mut sd) = *sd_guard else {
-        let _ = socket.write_all(b"HTTP/1.0 200 OK\r\nContent-Type: application/json\r\n\r\n{\"books\":[],\"error\":\"SD not ready\"}").await;
+        send_json(socket, b"{\"books\":[],\"error\":\"SD not ready\"}").await;
         return;
     };
 
@@ -182,7 +218,7 @@ async fn handle_get_books(socket: &mut TcpSocket<'_>) {
         Ok(v) => v,
         Err(e) => {
             println!("open_volume error: {:?}", e);
-            let _ = socket.write_all(b"HTTP/1.0 200 OK\r\nContent-Type: application/json\r\n\r\n{\"books\":[],\"error\":\"open volume failed\"}").await;
+            send_json(socket, b"{\"books\":[],\"error\":\"open volume failed\"}").await;
             return;
         }
     };
@@ -191,7 +227,7 @@ async fn handle_get_books(socket: &mut TcpSocket<'_>) {
         Ok(r) => r,
         Err(e) => {
             println!("open_root error: {:?}", e);
-            let _ = socket.write_all(b"HTTP/1.0 200 OK\r\nContent-Type: application/json\r\n\r\n{\"books\":[],\"error\":\"open root failed\"}").await;
+            send_json(socket, b"{\"books\":[],\"error\":\"open root failed\"}").await;
             return;
         }
     };
@@ -200,15 +236,37 @@ async fn handle_get_books(socket: &mut TcpSocket<'_>) {
         Ok(d) => d,
         Err(e) => {
             println!("open_dir books error: {:?}", e);
-            let _ = socket.write_all(b"HTTP/1.0 200 OK\r\nContent-Type: application/json\r\n\r\n{\"books\":[],\"error\":\"open books dir failed\"}").await;
+            send_json(socket, b"{\"books\":[],\"error\":\"open books dir failed\"}").await;
             return;
         }
     };
 
     let books = SdMount::get_books(&mut books_dir).unwrap_or_default();
 
-    // Send response in parts to fit tx_buffer
-    let _ = socket.write_all(b"HTTP/1.0 200 OK\r\nContent-Type: application/json\r\n\r\n{\"books\":[").await;
+    // Compute total body length for Content-Length header
+    let mut body_len: usize = 10; // {"books":[
+    for (i, book) in books.iter().enumerate() {
+        if i > 0 { body_len += 1; } // comma
+        body_len += 2; // quotes
+        for c in book.chars() {
+            match c {
+                '"' | '\\' => body_len += 2,
+                '\n' | '\r' => body_len += 2,
+                _ => body_len += c.len_utf8(),
+            }
+        }
+    }
+    body_len += 2; // ]}
+
+    // Send header with pre-computed Content-Length
+    let header = alloc::format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: keep-alive\r\n\r\n",
+        body_len
+    );
+    let _ = socket.write_all(header.as_bytes()).await;
+
+    // Stream body
+    let _ = socket.write_all(b"{\"books\":[").await;
 
     for (i, book) in books.iter().enumerate() {
         if i > 0 {
@@ -234,13 +292,12 @@ async fn handle_get_books(socket: &mut TcpSocket<'_>) {
 }
 
 async fn handle_delete(socket: &mut TcpSocket<'_>, req: &httparse::Request<'_, '_>, header_str: &str) {
-    use embedded_io_async::Write;
 
     // Extract body
     let body = match header_str.split_once("\r\n\r\n") {
         Some((_, b)) => b,
         None => {
-            let _ = socket.write_all(b"HTTP/1.0 200 OK\r\nContent-Type: application/json\r\n\r\n{\"success\":false}").await;
+            send_json(socket, b"{\"success\":false}").await;
             return;
         }
     };
@@ -250,7 +307,7 @@ async fn handle_delete(socket: &mut TcpSocket<'_>, req: &httparse::Request<'_, '
     let book_name = match url_decode(name_encoded) {
         Some(n) => n,
         None => {
-            let _ = socket.write_all(b"HTTP/1.0 200 OK\r\nContent-Type: application/json\r\n\r\n{\"success\":false,\"error\":\"invalid name\"}").await;
+            send_json(socket, b"{\"success\":false,\"error\":\"invalid name\"}").await;
             return;
         }
     };
@@ -258,28 +315,28 @@ async fn handle_delete(socket: &mut TcpSocket<'_>, req: &httparse::Request<'_, '
 
     let mut sd_guard = SD_MOUNT.lock().await;
     let Some(ref mut sd) = *sd_guard else {
-        let _ = socket.write_all(b"HTTP/1.0 200 OK\r\nContent-Type: application/json\r\n\r\n{\"success\":false,\"error\":\"SD not ready\"}").await;
+        send_json(socket, b"{\"success\":false,\"error\":\"SD not ready\"}").await;
         return;
     };
 
     let mut volume0 = match sd.volume_manager.open_volume(embedded_sdmmc::VolumeIdx(0)) {
         Ok(v) => v,
         Err(_) => {
-            let _ = socket.write_all(b"HTTP/1.0 200 OK\r\nContent-Type: application/json\r\n\r\n{\"success\":false,\"error\":\"open volume failed\"}").await;
+            send_json(socket, b"{\"success\":false,\"error\":\"open volume failed\"}").await;
             return;
         }
     };
     let mut root = match volume0.open_root_dir() {
         Ok(r) => r,
         Err(_) => {
-            let _ = socket.write_all(b"HTTP/1.0 200 OK\r\nContent-Type: application/json\r\n\r\n{\"success\":false,\"error\":\"open root failed\"}").await;
+            send_json(socket, b"{\"success\":false,\"error\":\"open root failed\"}").await;
             return;
         }
     };
     let mut books_dir = match root.open_dir("books") {
         Ok(d) => d,
         Err(_) => {
-            let _ = socket.write_all(b"HTTP/1.0 200 OK\r\nContent-Type: application/json\r\n\r\n{\"success\":false,\"error\":\"open books dir failed\"}").await;
+            send_json(socket, b"{\"success\":false,\"error\":\"open books dir failed\"}").await;
             return;
         }
     };
@@ -296,14 +353,13 @@ async fn handle_delete(socket: &mut TcpSocket<'_>, req: &httparse::Request<'_, '
         if let Some(log_name) = SdMount::derive_short_name(&short_name, "LOG") {
             let _ = books_dir.delete_file_in_dir(log_name);
         }
-        let _ = socket.write_all(b"HTTP/1.0 200 OK\r\nContent-Type: application/json\r\n\r\n{\"success\":true}").await;
+        send_json(socket, b"{\"success\":true}").await;
     } else {
-        let _ = socket.write_all(b"HTTP/1.0 200 OK\r\nContent-Type: application/json\r\n\r\n{\"success\":false,\"error\":\"book not found\"}").await;
+        send_json(socket, b"{\"success\":false,\"error\":\"book not found\"}").await;
     }
 }
 
 async fn handle_upload(socket: &mut TcpSocket<'_>, req: &httparse::Request<'_, '_>, header_str: &str, header_data: &[u8]) {
-    use embedded_io_async::Write;
 
     // Parse query params from URL: /upload?name=ENCODED&chunk=N
     let path = req.path.unwrap_or("");
@@ -328,7 +384,7 @@ async fn handle_upload(socket: &mut TcpSocket<'_>, req: &httparse::Request<'_, '
     }
 
     if file_name_encoded.is_empty() {
-        let _ = socket.write_all(b"HTTP/1.0 200 OK\r\nContent-Type: application/json\r\n\r\n{\"success\":false,\"error\":\"missing name\"}").await;
+        send_json(socket, b"{\"success\":false,\"error\":\"missing name\"}").await;
         return;
     }
 
@@ -337,7 +393,7 @@ async fn handle_upload(socket: &mut TcpSocket<'_>, req: &httparse::Request<'_, '
     let file_name = match url_decode(file_name_encoded) {
         Some(n) => n,
         None => {
-            let _ = socket.write_all(b"HTTP/1.0 200 OK\r\nContent-Type: application/json\r\n\r\n{\"success\":false,\"error\":\"invalid file name\"}").await;
+            send_json(socket, b"{\"success\":false,\"error\":\"invalid file name\"}").await;
             return;
         }
     };
@@ -347,7 +403,7 @@ async fn handle_upload(socket: &mut TcpSocket<'_>, req: &httparse::Request<'_, '
     let header_end = match header_str.find("\r\n\r\n") {
         Some(pos) => pos + 4,
         None => {
-            let _ = socket.write_all(b"HTTP/1.0 200 OK\r\nContent-Type: application/json\r\n\r\n{\"success\":false}").await;
+            send_json(socket, b"{\"success\":false}").await;
             return;
         }
     };
@@ -356,7 +412,7 @@ async fn handle_upload(socket: &mut TcpSocket<'_>, req: &httparse::Request<'_, '
     // Lock SD
     let mut sd_guard = SD_MOUNT.lock().await;
     let Some(ref mut sd) = *sd_guard else {
-        let _ = socket.write_all(b"HTTP/1.0 200 OK\r\nContent-Type: application/json\r\n\r\n{\"success\":false,\"error\":\"SD not ready\"}").await;
+        send_json(socket, b"{\"success\":false,\"error\":\"SD not ready\"}").await;
         return;
     };
 
@@ -367,13 +423,15 @@ async fn handle_upload(socket: &mut TcpSocket<'_>, req: &httparse::Request<'_, '
     };
 
     // Step 1: For chunk 0 with non-ASCII name, create file with LFN first
+    let mut lfn_short_name: Option<embedded_sdmmc::ShortFileName> = None;
     if chunk_index == 0 && !file_name.is_ascii() {
         match SdMount::create_file_with_lfn(&mut sd.volume_manager, &file_name) {
             Ok((short_name, _block, _offset)) => {
                 println!("LFN created: {} -> {}", file_name, short_name);
+                lfn_short_name = Some(short_name);
             }
             Err(_) => {
-                let _ = socket.write_all(b"HTTP/1.0 200 OK\r\nContent-Type: application/json\r\n\r\n{\"success\":false,\"error\":\"create lfn failed\"}").await;
+                send_json(socket, b"{\"success\":false,\"error\":\"create lfn failed\"}").await;
                 return;
             }
         }
@@ -383,30 +441,42 @@ async fn handle_upload(socket: &mut TcpSocket<'_>, req: &httparse::Request<'_, '
     let mut volume0 = match sd.volume_manager.open_volume(embedded_sdmmc::VolumeIdx(0)) {
         Ok(v) => v,
         Err(_) => {
-            let _ = socket.write_all(b"HTTP/1.0 200 OK\r\nContent-Type: application/json\r\n\r\n{\"success\":false,\"error\":\"open volume failed\"}").await;
+            send_json(socket, b"{\"success\":false,\"error\":\"open volume failed\"}").await;
             return;
         }
     };
     let mut root = match volume0.open_root_dir() {
         Ok(r) => r,
         Err(_) => {
-            let _ = socket.write_all(b"HTTP/1.0 200 OK\r\nContent-Type: application/json\r\n\r\n{\"success\":false,\"error\":\"open root failed\"}").await;
+            send_json(socket, b"{\"success\":false,\"error\":\"open root failed\"}").await;
             return;
         }
     };
     let mut books_dir = match root.open_dir("books") {
         Ok(d) => d,
         Err(_) => {
-            let _ = socket.write_all(b"HTTP/1.0 200 OK\r\nContent-Type: application/json\r\n\r\n{\"success\":false,\"error\":\"open books dir failed\"}").await;
+            send_json(socket, b"{\"success\":false,\"error\":\"open books dir failed\"}").await;
             return;
         }
     };
 
-    let mut file = match SdMount::open_file_by_name(&mut books_dir, &file_name, mode) {
-        Ok(f) => f,
-        Err(_) => {
-            let _ = socket.write_all(b"HTTP/1.0 200 OK\r\nContent-Type: application/json\r\n\r\n{\"success\":false,\"error\":\"open file failed\"}").await;
-            return;
+    // Open file — use short name directly if LFN was just created
+    let mut file = if let Some(ref sn) = lfn_short_name {
+        match books_dir.open_file_in_dir(sn.clone(), mode) {
+            Ok(f) => f,
+            Err(e) => {
+                println!("open by short name failed: {:?}", e);
+                send_json(socket, b"{\"success\":false,\"error\":\"open file failed\"}").await;
+                return;
+            }
+        }
+    } else {
+        match SdMount::open_file_by_name(&mut books_dir, &file_name, mode) {
+            Ok(f) => f,
+            Err(_) => {
+                send_json(socket, b"{\"success\":false,\"error\":\"open file failed\"}").await;
+                return;
+            }
         }
     };
 
@@ -440,15 +510,11 @@ async fn handle_upload(socket: &mut TcpSocket<'_>, req: &httparse::Request<'_, '
     drop(volume0);
     drop(sd_guard);
 
-    let _ = socket.write_all(b"HTTP/1.0 200 OK\r\nContent-Type: application/json\r\n\r\n{\"success\":true,\"chunk\":").await;
-    let mut num_buf = heapless::String::<10>::new();
-    let _ = core::fmt::Write::write_fmt(&mut num_buf, format_args!("{}", chunk_index));
-    let _ = socket.write_all(num_buf.as_bytes()).await;
-    let _ = socket.write_all(b"}").await;
+    let body = alloc::format!("{{\"success\":true,\"chunk\":{}}}", chunk_index);
+    send_json(socket, body.as_bytes()).await;
 }
 
 async fn handle_configure_wifi(socket: &mut TcpSocket<'_>, req: &httparse::Request<'_, '_>, header_str: &str) {
-    use embedded_io_async::Write;
     use heapless::String;
 
     let form_fields = parse_form(req, header_str);
@@ -476,13 +542,13 @@ async fn handle_configure_wifi(socket: &mut TcpSocket<'_>, req: &httparse::Reque
             match wifi_info.write() {
                 Ok(_) => {
                     println!("保存成功");
-                    let _ = socket.write_all(b"HTTP/1.0 200 OK\r\nContent-Type: application/json\r\n\r\n{\"success\":true}").await;
+                    send_json(socket, b"{\"success\":true}").await;
                     Timer::after(Duration::from_millis(100)).await;
                     software_reset();
                 }
                 Err(e) => {
                     println!("保存失败：{:?}", e);
-                    let _ = socket.write_all(b"HTTP/1.0 200 OK\r\nContent-Type: application/json\r\n\r\n{\"success\":false}").await;
+                    send_json(socket, b"{\"success\":false}").await;
                 }
             }
         }
@@ -490,7 +556,6 @@ async fn handle_configure_wifi(socket: &mut TcpSocket<'_>, req: &httparse::Reque
 }
 
 async fn handle_configure_weather(socket: &mut TcpSocket<'_>, req: &httparse::Request<'_, '_>, header_str: &str) {
-    use embedded_io_async::Write;
 
     let form_fields = parse_form(req, header_str);
     println!("weather form_data:{:?}", form_fields);
@@ -525,12 +590,11 @@ async fn handle_configure_weather(socket: &mut TcpSocket<'_>, req: &httparse::Re
             }
         }
 
-        let _ = socket.write_all(b"HTTP/1.0 200 OK\r\nContent-Type: application/json\r\n\r\n{\"success\":true}").await;
+        send_json(socket, b"{\"success\":true}").await;
     }
 }
 
 async fn handle_configure_sleep(socket: &mut TcpSocket<'_>, req: &httparse::Request<'_, '_>, header_str: &str) {
-    use embedded_io_async::Write;
 
     let form_fields = parse_form(req, header_str);
     println!("sleep form_data:{:?}", form_fields);
@@ -566,7 +630,7 @@ async fn handle_configure_sleep(socket: &mut TcpSocket<'_>, req: &httparse::Requ
             }
         }
 
-        let _ = socket.write_all(b"HTTP/1.0 200 OK\r\nContent-Type: application/json\r\n\r\n{\"success\":true}").await;
+        send_json(socket, b"{\"success\":true}").await;
     }
 }
 
