@@ -1,5 +1,6 @@
 use alloc::boxed::Box;
 use alloc::format;
+use alloc::vec::Vec as AllocVec;
 use embassy_executor::Spawner;
 use embassy_time::{Duration, Instant, Timer};
 use embedded_graphics::Drawable;
@@ -32,22 +33,136 @@ const PAGES_VEC_MAX:usize = epd2in9_txt::PAGES_VEC_MAX;
 const LOG_VEC_MAX:usize = epd2in9_txt::LOG_VEC_MAX;
 const ONE_PAGE_CONTENT_LEN:usize = epd2in9_txt::ONE_PAGE_CONTENT_LEN;
 
+static mut SLEEP_IMAGE_DATA: Option<AllocVec<u8>> = None;
+
+fn load_sleep_image(root: &mut ActualDirectory<'_>) {
+    unsafe { SLEEP_IMAGE_DATA = None; }
+    let mut images_dir = match root.open_dir("images") {
+        Ok(d) => d,
+        Err(_) => {
+            println!("images dir not found, skip sleep image");
+            return;
+        }
+    };
+    let file = SdMount::open_file_by_name(&mut images_dir, "sleep.bmp", embedded_sdmmc::Mode::ReadOnly);
+    let mut file = match file {
+        Ok(f) => f,
+        Err(_) => {
+            println!("sleep.bmp not found");
+            return;
+        }
+    };
+    let len = file.length() as usize;
+    if len == 0 || len > 30000 {
+        println!("sleep.bmp invalid size: {}", len);
+        file.close();
+        return;
+    }
+    let mut data = AllocVec::with_capacity(len);
+    let mut buf = [0u8; 512];
+    loop {
+        match file.read(&mut buf) {
+            Ok(n) if n > 0 => data.extend_from_slice(&buf[..n]),
+            _ => break,
+        }
+    }
+    file.close();
+    println!("Loaded sleep.bmp: {} bytes", data.len());
+    unsafe { SLEEP_IMAGE_DATA = Some(data); }
+}
+
+fn draw_bmp_to_display(data: &[u8], display: &mut crate::display::EpdDisplay) -> bool {
+    if data.len() < 54 || data[0] != b'B' || data[1] != b'M' {
+        println!("sleep.bmp: invalid header");
+        return false;
+    }
+    let pixel_offset = u32::from_le_bytes([data[10], data[11], data[12], data[13]]) as usize;
+    let width = u32::from_le_bytes([data[18], data[19], data[20], data[21]]);
+    let height_raw = i32::from_le_bytes([data[22], data[23], data[24], data[25]]);
+    let bpp = u16::from_le_bytes([data[28], data[29]]) as u32;
+
+    let top_down = height_raw < 0;
+    let height = height_raw.unsigned_abs();
+    println!("sleep.bmp: {}x{} bpp={} offset={}", width, height, bpp, pixel_offset);
+
+    if width == 0 || height == 0 || (bpp != 1 && bpp != 24 && bpp != 32) {
+        println!("sleep.bmp: unsupported format");
+        return false;
+    }
+
+    let row_bytes = match bpp {
+        1 => (width + 7) / 8,
+        24 => width * 3,
+        32 => width * 4,
+        _ => return false,
+    };
+    let row_stride = ((row_bytes + 3) & !3u32) as usize;
+
+    let display_w = display.bounding_box().size.width;
+    let display_h = display.bounding_box().size.height;
+
+    for dy in 0..display_h {
+        let src_y = dy * height / display_h;
+        let src_y = if top_down { src_y } else { height - 1 - src_y };
+        let row_start = pixel_offset + src_y as usize * row_stride;
+        for dx in 0..display_w {
+            let sx = dx * width / display_w;
+            let is_black = match bpp {
+                1 => {
+                    let byte_idx = row_start + sx as usize / 8;
+                    let bit_idx = 7 - (sx % 8);
+                    if byte_idx < data.len() {
+                        (data[byte_idx] >> bit_idx) & 1 == 0
+                    } else { false }
+                }
+                24 => {
+                    let px = row_start + sx as usize * 3;
+                    if px + 2 < data.len() {
+                        let (b, g, r) = (data[px] as u32, data[px + 1] as u32, data[px + 2] as u32);
+                        (r * 299 + g * 587 + b * 114) / 1000 < 128
+                    } else { false }
+                }
+                32 => {
+                    let px = row_start + sx as usize * 4;
+                    if px + 2 < data.len() {
+                        let (b, g, r) = (data[px] as u32, data[px + 1] as u32, data[px + 2] as u32);
+                        (r * 299 + g * 587 + b * 114) / 1000 < 128
+                    } else { false }
+                }
+                _ => false,
+            };
+            if is_black {
+                use embedded_graphics::Pixel;
+                let _ = Pixel(Point::new(dx as i32, dy as i32), Black).draw(display);
+            }
+        }
+    }
+    true
+}
+
 fn sleep_renderer(display: &mut crate::display::EpdDisplay) {
     display.clear_buffer(Color::White);
-    let font: FontRenderer = FontRenderer::new::<fonts::u8g2_font_wqy15_t_gb2312>();
-    let mut font = font.with_ignore_unknown_chars(true);
-    let center = Point::new(
-        display.bounding_box().size.width as i32 / 2,
-        display.bounding_box().size.height as i32 / 2,
-    );
-    let _ = font.render_aligned(
-        "睡眠中",
-        center,
-        VerticalPosition::Center,
-        HorizontalAlignment::Center,
-        FontColor::Transparent(Black),
-        display,
-    );
+
+    let drawn = unsafe {
+        SLEEP_IMAGE_DATA.as_ref().map_or(false, |data| draw_bmp_to_display(data, display))
+    };
+
+    if !drawn {
+        let font: FontRenderer = FontRenderer::new::<fonts::u8g2_font_wqy15_t_gb2312>();
+        let mut font = font.with_ignore_unknown_chars(true);
+        let center = Point::new(
+            display.bounding_box().size.width as i32 / 2,
+            display.bounding_box().size.height as i32 / 2,
+        );
+        let _ = font.render_aligned(
+            "睡眠中",
+            center,
+            VerticalPosition::Center,
+            HorizontalAlignment::Center,
+            FontColor::Transparent(Black),
+            display,
+        );
+    }
 }
 
 /// Physical display dimensions (epd4in2)
@@ -795,6 +910,7 @@ impl Page for ReadPage{
                     let root_result = v.open_root_dir();
                     match root_result {
                         Ok(mut root) => {
+                            load_sleep_image(&mut root);
                             let books_dir_res = root.open_dir("books");
                             if let Ok(mut books_dir) = books_dir_res {
                                 let books = SdMount::get_books(&mut books_dir).unwrap();

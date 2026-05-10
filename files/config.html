@@ -55,12 +55,14 @@
             overflow-y: auto;
         }
         .tab-content.active {
-            display: block;
+            display: flex;
+            flex-direction: column;
+            overflow-y: auto;
         }
         form {
             display: flex;
             flex-direction: column;
-            height: 100%;
+            flex-shrink: 0;
         }
         label {
             margin-bottom: 8px;
@@ -85,7 +87,7 @@
             font-size: 16px;
             width: 100%;
             box-sizing: border-box;
-            margin-top: auto;
+            margin-top: 10px;
         }
         input[type="submit"]:hover {
             background-color: #218838;
@@ -198,6 +200,14 @@
             <input type="submit" value="保存配置" />
             <div id="sleepMessage" class="message"></div>
         </form>
+        <hr style="margin:16px 0;">
+        <h3 style="margin-top:0;">睡眠图片</h3>
+        <div id="sleepImageInfo">检查中...</div>
+        <input type="file" id="sleepImageFile" accept=".bmp" style="margin-top:8px;width:100%;box-sizing:border-box;">
+        <button id="sleepImageUploadBtn" disabled style="background-color:#28a745;color:white;padding:8px 16px;border:none;border-radius:4px;cursor:pointer;font-size:14px;margin-top:8px;width:100%;">上传睡眠图片</button>
+        <button id="sleepImageDeleteBtn" style="background-color:#dc3545;color:white;padding:8px 16px;border:none;border-radius:4px;cursor:pointer;font-size:14px;margin-top:8px;width:100%;display:none;">删除睡眠图片</button>
+        <div id="sleepImageProgress" style="margin-top:8px;font-size:14px;color:#555;"></div>
+        <div id="sleepImageMessage" class="message"></div>
     </div>
     <div id="books" class="tab-content">
         <h3 style="margin-top:0;">书籍列表</h3>
@@ -438,6 +448,93 @@
 
     function showBookMessage(text, type) {
         const el = document.getElementById('bookMessage');
+        el.textContent = text;
+        el.className = 'message ' + type;
+        el.style.display = 'block';
+        setTimeout(() => { el.style.display = 'none'; }, 3000);
+    }
+
+    // ===== Sleep Image Management =====
+    const sleepImageFile = document.getElementById('sleepImageFile');
+    const sleepImageUploadBtn = document.getElementById('sleepImageUploadBtn');
+    const sleepImageDeleteBtn = document.getElementById('sleepImageDeleteBtn');
+    const sleepImageInfo = document.getElementById('sleepImageInfo');
+    const sleepImageProgress = document.getElementById('sleepImageProgress');
+
+    sleepImageFile.addEventListener('change', () => {
+        sleepImageUploadBtn.disabled = !sleepImageFile.files.length;
+    });
+
+    async function loadSleepImageInfo() {
+        try {
+            const resp = await fetch('/sleep_image');
+            const data = await resp.json();
+            if (data.exists) {
+                sleepImageInfo.textContent = '已存在睡眠图片 (' + data.size + ' 字节)';
+                sleepImageDeleteBtn.style.display = 'block';
+            } else {
+                sleepImageInfo.textContent = '暂无睡眠图片，请上传 BMP 格式图片（最大30KB）';
+                sleepImageDeleteBtn.style.display = 'none';
+            }
+        } catch (e) {
+            sleepImageInfo.textContent = '检查失败: ' + e.message;
+            sleepImageDeleteBtn.style.display = 'none';
+        }
+    }
+    loadSleepImageInfo();
+
+    sleepImageUploadBtn.addEventListener('click', async () => {
+        const file = sleepImageFile.files[0];
+        if (!file) return;
+        if (file.size > 30000) {
+            showSleepImageMessage('文件过大，最大支持30KB', 'error');
+            return;
+        }
+
+        sleepImageUploadBtn.disabled = true;
+        sleepImageProgress.textContent = '上传中...';
+
+        try {
+            const buf = await file.arrayBuffer();
+            const resp = await fetch('/upload_sleep_image', {
+                method: 'POST',
+                body: buf
+            });
+            const data = await resp.json();
+            if (data.success) {
+                showSleepImageMessage('睡眠图片上传成功!', 'success');
+                sleepImageFile.value = '';
+                sleepImageUploadBtn.disabled = true;
+                loadSleepImageInfo();
+            } else {
+                showSleepImageMessage('上传失败: ' + (data.error || '未知错误'), 'error');
+            }
+        } catch (e) {
+            showSleepImageMessage('上传出错: ' + e.message, 'error');
+        } finally {
+            sleepImageUploadBtn.disabled = false;
+            sleepImageProgress.textContent = '';
+        }
+    });
+
+    sleepImageDeleteBtn.addEventListener('click', async () => {
+        if (!confirm('确定删除睡眠图片吗？')) return;
+        try {
+            const resp = await fetch('/delete_sleep_image', { method: 'POST' });
+            const data = await resp.json();
+            if (data.success) {
+                showSleepImageMessage('已删除睡眠图片', 'success');
+                loadSleepImageInfo();
+            } else {
+                showSleepImageMessage('删除失败: ' + (data.error || '未知错误'), 'error');
+            }
+        } catch (e) {
+            showSleepImageMessage('删除出错: ' + e.message, 'error');
+        }
+    });
+
+    function showSleepImageMessage(text, type) {
+        const el = document.getElementById('sleepImageMessage');
         el.textContent = text;
         el.className = 'message ' + type;
         el.style.display = 'block';

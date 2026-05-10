@@ -47,6 +47,7 @@ qrcodegen-no-heap ={version = "1.8"}
 dhcparse ={version = "1.0.0",default-features = false}
 httparse ={version = "1.9.3",default-features = false}
 embedded-sdmmc = {version = "0.9.0" }
+tinybmp = "0.6"
 
 epd-waveshare = {git="https://github.com/longxiangam/epd-waveshare-modify"}
 mini-json={git="https://github.com/longxiangam/mini-json"}
