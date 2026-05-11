@@ -334,7 +334,7 @@ async fn main(spawner: Spawner) {
 
 fn alloc(){
     // -------- Setup Allocator --------
-    const HEAP_SIZE: usize = 36 * 1024;
+    const HEAP_SIZE: usize = 38 * 1024;
     static mut HEAP: [u8; HEAP_SIZE] = [0; HEAP_SIZE];
     #[global_allocator]
     static ALLOCATOR: embedded_alloc::Heap = embedded_alloc::Heap::empty();

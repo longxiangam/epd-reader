@@ -33,10 +33,35 @@ const PAGES_VEC_MAX:usize = epd2in9_txt::PAGES_VEC_MAX;
 const LOG_VEC_MAX:usize = epd2in9_txt::LOG_VEC_MAX;
 const ONE_PAGE_CONTENT_LEN:usize = epd2in9_txt::ONE_PAGE_CONTENT_LEN;
 
+
+/// Physical display dimensions (epd4in2)
+const DISPLAY_WIDTH: u32 = 400;
+const DISPLAY_HEIGHT: u32 = 300;
+const FONT_SIZE: u32 = 16;
+const PROGRESS_AREA_HEIGHT: u32 = 20;
+
+const SLEEP_IMG_W: u32 = DISPLAY_HEIGHT; // 300 portrait width
+const SLEEP_IMG_H: u32 = DISPLAY_WIDTH;  // 400 portrait height
+const SLEEP_BUF_SIZE: usize = (SLEEP_IMG_W * SLEEP_IMG_H / 8) as usize; // 15000
+
 static mut SLEEP_IMAGE_DATA: Option<AllocVec<u8>> = None;
 
-fn load_sleep_image(root: &mut ActualDirectory<'_>) {
+/// Allocate sleep image buffer on heap (call when entering read_page).
+fn alloc_sleep_image() {
+    let mut buf = AllocVec::with_capacity(SLEEP_BUF_SIZE);
+    buf.resize(SLEEP_BUF_SIZE, 0);
+    unsafe { SLEEP_IMAGE_DATA = Some(buf); }
+}
+
+/// Free sleep image buffer (call when exiting read_page).
+fn free_sleep_image() {
     unsafe { SLEEP_IMAGE_DATA = None; }
+}
+
+fn load_sleep_image(root: &mut ActualDirectory<'_>) {
+    let Some(pixels) =(unsafe { SLEEP_IMAGE_DATA.as_mut() } )else { return };
+    pixels.fill(0);
+
     let mut images_dir = match root.open_dir("images") {
         Ok(d) => d,
         Err(_) => {
@@ -58,93 +83,94 @@ fn load_sleep_image(root: &mut ActualDirectory<'_>) {
         file.close();
         return;
     }
-    let mut data = AllocVec::with_capacity(len);
+    let mut raw = AllocVec::with_capacity(len);
     let mut buf = [0u8; 512];
     loop {
         match file.read(&mut buf) {
-            Ok(n) if n > 0 => data.extend_from_slice(&buf[..n]),
+            Ok(n) if n > 0 => raw.extend_from_slice(&buf[..n]),
             _ => break,
         }
     }
     file.close();
-    println!("Loaded sleep.bmp: {} bytes", data.len());
-    unsafe { SLEEP_IMAGE_DATA = Some(data); }
-}
+    // raw (temp AllocVec for BMP data) freed at end of this function
 
-fn draw_bmp_to_display(data: &[u8], display: &mut crate::display::EpdDisplay) -> bool {
-    if data.len() < 54 || data[0] != b'B' || data[1] != b'M' {
+    if raw.len() < 54 || raw[0] != b'B' || raw[1] != b'M' {
         println!("sleep.bmp: invalid header");
-        return false;
+        return;
     }
-    let pixel_offset = u32::from_le_bytes([data[10], data[11], data[12], data[13]]) as usize;
-    let width = u32::from_le_bytes([data[18], data[19], data[20], data[21]]);
-    let height_raw = i32::from_le_bytes([data[22], data[23], data[24], data[25]]);
-    let bpp = u16::from_le_bytes([data[28], data[29]]) as u32;
-
+    let pixel_offset = u32::from_le_bytes([raw[10], raw[11], raw[12], raw[13]]) as usize;
+    let bmp_w = u32::from_le_bytes([raw[18], raw[19], raw[20], raw[21]]);
+    let height_raw = i32::from_le_bytes([raw[22], raw[23], raw[24], raw[25]]);
+    let bpp = u16::from_le_bytes([raw[28], raw[29]]) as u32;
     let top_down = height_raw < 0;
-    let height = height_raw.unsigned_abs();
-    println!("sleep.bmp: {}x{} bpp={} offset={}", width, height, bpp, pixel_offset);
+    let bmp_h = height_raw.unsigned_abs();
+    println!("sleep.bmp: {}x{} bpp={}", bmp_w, bmp_h, bpp);
 
-    if width == 0 || height == 0 || (bpp != 1 && bpp != 24 && bpp != 32) {
+    if bmp_w == 0 || bmp_h == 0 || (bpp != 1 && bpp != 24 && bpp != 32) {
         println!("sleep.bmp: unsupported format");
-        return false;
+        return;
     }
-
     let row_bytes = match bpp {
-        1 => (width + 7) / 8,
-        24 => width * 3,
-        32 => width * 4,
-        _ => return false,
+        1 => (bmp_w + 7) / 8,
+        24 => bmp_w * 3,
+        32 => bmp_w * 4,
+        _ => return,
     };
     let row_stride = ((row_bytes + 3) & !3u32) as usize;
 
-    let display_w = display.bounding_box().size.width;
-    let display_h = display.bounding_box().size.height;
-
-    for dy in 0..display_h {
-        let src_y = dy * height / display_h;
-        let src_y = if top_down { src_y } else { height - 1 - src_y };
+    for dy in 0..SLEEP_IMG_H {
+        let src_y = dy * bmp_h / SLEEP_IMG_H;
+        let src_y = if top_down { src_y } else { bmp_h - 1 - src_y };
         let row_start = pixel_offset + src_y as usize * row_stride;
-        for dx in 0..display_w {
-            let sx = dx * width / display_w;
+        for dx in 0..SLEEP_IMG_W {
+            let sx = dx * bmp_w / SLEEP_IMG_W;
             let is_black = match bpp {
                 1 => {
                     let byte_idx = row_start + sx as usize / 8;
                     let bit_idx = 7 - (sx % 8);
-                    if byte_idx < data.len() {
-                        (data[byte_idx] >> bit_idx) & 1 == 0
-                    } else { false }
+                    byte_idx < raw.len() && (raw[byte_idx] >> bit_idx) & 1 == 0
                 }
                 24 => {
                     let px = row_start + sx as usize * 3;
-                    if px + 2 < data.len() {
-                        let (b, g, r) = (data[px] as u32, data[px + 1] as u32, data[px + 2] as u32);
+                    if px + 2 < raw.len() {
+                        let (b, g, r) = (raw[px] as u32, raw[px+1] as u32, raw[px+2] as u32);
                         (r * 299 + g * 587 + b * 114) / 1000 < 128
                     } else { false }
                 }
                 32 => {
                     let px = row_start + sx as usize * 4;
-                    if px + 2 < data.len() {
-                        let (b, g, r) = (data[px] as u32, data[px + 1] as u32, data[px + 2] as u32);
+                    if px + 2 < raw.len() {
+                        let (b, g, r) = (raw[px] as u32, raw[px+1] as u32, raw[px+2] as u32);
                         (r * 299 + g * 587 + b * 114) / 1000 < 128
                     } else { false }
                 }
                 _ => false,
             };
             if is_black {
-                use embedded_graphics::Pixel;
-                let _ = Pixel(Point::new(dx as i32, dy as i32), Black).draw(display);
+                let idx = (dy * SLEEP_IMG_W + dx) as usize;
+                pixels[idx / 8] |= 1 << (7 - (idx % 8));
             }
         }
     }
-    true
+    println!("sleep image loaded, {} bytes heap", SLEEP_BUF_SIZE);
 }
 
 fn sleep_renderer(display: &mut crate::display::EpdDisplay) {
     display.clear_buffer(Color::White);
 
     let drawn = unsafe {
-        SLEEP_IMAGE_DATA.as_ref().map_or(false, |data| draw_bmp_to_display(data, display))
+        SLEEP_IMAGE_DATA.as_ref().map_or(false, |pixels| {
+            for y in 0..SLEEP_IMG_H {
+                for x in 0..SLEEP_IMG_W {
+                    let idx = (y * SLEEP_IMG_W + x) as usize;
+                    if (pixels[idx / 8] >> (7 - idx % 8)) & 1 != 0 {
+                        use embedded_graphics::Pixel;
+                        let _ = Pixel(Point::new(x as i32, y as i32), Black).draw(display);
+                    }
+                }
+            }
+            true
+        })
     };
 
     if !drawn {
@@ -165,11 +191,6 @@ fn sleep_renderer(display: &mut crate::display::EpdDisplay) {
     }
 }
 
-/// Physical display dimensions (epd4in2)
-const DISPLAY_WIDTH: u32 = 400;
-const DISPLAY_HEIGHT: u32 = 300;
-const FONT_SIZE: u32 = 16;
-const PROGRESS_AREA_HEIGHT: u32 = 20;
 
 /// Accelerating step size for page jump long press.
 /// 0-4 ticks: 1, 5-9: 5, 10-19: 10, 20-34: 50, 35+: 100
@@ -894,6 +915,7 @@ impl Page for ReadPage{
     
 
     async fn run(&mut self, spawner: Spawner) {
+        alloc_sleep_image();
         display::set_sleep_renderer(Some(sleep_renderer));
         if let Some(display) = display_mut() {
            display.set_rotation(self.current_rotation());
@@ -1073,6 +1095,7 @@ impl Page for ReadPage{
             }
         }
         //*event::ENABLE_DOUBLE.lock().await = false;
+        free_sleep_image();
         display::set_sleep_renderer(None);
         if let Some(display) = display_mut() {
             display.set_rotation(DisplayRotation::Rotate0);

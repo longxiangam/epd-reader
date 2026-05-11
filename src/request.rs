@@ -13,6 +13,7 @@ use reqwless::response::Response;
 use crate::random::RngWrapper;
 
 const BUFFER_SIZE:usize = 4096;
+const TLS_BUFFER_SIZE:usize = 4096;
 #[derive(Debug)]
 pub enum RequestError{
     TimeOut,
@@ -67,8 +68,8 @@ impl RequestClient{
             rng:RngWrapper::from(rng),
             rx_buffer: vec![0u8;BUFFER_SIZE],
             tx_buffer: vec![0u8;BUFFER_SIZE],
-            tls_rx_buffer: vec![0u8;BUFFER_SIZE],
-            tls_tx_buffer: vec![0u8;BUFFER_SIZE],
+            tls_rx_buffer: vec![0u8;TLS_BUFFER_SIZE],
+            tls_tx_buffer: vec![0u8;TLS_BUFFER_SIZE],
         }
     }
     pub async fn send_request(&mut self, url: &str) -> Result<ResponseData, RequestError> {
