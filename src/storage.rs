@@ -25,12 +25,15 @@ pub fn write_flash(flash_addr:u32, bytes: &[u8]) -> Result<(), FlashStorageError
 }
 pub fn read_flash(flash_addr:u32, bytes: &mut [u8]) -> Result<(), FlashStorageError> {
     let mut flash = FlashStorage::new();
-    println!("read_flash:{}",flash_addr);
+    //println!("read_flash:{}",flash_addr);
     let result = flash.read(flash_addr,bytes);
     match result {
-        Ok(_) => { println!("read success");Ok(()) }
+        Ok(_) => {
+            //println!("read success");
+            Ok(())
+        }
         Err(e) => {
-            println!("read fail：{:?}",e);
+            //println!("read fail：{:?}",e);
             Err(e)
         }
     }
@@ -123,7 +126,7 @@ const WEATHER_STORAGE_OFFSET:usize = WIFI_STORAGE_OFFSET+ size_of::<WifiStorage>
 
 
 
-//保存天气的app key 和 结果 
+//保存天气的app key 和 结果
 #[derive(Debug,Default)]
 pub struct WeatherStorage{
     pub token:heapless::String<64>,

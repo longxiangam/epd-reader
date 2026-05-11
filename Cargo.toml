@@ -62,5 +62,6 @@ embedded-sdmmc = {git = "https://github.com/rust-embedded-community/embedded-sdm
 epd2in9=[]
 epd4in2=[]
 enable_debug=[]
+weather-openmeteo=[]
 [profile.release]
 opt-level = "s"
