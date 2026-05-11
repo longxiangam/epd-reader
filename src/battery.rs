@@ -3,10 +3,11 @@ use embassy_executor::task;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::mutex::Mutex;
 use embassy_time::Timer;
-use esp_println::println;
 use esp_hal::analog::adc::{Adc, AdcCalBasic, AdcPin};
 use esp_hal::gpio::{Analog, GpioPin};
+use esp_hal::macros::ram;
 use esp_hal::peripherals::ADC1;
+use esp_println::println;
 use crate::event::ADC_PER;
 use micromath::F32Ext;
 type AdcCal = esp_hal::analog::adc::AdcCalCurve<ADC1>;
@@ -26,6 +27,10 @@ impl  Battery{
 
 pub static BATTERY:Mutex<CriticalSectionRawMutex,Option<Battery>> = Mutex::new(None);
 pub static ADC_PIN:Mutex<CriticalSectionRawMutex,Option<AdcPin<GpioPin<4>,ADC1,AdcCal>>> = Mutex::new(None);
+
+/// 最近一次电量百分比，RTC 内存保存，sleep_renderer 可同步读取
+#[ram(rtc_fast)]
+pub static mut LAST_BATTERY_PERCENT: u32 = 0;
 
 #[task]
 pub async fn test_bat_adc() {
@@ -59,6 +64,7 @@ pub async fn test_bat_adc() {
                                 };
 
                                 v.percent = percent;
+                                unsafe { LAST_BATTERY_PERCENT = percent; }
 
                                 // 日志输出
                                 println!("ADC原始值: {}", adc_value);

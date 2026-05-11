@@ -17,11 +17,14 @@ use epd_waveshare::prelude::Display;
 use esp_println::println;
 use time::OffsetDateTime;
 use u8g2_fonts::U8g2TextStyle;
+use u8g2_fonts::FontRenderer;
 use u8g2_fonts::fonts;
 use crate::display::{display_mut, QUICKLY_LUT_CHANNEL, RENDER_CHANNEL, RenderInfo};
 use crate::event;
 use crate::event::EventType;
 use crate::pages::Page;
+use crate::battery::BATTERY;
+use crate::widgets::battery::draw_battery;
 use crate::sleep::{refresh_active_time, to_sleep, to_sleep_tips};
 use crate::storage::NvsStorage;
 use crate::weather::{sync_holiday_success, sync_weather_success, HolidayInfo, Weather};
@@ -81,6 +84,15 @@ impl Page for CalendarPage {
             self.need_render = false;
             if let Some(display) = display_mut() {
                 let _ = display.clear_buffer(White);
+
+                // 电量图标（右上角）
+                {
+                    let font: FontRenderer = FontRenderer::new::<fonts::u8g2_font_wqy12_t_gb2312>();
+                    if let Some(bat) = BATTERY.lock().await.as_ref() {
+                        let bat_x = display.bounding_box().size.width as i32 - 60;
+                        let _ = draw_battery(bat.percent, Point::new(bat_x, 4), Black, &font, display);
+                    }
+                }
 
                 let style =
                     U8g2TextStyle::new(fonts::u8g2_font_wqy16_t_gb2312, Black);
