@@ -30,6 +30,7 @@ use crate::weather::{sync_holiday_success, sync_weather_success, HolidayInfo, We
 use crate::widgets::temp_chart::{TempPoint, draw_temp_chart, draw_temp_labels};
 use crate::battery::BATTERY;
 use crate::widgets::battery::draw_battery;
+use crate::model::lunar::Lunar;
 use crate::widgets::weather_icon::{WeatherKind, draw_weather_icon};
 use crate::wifi::WIFI_STATE;
 use crate::worldtime::{get_clock, sync_time_success};
@@ -71,138 +72,9 @@ where
 }
 
 fn sleep_renderer(display: &mut crate::display::EpdDisplay) {
-    use crate::storage::WeatherStorage;
-
-    display.clear_buffer(White);
-
     let w = display.bounding_box().size.width as i32;
-    let h = display.bounding_box().size.height as i32;
-    let is_small = w < 350;
-
-    let font_small: FontRenderer = FontRenderer::new::<fonts::u8g2_font_wqy12_t_gb2312b>();
-    let font_medium: FontRenderer = if is_small {
-        FontRenderer::new::<fonts::u8g2_font_wqy14_t_gb2312b>()
-    } else {
-        FontRenderer::new::<fonts::u8g2_font_wqy16_t_gb2312>()
-    };
-
-    let weather_storage = match WeatherStorage::read() {
-        Ok(s) => s,
-        Err(_) => return,
-    };
-    let weather = match weather_storage.weather_data {
-        Some(ref d) => d,
-        None => return,
-    };
-    if weather.daily.is_empty() {
-        return;
-    }
-    let daily = &weather.daily;
-    let today = &daily[0];
-
-    let header_h: i32 = if is_small { 34 } else { 36 };
-    let detail_h: i32 = if is_small { 0 } else { 18 };
-    let bottom_h: i32 = if is_small { 36 } else { 42 };
-
-    let separator_style = PrimitiveStyleBuilder::new()
-        .stroke_color(Black)
-        .stroke_width(1)
-        .build();
-
-    // 顶栏（无时钟，显示天气概要）
-    let header_y: i32 = if is_small { 6 } else { 8 };
-    let _ = font_medium.render_aligned(
-        format_args!("{} {}/{}℃", today.text_day, today.high, today.low),
-        Point::new(4, header_y),
-        VerticalPosition::Top,
-        HorizontalAlignment::Left,
-        FontColor::Transparent(Black),
-        display,
-    );
-
-    // 月亮图标 + 电量（右上角）
-    let bat_x = w - 65;
-    let bat_y = if is_small { 2 } else { 10 };
-    draw_moon_icon(Point::new(bat_x - 20, bat_y), display);
-    let bat_percent = unsafe { crate::battery::LAST_BATTERY_PERCENT };
-    let _ = draw_battery(bat_percent, Point::new(bat_x, bat_y), Black, &font_small, display);
-
-    // 分隔线
-    Line::new(Point::new(0, header_h), Point::new(w, header_h))
-        .into_styled(separator_style.clone())
-        .draw(display);
-
-    // 详情行（大屏）
-    if !is_small {
-        let _ = font_medium.render_aligned(
-            format_args!("湿度{}%  {}{}级  降水{}mm",
-                today.humidity, today.wind_direction, today.wind_scale, today.rainfall),
-            Point::new(4, header_h + 1),
-            VerticalPosition::Top,
-            HorizontalAlignment::Left,
-            FontColor::Transparent(Black),
-            display,
-        );
-        Line::new(Point::new(0, header_h + detail_h), Point::new(w, header_h + detail_h))
-            .into_styled(separator_style.clone())
-            .draw(display);
-    }
-
-    // 折线图
-    let chart_top = header_h + detail_h;
-    let chart_margin_y: i32 = if is_small { 10 } else { 12 };
-    let chart_y = chart_top + chart_margin_y;
-    let chart_h = h - bottom_h - chart_top - chart_margin_y * 2;
-    let chart_x = 30;
-    let chart_w = w - 40;
-
-    let temp_points: heapless::Vec<TempPoint, 10> = daily.iter().map(|d| {
-        let hi: i32 = d.high.as_str().parse().unwrap_or(0);
-        let lo: i32 = d.low.as_str().parse().unwrap_or(0);
-        TempPoint { label: "", high: hi, low: lo }
-    }).collect();
-
-    let _ = draw_temp_chart(
-        Point::new(chart_x, chart_y),
-        Size::new(chart_w as u32, chart_h as u32),
-        &temp_points,
-        Black,
-        display,
-    );
-    let _ = draw_temp_labels(
-        Point::new(chart_x, chart_y),
-        Size::new(chart_w as u32, chart_h as u32),
-        &temp_points,
-        Black,
-        &font_small,
-        display,
-    );
-
-    // 底部
-    let sep2_y = h - bottom_h;
-    Line::new(Point::new(0, sep2_y), Point::new(w, sep2_y))
-        .into_styled(separator_style)
-        .draw(display);
-
-    let icon_size = if is_small { 22 } else { 26 };
-    let day_count = daily.len() as i32;
-    let col_w = w / day_count.max(1);
-    let icon_y = sep2_y + 4;
-
-    for (i, day) in daily.iter().enumerate() {
-        let cx = col_w * i as i32 + col_w / 2;
-        let kind = WeatherKind::from_code(day.code_day.as_str());
-        let _ = draw_weather_icon(kind, Point::new(cx, icon_y + icon_size as i32 / 2), icon_size, Black, display);
-        let (_, date_part) = day.date.split_once('-').unwrap_or(("-", &day.date));
-        let _ = font_small.render_aligned(
-            format_args!("{}", date_part.replace("-", "/")),
-            Point::new(cx, icon_y + icon_size as i32 + 3),
-            VerticalPosition::Top,
-            HorizontalAlignment::Center,
-            FontColor::Transparent(Black),
-            display,
-        );
-    }
+    let bat_y = if w < 350 { 2 } else { 10 };
+    draw_moon_icon(Point::new(w - 85, bat_y), display);
 }
 
 pub struct WeatherPage {
@@ -315,9 +187,8 @@ impl Page for WeatherPage {
                 // 底部: 天气图标 + 日期
 
                 let header_h: i32 = if is_small { 34 } else { 36 };
-                let detail_h: i32 = if is_small { 0 } else { 18 };
-                let bottom_h: i32 = if is_small { 36 } else { 42 };
-                let chart_margin_y: i32 = if is_small { 10 } else { 12 };
+                let left_w = w / 3;
+                let chart_margin_y: i32 = if is_small { 6 } else { 12 };
 
                 let separator_style = PrimitiveStyleBuilder::new()
                     .stroke_color(Black)
@@ -327,90 +198,212 @@ impl Page for WeatherPage {
                 // ── 顶栏 ──
                 let today = &daily[0];
 
+                // ── 顶栏：时钟 + 电量 ──
                 if let Some(clock) = self.current_date {
                     let time_str = format_args!("{:02}:{:02}", clock.hour(), clock.minute()).to_string();
-                    let weekday = weekday_name(clock.weekday());
+                    let _ = Self::draw_clock(display, time_str.as_str(),
+                        Point::new(if is_small { 0 } else { 4 }, if is_small { 2 } else { 3 }));
+                }
 
-                    if is_small {
-                        let _ = Self::draw_clock(display, time_str.as_str(), Point::new(0, 2));
-                        // 时钟右侧：第一行 - 周几 + 天气 + 温度
-                        let _ = font_small.render_aligned(
-                            format_args!("{} {} {}/{}℃", weekday, today.text_day, today.high, today.low),
-                            Point::new(68, 4),
-                            VerticalPosition::Top,
-                            HorizontalAlignment::Left,
-                            FontColor::Transparent(Black),
-                            display,
-                        );
-                        // 第二行 - 湿度 + 风力
-                        let _ = font_small.render_aligned(
-                            format_args!("湿{}% {}{}级", today.humidity, today.wind_direction, today.wind_scale),
-                            Point::new(68, 18),
-                            VerticalPosition::Top,
-                            HorizontalAlignment::Left,
-                            FontColor::Transparent(Black),
-                            display,
-                        );
-                    } else {
-                        let _ = Self::draw_clock(display, time_str.as_str(), Point::new(4, 3));
-                        // 时钟右侧：天气 + 温度
+                if let Some(bat) = BATTERY.lock().await.as_ref() {
+                    let _ = draw_battery(bat.percent, Point::new(w - 65, if is_small { 2 } else { 10 }),
+                        Black, &font_small, display);
+                }
+
+                // 分隔线1
+                Line::new(Point::new(0, header_h), Point::new(w, header_h))
+                    .into_styled(separator_style.clone())
+                    .draw(display);
+
+                // ── 中间区域：左详情 + 右折线图 ──
+                // 左右分隔线（贯穿到底）
+                Line::new(Point::new(left_w, header_h), Point::new(left_w, h))
+                    .into_styled(separator_style.clone())
+                    .draw(display);
+
+                // ── 左面板：日期 + 天气详情 + 农历 ──
+                if !is_small {
+                    let left_cx = left_w / 2;
+                    let mut y = header_h + 4;
+
+                    // 日期 + 星期
+                    if let Some(clock) = self.current_date {
+                        let weekday = weekday_name(clock.weekday());
                         let _ = font_medium.render_aligned(
-                            format_args!("{} {}/{}℃", today.text_day, today.high, today.low),
-                            Point::new(100, 9),
+                            format_args!("{}.{} {}", clock.month() as u8, clock.day(), weekday),
+                            Point::new(left_cx, y),
                             VerticalPosition::Top,
-                            HorizontalAlignment::Left,
-                            FontColor::Transparent(Black),
-                            display,
-                        );
-                        // 右侧：日期（紧凑格式）
-                        let _ = font_medium.render_aligned(
-                            format_args!("{}.{} {}", clock.month() as u8, clock.date(), weekday),
-                            Point::new(w - 68, 9),
-                            VerticalPosition::Top,
-                            HorizontalAlignment::Right,
+                            HorizontalAlignment::Center,
                             FontColor::Transparent(Black),
                             display,
                         );
                     }
-                }
+                    y += 20;
 
-                // 电量图标（与日期同行对齐）
-                if let Some(bat) = BATTERY.lock().await.as_ref() {
-                    let bat_x = w - 65;
-                    let bat_y = if is_small { 2 } else { 10 };
-                    let _ = draw_battery(bat.percent, Point::new(bat_x, bat_y), Black, &font_small, display);
-                }
+                    let kind = WeatherKind::from_code(today.code_day.as_str());
+                    let _ = draw_weather_icon(kind, Point::new(left_cx, y + 16), 32, Black, display);
+                    y += 36;
 
-                // 分隔线1
-                let sep1_y = header_h;
-                Line::new(Point::new(0, sep1_y), Point::new(w, sep1_y))
-                    .into_styled(separator_style.clone())
-                    .draw(display);
-
-                // ── 详情行（仅大屏）──
-                if !is_small {
-                    let detail_y = sep1_y + 1;
                     let _ = font_medium.render_aligned(
-                        format_args!("湿度{}%  {}{}级  降水{}mm",
-                            today.humidity, today.wind_direction, today.wind_scale, today.rainfall),
-                        Point::new(4, detail_y),
+                        today.text_day.as_str(),
+                        Point::new(left_cx, y),
+                        VerticalPosition::Top,
+                        HorizontalAlignment::Center,
+                        FontColor::Transparent(Black),
+                        display,
+                    );
+                    y += 20;
+
+                    let _ = font_medium.render_aligned(
+                        format_args!("{}/{}℃", today.high, today.low),
+                        Point::new(left_cx, y),
+                        VerticalPosition::Top,
+                        HorizontalAlignment::Center,
+                        FontColor::Transparent(Black),
+                        display,
+                    );
+                    y += 22;
+
+                    Line::new(Point::new(4, y), Point::new(left_w - 4, y))
+                        .into_styled(separator_style.clone())
+                        .draw(display);
+                    y += 4;
+
+                    let _ = font_small.render_aligned(
+                        format_args!("湿度: {}%", today.humidity),
+                        Point::new(6, y),
                         VerticalPosition::Top,
                         HorizontalAlignment::Left,
                         FontColor::Transparent(Black),
                         display,
                     );
-                    // 详情行底部分隔
-                    Line::new(Point::new(0, sep1_y + detail_h), Point::new(w, sep1_y + detail_h))
+                    y += 16;
+
+                    let _ = font_small.render_aligned(
+                        format_args!("{}{}级", today.wind_direction, today.wind_scale),
+                        Point::new(6, y),
+                        VerticalPosition::Top,
+                        HorizontalAlignment::Left,
+                        FontColor::Transparent(Black),
+                        display,
+                    );
+                    y += 16;
+
+                    let _ = font_small.render_aligned(
+                        format_args!("降水: {}mm", today.rainfall),
+                        Point::new(6, y),
+                        VerticalPosition::Top,
+                        HorizontalAlignment::Left,
+                        FontColor::Transparent(Black),
+                        display,
+                    );
+                    y += 20;
+
+                    Line::new(Point::new(4, y), Point::new(left_w - 4, y))
                         .into_styled(separator_style.clone())
                         .draw(display);
+                    y += 4;
+
+                    // 农历日期
+                    if let Some(clock) = self.current_date {
+                        let lunar = Lunar::new(clock.year() as u16, clock.month() as u8);
+                        if let Some(lunar_day) = lunar.get_lunar_day(clock.day()) {
+                            let _ = font_medium.render_aligned(
+                                format_args!("{}{}", lunar_day.get_month_name(), lunar_day.get_day_name()),
+                                Point::new(left_cx, y),
+                                VerticalPosition::Top,
+                                HorizontalAlignment::Center,
+                                FontColor::Transparent(Black),
+                                display,
+                            );
+                        }
+                    }
+                } else {
+                    let left_cx = left_w / 2;
+                    let mut y = header_h + 2;
+
+                    // 日期 + 星期
+                    if let Some(clock) = self.current_date {
+                        let weekday = weekday_name(clock.weekday());
+                        let _ = font_small.render_aligned(
+                            format_args!("{}.{} {}", clock.month() as u8, clock.day(), weekday),
+                            Point::new(left_cx, y),
+                            VerticalPosition::Top,
+                            HorizontalAlignment::Center,
+                            FontColor::Transparent(Black),
+                            display,
+                        );
+                    }
+                    y += 14;
+
+                    let kind = WeatherKind::from_code(today.code_day.as_str());
+                    let _ = draw_weather_icon(kind, Point::new(left_cx, y + 11), 22, Black, display);
+                    y += 24;
+
+                    let _ = font_small.render_aligned(
+                        format_args!("{} {}/{}℃", today.text_day, today.high, today.low),
+                        Point::new(left_cx, y),
+                        VerticalPosition::Top,
+                        HorizontalAlignment::Center,
+                        FontColor::Transparent(Black),
+                        display,
+                    );
+                    y += 14;
+
+                    if let Some(clock) = self.current_date {
+                        let lunar = Lunar::new(clock.year() as u16, clock.month() as u8);
+                        if let Some(lunar_day) = lunar.get_lunar_day(clock.day()) {
+                            let _ = font_small.render_aligned(
+                                format_args!("{}{}", lunar_day.get_month_name(), lunar_day.get_day_name()),
+                                Point::new(left_cx, y),
+                                VerticalPosition::Top,
+                                HorizontalAlignment::Center,
+                                FontColor::Transparent(Black),
+                                display,
+                            );
+                        }
+                    }
                 }
 
-                // ── 温度折线图 ──
-                let chart_top = header_h + detail_h;
-                let chart_y = chart_top + chart_margin_y;
-                let chart_h = h - bottom_h - chart_top - chart_margin_y * 2;
-                let chart_x = 30;
-                let chart_w = w - 40;
+                // ── 右面板：白天图标 → 折线图 → 夜间图标 ──
+                let right_x = left_w + 1;
+                let right_w = w - left_w - 1;
+                let day_row_h: i32 = if is_small { 36 } else { 44 };
+                let night_row_h: i32 = if is_small { 36 } else { 56 };
+
+                let day_count = daily.len() as i32;
+                let col_w = right_w / day_count.max(1);
+
+                // ── 右面板上部：白天图标 + 名称 ──
+                let day_icon_y = header_h;
+                for (i, day) in daily.iter().enumerate() {
+                    let cx = right_x + col_w * i as i32 + col_w / 2;
+                    let kind = WeatherKind::from_code(day.code_day.as_str());
+                    let _ = draw_weather_icon(kind, Point::new(cx, day_icon_y + 16), 32, Black, display);
+                    let _ = font_small.render_aligned(
+                        day.text_day.as_str(),
+                        Point::new(cx, day_icon_y + 33),
+                        VerticalPosition::Top,
+                        HorizontalAlignment::Center,
+                        FontColor::Transparent(Black),
+                        display,
+                    );
+                }
+
+                // 白天与折线图之间的分隔线
+                let sep_chart_top = day_icon_y + day_row_h;
+                Line::new(Point::new(right_x, sep_chart_top), Point::new(w, sep_chart_top))
+                    .into_styled(separator_style.clone())
+                    .draw(display);
+
+                // ── 右面板中间：温度折线图 ──
+                let night_row_y = h - night_row_h;
+                let chart_y = sep_chart_top + chart_margin_y;
+                let chart_h = night_row_y - sep_chart_top - chart_margin_y * 2;
+
+                // 折线图数据点与图标列对齐
+                let chart_x = right_x + col_w / 2;
+                let chart_w = col_w * (day_count - 1);
 
                 let temp_points: heapless::Vec<TempPoint, 10> = daily.iter().map(|d| {
                     let hi: i32 = d.high.as_str().parse().unwrap_or(0);
@@ -435,37 +428,29 @@ impl Page for WeatherPage {
                     display,
                 );
 
-                // 分隔线2
-                let sep2_y = h - bottom_h;
-                Line::new(Point::new(0, sep2_y), Point::new(w, sep2_y))
-                    .into_styled(separator_style)
+                // 折线图与夜间之间的分隔线
+                Line::new(Point::new(right_x, night_row_y), Point::new(w, night_row_y))
+                    .into_styled(separator_style.clone())
                     .draw(display);
 
-                // ── 底部：天气图标 + 日期 ──
-                let icon_size = if is_small { 22 } else { 26 };
-                let day_count = daily.len() as i32;
-                let col_w = w / day_count.max(1);
-                let icon_y = sep2_y + 4;
-
+                // ── 右面板下部：夜间图标 + 名称 + 日期 ──
                 for (i, day) in daily.iter().enumerate() {
-                    let cx = col_w * i as i32 + col_w / 2;
+                    let cx = right_x + col_w * i as i32 + col_w / 2;
+                    let kind = WeatherKind::from_code(day.code_night.as_str());
+                    let _ = draw_weather_icon(kind, Point::new(cx, night_row_y + 16), 32, Black, display);
 
-                    // 天气图标
-                    let kind = WeatherKind::from_code(day.code_day.as_str());
-                    let _ = draw_weather_icon(
-                        kind,
-                        Point::new(cx, icon_y + icon_size as i32 / 2),
-                        icon_size,
-                        Black,
+                    let (_, date_part) = day.date.split_once('-').unwrap_or(("-", &day.date));
+                    let _ = font_small.render_aligned(
+                        day.text_night.as_str(),
+                        Point::new(cx, night_row_y + 33),
+                        VerticalPosition::Top,
+                        HorizontalAlignment::Center,
+                        FontColor::Transparent(Black),
                         display,
                     );
-
-                    // 日期标签
-                    let (_, date_part) = day.date.split_once('-').unwrap_or(("-", &day.date));
-                    let date_display = date_part.replace("-", "/");
                     let _ = font_small.render_aligned(
-                        format_args!("{}", date_display),
-                        Point::new(cx, icon_y + icon_size as i32 + 3),
+                        format_args!("{}", date_part.replace("-", "/")),
+                        Point::new(cx, night_row_y + 46),
                         VerticalPosition::Top,
                         HorizontalAlignment::Center,
                         FontColor::Transparent(Black),

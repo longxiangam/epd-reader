@@ -19,6 +19,7 @@ use time::OffsetDateTime;
 use u8g2_fonts::U8g2TextStyle;
 use u8g2_fonts::FontRenderer;
 use u8g2_fonts::fonts;
+use u8g2_fonts::types::{FontColor, HorizontalAlignment, VerticalPosition};
 use crate::display::{display_mut, QUICKLY_LUT_CHANNEL, RENDER_CHANNEL, RenderInfo};
 use crate::event;
 use crate::event::EventType;
@@ -29,6 +30,7 @@ use crate::sleep::{refresh_active_time, to_sleep, to_sleep_tips};
 use crate::storage::NvsStorage;
 use crate::weather::{sync_holiday_success, sync_weather_success, HolidayInfo, Weather};
 use crate::widgets::calendar::Calendar;
+use crate::widgets::weather_icon::{WeatherKind, draw_weather_icon};
 use crate::wifi::WIFI_STATE;
 use crate::worldtime::{get_clock, sync_time_success};
 
@@ -97,20 +99,30 @@ impl Page for CalendarPage {
                 let style =
                     U8g2TextStyle::new(fonts::u8g2_font_wqy16_t_gb2312, Black);
 
-                // 天气数据（右侧）
+                // 天气数据（底部右侧，图标形式）
                 if sync_weather_success() {
                     if let Some(weather) = Weather::get_weather().await {
-                        let x = 100;
-                        let mut y = display.size().height - 45;
-                        for one in weather.daily.iter() {
-                            let (_, date) = one.date.split_once('-').unwrap();
-                            let date = date.replace("-", ".");
-                            let str = format_args!(
-                                "{} {}/{},{}/{}℃,湿:{}%,风:{}",
-                                date, one.text_day, one.text_night, one.low, one.high, one.humidity, one.wind_scale
-                            ).to_string();
-                            let _ = Text::new(str.as_str(), Point::new(x, y as i32), style.clone()).draw(display);
-                            y += 20;
+                        let bottom_y = display.size().height as i32 - 45;
+                        let weather_x = 100;
+                        let weather_w = display.size().width as i32 - weather_x;
+                        let day_count = weather.daily.len() as i32;
+                        let col_w = weather_w / day_count.max(1);
+                        let font_small: FontRenderer = FontRenderer::new::<fonts::u8g2_font_wqy12_t_gb2312b>();
+
+                        for (i, one) in weather.daily.iter().enumerate() {
+                            let cx = weather_x + col_w * i as i32 + col_w / 2;
+                            let kind = WeatherKind::from_code(one.code_day.as_str());
+                            let _ = draw_weather_icon(kind, Point::new(cx, bottom_y + 16), 32, Black, display);
+
+                            let (_, date_part) = one.date.split_once('-').unwrap_or(("-", &one.date));
+                            let _ = font_small.render_aligned(
+                                format_args!("{} {}", one.text_day.as_str(), date_part.replace("-", "/")),
+                                Point::new(cx, bottom_y + 33),
+                                VerticalPosition::Top,
+                                HorizontalAlignment::Center,
+                                FontColor::Transparent(Black),
+                                display,
+                            );
                         }
                     }
                 } else {
