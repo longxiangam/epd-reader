@@ -1,34 +1,29 @@
 use alloc::boxed::Box;
-use alloc::fmt::format;
 use alloc::string::ToString;
 use heapless::String;
 use heapless::Vec;
 use core::str::FromStr;
 use embassy_executor::Spawner;
-use embassy_futures::select::{Either, select, };
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
-use embassy_sync::channel::{Channel, };
 use embassy_sync::mutex::Mutex;
 use embassy_time::{Duration,  Timer};
 use embedded_graphics::Drawable;
 use embedded_graphics::geometry::Dimensions;
 
 use embedded_graphics::prelude::{DrawTarget, Point, Size};
-use embedded_graphics::text::Text;
 use esp_println::println;
 use esp_hal::macros::ram;
 use epd_waveshare::color::{Black, Color, White};
 
 use epd_waveshare::prelude::{Display, RefreshLut, WaveshareDisplay};
-use u8g2_fonts::U8g2TextStyle;
 use crate::{ event};
 use crate::display::{display_mut,  RENDER_CHANNEL, RenderInfo};
 use crate::event::EventType;
 use crate::pages::{MenuItem, Page, PageEnum};
 use crate::pages::calendar_page::CalendarPage;
 use crate::pages::PageEnum::{ECalendarPage,  EClockPage, EDebugPage, EReadPage, ESettingPage, ETimerPage, EWeatherPage};
-use crate::widgets::list_widget::ListWidget;
-use u8g2_fonts::fonts;
+use crate::pages::IconType;
+use crate::widgets::icon_grid_widget::IconGridWidget;
 use crate::pages::debug_page::DebugPage;
 use crate::pages::read_page::ReadPage;
 use crate::pages::setting_page::SettingPage;
@@ -113,13 +108,11 @@ impl Page for  MainPage{
 
         let mut menus = Vec::new();
 
-        menus.push(MenuItem::new(String::<20>::from_str("电子书").unwrap(), EReadPage));
-       /* menus.push(MenuItem::new(String::<20>::from_str("时钟").unwrap(), EClockPage));
-        menus.push(MenuItem::new(String::<20>::from_str("定时器").unwrap(), ETimerPage));*/
-        menus.push(MenuItem::new(String::<20>::from_str("天气").unwrap(), EWeatherPage));
-        menus.push(MenuItem::new(String::<20>::from_str("日历").unwrap(), ECalendarPage));
-        menus.push(MenuItem::new(String::<20>::from_str("设置").unwrap(), ESettingPage));
-        menus.push(MenuItem::new(String::<20>::from_str("调试").unwrap(), EDebugPage));
+        menus.push(MenuItem::new(String::<20>::from_str("电子书").unwrap(), EReadPage, IconType::Book));
+        menus.push(MenuItem::new(String::<20>::from_str("天气").unwrap(), EWeatherPage, IconType::Weather));
+        menus.push(MenuItem::new(String::<20>::from_str("日历").unwrap(), ECalendarPage, IconType::Calendar));
+        menus.push(MenuItem::new(String::<20>::from_str("设置").unwrap(), ESettingPage, IconType::Settings));
+        menus.push(MenuItem::new(String::<20>::from_str("调试").unwrap(), EDebugPage, IconType::Debug));
 
         Self{
             current_page:None,
@@ -183,21 +176,23 @@ impl Page for  MainPage{
                 self.need_render = false;
 
                 let _ = display.clear_buffer(Color::White);
-                let style =
-                    U8g2TextStyle::new(fonts::u8g2_font_wqy12_t_gb2312b, Black);
-                let str = format_args!(" 进入主页 {}",unsafe{PAGE_INDEX}).to_string();
-                let _ = Text::new(&str, Point::new(0,250), style.clone()).draw(display);
-                let menus:Vec<&str,20> = self.menus.as_ref().unwrap().iter().map(|v|{ v.title.as_str() }).collect();
 
+                let grid_items: Vec<(IconType, &str), 20> = self.menus.as_ref().unwrap()
+                    .iter()
+                    .map(|v| (v.icon, v.title.as_str()))
+                    .collect();
 
-                let mut list_widget = ListWidget::new(Point::new(0, 0)
-                                                      , Black
-                                                      , White
-                                                      ,display.bounding_box().size
-                                                      , menus
+                let columns = 3;
+                let mut grid_widget = IconGridWidget::new(
+                    Point::new(0, 0),
+                    Black,
+                    White,
+                    display.bounding_box().size,
+                    columns,
+                    grid_items,
                 );
-                list_widget.choose(self.choose_index as usize);
-                let _ = list_widget.draw(display);
+                grid_widget.choose(self.choose_index as usize);
+                let _ = grid_widget.draw(display);
 
                 RENDER_CHANNEL.send(RenderInfo { time: 0, need_sleep: true }).await;
                 println!("has display:{}", self.choose_index);

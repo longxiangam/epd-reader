@@ -12,6 +12,15 @@ mod weather_page;
 pub mod setting_page;
 pub mod debug_page;
 
+#[derive(Clone, Copy)]
+pub enum IconType {
+    Book,
+    Weather,
+    Calendar,
+    Settings,
+    Debug,
+}
+
 enum PageEnum {
     EMainPage,
     EClockPage,
@@ -26,12 +35,14 @@ enum PageEnum {
 struct  MenuItem{
     page_enum:PageEnum,
     title:String<20>,
+    icon:IconType,
 }
 impl MenuItem{
-    fn new(title:String<20>, page_enum: PageEnum) -> MenuItem {
+    fn new(title:String<20>, page_enum: PageEnum, icon:IconType) -> MenuItem {
         Self{
             page_enum,
             title,
+            icon,
         }
     }
 }
