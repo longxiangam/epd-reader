@@ -1,6 +1,5 @@
 use alloc::boxed::Box;
 use alloc::format;
-use alloc::vec::Vec as AllocVec;
 use embassy_executor::Spawner;
 use embassy_time::{Duration, Instant, Timer};
 use embedded_graphics::Drawable;
@@ -42,136 +41,11 @@ const PROGRESS_AREA_HEIGHT: u32 = 20;
 
 const SLEEP_IMG_W: u32 = DISPLAY_HEIGHT; // 300 portrait width
 const SLEEP_IMG_H: u32 = DISPLAY_WIDTH;  // 400 portrait height
-const SLEEP_BUF_SIZE: usize = (SLEEP_IMG_W * SLEEP_IMG_H / 8) as usize; // 15000
-
-static mut SLEEP_IMAGE_DATA: Option<AllocVec<u8>> = None;
-
-/// Allocate sleep image buffer on heap (call when entering read_page).
-fn alloc_sleep_image() {
-    let mut buf = AllocVec::with_capacity(SLEEP_BUF_SIZE);
-    buf.resize(SLEEP_BUF_SIZE, 0);
-    unsafe { SLEEP_IMAGE_DATA = Some(buf); }
-}
-
-/// Free sleep image buffer (call when exiting read_page).
-fn free_sleep_image() {
-    unsafe { SLEEP_IMAGE_DATA = None; }
-}
-
-fn load_sleep_image(root: &mut ActualDirectory<'_>) {
-    let Some(pixels) =(unsafe { SLEEP_IMAGE_DATA.as_mut() } )else { return };
-    pixels.fill(0);
-
-    let mut images_dir = match root.open_dir("images") {
-        Ok(d) => d,
-        Err(_) => {
-            println!("images dir not found, skip sleep image");
-            return;
-        }
-    };
-    let file = SdMount::open_file_by_name(&mut images_dir, "sleep.bmp", embedded_sdmmc::Mode::ReadOnly);
-    let mut file = match file {
-        Ok(f) => f,
-        Err(_) => {
-            println!("sleep.bmp not found");
-            return;
-        }
-    };
-    let len = file.length() as usize;
-    if len == 0 || len > 30000 {
-        println!("sleep.bmp invalid size: {}", len);
-        file.close();
-        return;
-    }
-    let mut raw = AllocVec::with_capacity(len);
-    let mut buf = [0u8; 512];
-    loop {
-        match file.read(&mut buf) {
-            Ok(n) if n > 0 => raw.extend_from_slice(&buf[..n]),
-            _ => break,
-        }
-    }
-    file.close();
-    // raw (temp AllocVec for BMP data) freed at end of this function
-
-    if raw.len() < 54 || raw[0] != b'B' || raw[1] != b'M' {
-        println!("sleep.bmp: invalid header");
-        return;
-    }
-    let pixel_offset = u32::from_le_bytes([raw[10], raw[11], raw[12], raw[13]]) as usize;
-    let bmp_w = u32::from_le_bytes([raw[18], raw[19], raw[20], raw[21]]);
-    let height_raw = i32::from_le_bytes([raw[22], raw[23], raw[24], raw[25]]);
-    let bpp = u16::from_le_bytes([raw[28], raw[29]]) as u32;
-    let top_down = height_raw < 0;
-    let bmp_h = height_raw.unsigned_abs();
-    println!("sleep.bmp: {}x{} bpp={}", bmp_w, bmp_h, bpp);
-
-    if bmp_w == 0 || bmp_h == 0 || (bpp != 1 && bpp != 24 && bpp != 32) {
-        println!("sleep.bmp: unsupported format");
-        return;
-    }
-    let row_bytes = match bpp {
-        1 => (bmp_w + 7) / 8,
-        24 => bmp_w * 3,
-        32 => bmp_w * 4,
-        _ => return,
-    };
-    let row_stride = ((row_bytes + 3) & !3u32) as usize;
-
-    for dy in 0..SLEEP_IMG_H {
-        let src_y = dy * bmp_h / SLEEP_IMG_H;
-        let src_y = if top_down { src_y } else { bmp_h - 1 - src_y };
-        let row_start = pixel_offset + src_y as usize * row_stride;
-        for dx in 0..SLEEP_IMG_W {
-            let sx = dx * bmp_w / SLEEP_IMG_W;
-            let is_black = match bpp {
-                1 => {
-                    let byte_idx = row_start + sx as usize / 8;
-                    let bit_idx = 7 - (sx % 8);
-                    byte_idx < raw.len() && (raw[byte_idx] >> bit_idx) & 1 == 0
-                }
-                24 => {
-                    let px = row_start + sx as usize * 3;
-                    if px + 2 < raw.len() {
-                        let (b, g, r) = (raw[px] as u32, raw[px+1] as u32, raw[px+2] as u32);
-                        (r * 299 + g * 587 + b * 114) / 1000 < 128
-                    } else { false }
-                }
-                32 => {
-                    let px = row_start + sx as usize * 4;
-                    if px + 2 < raw.len() {
-                        let (b, g, r) = (raw[px] as u32, raw[px+1] as u32, raw[px+2] as u32);
-                        (r * 299 + g * 587 + b * 114) / 1000 < 128
-                    } else { false }
-                }
-                _ => false,
-            };
-            if is_black {
-                let idx = (dy * SLEEP_IMG_W + dx) as usize;
-                pixels[idx / 8] |= 1 << (7 - (idx % 8));
-            }
-        }
-    }
-    println!("sleep image loaded, {} bytes heap", SLEEP_BUF_SIZE);
-}
 
 fn sleep_renderer(display: &mut crate::display::EpdDisplay) {
     display.clear_buffer(Color::White);
 
-    let drawn = unsafe {
-        SLEEP_IMAGE_DATA.as_ref().map_or(false, |pixels| {
-            for y in 0..SLEEP_IMG_H {
-                for x in 0..SLEEP_IMG_W {
-                    let idx = (y * SLEEP_IMG_W + x) as usize;
-                    if (pixels[idx / 8] >> (7 - idx % 8)) & 1 != 0 {
-                        use embedded_graphics::Pixel;
-                        let _ = Pixel(Point::new(x as i32, y as i32), Black).draw(display);
-                    }
-                }
-            }
-            true
-        })
-    };
+    let drawn = crate::flash_sleep::draw_sleep_image(display);
 
     if !drawn {
         let font: FontRenderer = FontRenderer::new::<fonts::u8g2_font_wqy15_t_gb2312>();
@@ -237,6 +111,7 @@ pub struct ReadPage{
     bookmark_preview:String<ONE_PAGE_CONTENT_LEN>,
     /// 0=Rotate90, 1=Rotate270 (upside-down portrait, same page indexing)
     flipped:bool,
+    exit_selected:bool,
     jump_accel:u32,
     book_progress:Vec<String<16>,40>,
 }
@@ -787,6 +662,7 @@ impl Page for ReadPage{
             need_load_preview: false,
             bookmark_preview: Default::default(),
             flipped: false,
+            exit_selected: false,
             jump_accel: 0,
             book_progress: Vec::new(),
         };
@@ -828,38 +704,38 @@ impl Page for ReadPage{
                     crate::sleep::refresh_active_time().await;
                 }else {
                     if !self.reading {
-                        println!("in render");
                         if let Some(ref menus) = self.menus {
-                            println!("in render menus");
-                            let menus: Vec<&str, 20> = menus.iter().map(|v| { v.as_str() }).collect();
-                            let mut list_widget = ListWidget::new(Point::new(0, 0)
-                                                                  , Black
-                                                                  , White
-                                                                  , Size::new(vw, vh)
-                                                                  , menus
-                            );
-                            list_widget.choose(self.choose_index as usize);
+                            let mut all_items: Vec<&str, 20> = Vec::new();
+                            let _ = all_items.push("退出");
+                            for item in menus.iter() {
+                                if all_items.push(item.as_str()).is_err() { break; }
+                            }
+                            let widget_index = if self.exit_selected { 0usize } else { self.choose_index as usize + 1 };
+                            let widget_index = widget_index.min(all_items.len().saturating_sub(1));
+
+                            let mut list_widget = ListWidget::new(Point::new(0, 0), Black, White, Size::new(vw, vh), all_items);
+                            list_widget.choose(widget_index);
                             let _ = list_widget.draw(display);
 
                             // Draw book progress right-aligned
-                            if self.book_progress.len() == self.menus.as_ref().unwrap().len() {
+                            if self.book_progress.len() == menus.len() {
                                 let font: FontRenderer = FontRenderer::new::<fonts::u8g2_font_wqy16_t_gb2312>();
                                 let mut font = font.with_ignore_unknown_chars(true);
                                 let item_height: u32 = 20;
                                 let scroll_width: u32 = 10;
-                                let total_items = self.book_progress.len();
-                                let content_h = total_items as u32 * item_height;
+                                let total_widget_items = self.book_progress.len() + 1;
+                                let content_h = total_widget_items as u32 * item_height;
                                 let scroll_offset: i32 = if content_h <= vh { 0 } else {
                                     let half = vh / 2;
                                     let max_off = content_h - vh;
-                                    let cy = self.choose_index as u32 * item_height;
+                                    let cy = widget_index as u32 * item_height;
                                     if cy <= half { 0 }
                                     else if cy >= max_off + half { max_off as i32 }
                                     else { (cy - half) as i32 }
                                 };
-                                for bi in 0..total_items {
+                                for bi in 0..self.book_progress.len() {
                                     if self.book_progress[bi].is_empty() { continue; }
-                                    let item_y = bi as i32 * item_height as i32 - scroll_offset;
+                                    let item_y = (bi as i32 + 1) * item_height as i32 - scroll_offset;
                                     if item_y < 0 || item_y + item_height as i32 > vh as i32 { continue; }
                                     font.render_aligned(
                                         self.book_progress[bi].as_str(),
@@ -915,7 +791,6 @@ impl Page for ReadPage{
     
 
     async fn run(&mut self, spawner: Spawner) {
-        alloc_sleep_image();
         display::set_sleep_renderer(Some(sleep_renderer));
         if let Some(display) = display_mut() {
            display.set_rotation(self.current_rotation());
@@ -932,7 +807,6 @@ impl Page for ReadPage{
                     let root_result = v.open_root_dir();
                     match root_result {
                         Ok(mut root) => {
-                            load_sleep_image(&mut root);
                             let books_dir_res = root.open_dir("books");
                             if let Ok(mut books_dir) = books_dir_res {
                                 let books = SdMount::get_books(&mut books_dir).unwrap();
@@ -1095,7 +969,6 @@ impl Page for ReadPage{
             }
         }
         //*event::ENABLE_DOUBLE.lock().await = false;
-        free_sleep_image();
         display::set_sleep_renderer(None);
         if let Some(display) = display_mut() {
             display.set_rotation(DisplayRotation::Rotate0);
@@ -1223,9 +1096,10 @@ impl Page for ReadPage{
                     }
                     MenuState::Closed => {
                         if mut_ref.reading {
-                            // 短按打开菜单
                             mut_ref.menu_state = MenuState::Popup { menu_index: 0 };
                             mut_ref.need_render = true;
+                        } else if mut_ref.exit_selected {
+                            mut_ref.back().await;
                         } else {
                             mut_ref.reading = true;
                             mut_ref.change_page = true;
@@ -1276,13 +1150,20 @@ impl Page for ReadPage{
                     }
                     MenuState::Closed => {
                         if !mut_ref.reading {
-                            let max = mut_ref.menus.as_ref().map(|m| m.len()).unwrap_or(0);
-                            if max > 0 && mut_ref.choose_index < (max - 1) as u32 {
-                                mut_ref.choose_index += 1;
-                                display::reset_render_times();
-                                mut_ref.need_render = true;
-                                Timer::after_millis(200).await;
+                            if mut_ref.exit_selected {
+                                mut_ref.exit_selected = false;
+                                mut_ref.choose_index = 0;
+                            } else {
+                                let max = mut_ref.menus.as_ref().map(|m| m.len()).unwrap_or(0);
+                                if max > 0 && mut_ref.choose_index < (max - 1) as u32 {
+                                    mut_ref.choose_index += 1;
+                                } else if max > 0 {
+                                    mut_ref.exit_selected = true;
+                                }
                             }
+                            display::reset_render_times();
+                            mut_ref.need_render = true;
+                            Timer::after_millis(200).await;
                         }
                     }
                     _ => {}
@@ -1325,9 +1206,22 @@ impl Page for ReadPage{
                     }
                     MenuState::Closed => {
                         if !mut_ref.reading {
-                            let max = mut_ref.menus.as_ref().map(|m| m.len()).unwrap_or(0);
-                            if max > 0 && mut_ref.choose_index > 0 {
+                            if mut_ref.exit_selected {
+                                let max = mut_ref.menus.as_ref().map(|m| m.len()).unwrap_or(0);
+                                if max > 0 {
+                                    mut_ref.exit_selected = false;
+                                    mut_ref.choose_index = (max - 1) as u32;
+                                    display::reset_render_times();
+                                    mut_ref.need_render = true;
+                                    Timer::after_millis(200).await;
+                                }
+                            } else if mut_ref.choose_index > 0 {
                                 mut_ref.choose_index -= 1;
+                                display::reset_render_times();
+                                mut_ref.need_render = true;
+                                Timer::after_millis(200).await;
+                            } else {
+                                mut_ref.exit_selected = true;
                                 display::reset_render_times();
                                 mut_ref.need_render = true;
                                 Timer::after_millis(200).await;
@@ -1371,13 +1265,17 @@ impl Page for ReadPage{
                     MenuState::Closed => {
                         if mut_ref.reading {
                             mut_ref.do_change_page(mut_ref.page_index + 1).await;
+                        } else if mut_ref.exit_selected {
+                            mut_ref.exit_selected = false;
+                            mut_ref.choose_index = 0;
+                            mut_ref.need_render = true;
                         } else {
                             let max = mut_ref.menus.as_ref().map(|m| m.len()).unwrap_or(0);
                             if max > 0 {
                                 if mut_ref.choose_index < (max - 1) as u32 {
                                     mut_ref.choose_index += 1;
                                 } else {
-                                    mut_ref.choose_index = 0;
+                                    mut_ref.exit_selected = true;
                                 }
                             }
                             mut_ref.need_render = true;
@@ -1419,14 +1317,18 @@ impl Page for ReadPage{
                             if mut_ref.page_index > 0 {
                                 mut_ref.do_change_page(mut_ref.page_index - 1).await;
                             }
-                        } else {
+                        } else if mut_ref.exit_selected {
                             let max = mut_ref.menus.as_ref().map(|m| m.len()).unwrap_or(0);
                             if max > 0 {
-                                if mut_ref.choose_index > 0 {
-                                    mut_ref.choose_index -= 1;
-                                } else {
-                                    mut_ref.choose_index = (max - 1) as u32;
-                                }
+                                mut_ref.exit_selected = false;
+                                mut_ref.choose_index = (max - 1) as u32;
+                            }
+                            mut_ref.need_render = true;
+                        } else {
+                            if mut_ref.choose_index > 0 {
+                                mut_ref.choose_index -= 1;
+                            } else {
+                                mut_ref.exit_selected = true;
                             }
                             mut_ref.need_render = true;
                         }

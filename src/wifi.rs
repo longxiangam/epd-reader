@@ -68,6 +68,17 @@ pub static mut STACK_MUT: Option<&'static Stack<WifiDevice<'static, WifiStaDevic
 pub static mut AP_STACK_MUT: Option<&'static Stack<WifiDevice<'static, WifiApDevice>>>  =  None;
 
 pub static HAL_RNG:Mutex<CriticalSectionRawMutex,Option<Rng>>  =  Mutex::new(None);
+
+
+pub static mut REQUEST_LOADING: bool = false;
+
+pub fn is_request_loading() -> bool {
+    unsafe { REQUEST_LOADING }
+}
+
+pub fn set_request_loading(loading: bool) {
+    unsafe { REQUEST_LOADING = loading };
+}
 pub static WIFI_MODEL:Mutex<CriticalSectionRawMutex,Option<WifiModel>> = Mutex::new(None);
 pub async fn connect_wifi(spawner: &Spawner,
                           timg0: TIMG0,

@@ -74,7 +74,77 @@ where
 fn sleep_renderer(display: &mut crate::display::EpdDisplay) {
     let w = display.bounding_box().size.width as i32;
     let bat_y = if w < 350 { 2 } else { 10 };
-    draw_moon_icon(Point::new(w - 85, bat_y), display);
+    let cy = bat_y + 7;
+    if crate::wifi::is_request_loading() {
+        draw_loading_icon(Point::new(w - 118, cy), display);
+    }
+    draw_wifi_status(Point::new(w - 100, cy), display);
+    draw_moon_icon(Point::new(w - 82, bat_y), display);
+}
+
+/// 绘制WiFi状态图标（14x12）
+fn draw_wifi_status<D>(position: Point, target: &mut D)
+where
+    D: DrawTarget<Color = BinaryColor>,
+{
+    let stroke = PrimitiveStyleBuilder::new()
+        .stroke_color(BinaryColor::On)
+        .stroke_width(1)
+        .build();
+    let dot = PrimitiveStyleBuilder::new()
+        .fill_color(BinaryColor::On)
+        .build();
+
+    let x = position.x;
+    let y = position.y;
+
+    let state = embassy_futures::block_on(WIFI_STATE.lock());
+    let connected = matches!(state.as_ref(), Some(crate::wifi::WifiNetState::WifiConnected));
+
+    // 三条弧线 + 底部圆点
+    Line::new(Point::new(x - 3, y), Point::new(x + 3, y))
+        .into_styled(stroke.clone()).draw(target);
+    Line::new(Point::new(x - 6, y - 3), Point::new(x + 6, y - 3))
+        .into_styled(stroke.clone()).draw(target);
+    Line::new(Point::new(x - 9, y - 6), Point::new(x + 9, y - 6))
+        .into_styled(stroke.clone()).draw(target);
+    Circle::new(Point::new(x - 1, y + 2), 3)
+        .into_styled(dot.clone()).draw(target);
+
+    if !connected {
+        // 断开状态：画X
+        Line::new(Point::new(x - 7, y - 7), Point::new(x + 7, y + 5))
+            .into_styled(stroke).draw(target);
+    }
+}
+
+/// 绘制Loading图标：上下箭头（12x14）
+fn draw_loading_icon<D>(position: Point, target: &mut D)
+where
+    D: DrawTarget<Color = BinaryColor>,
+{
+    let stroke = PrimitiveStyleBuilder::new()
+        .stroke_color(BinaryColor::On)
+        .stroke_width(1)
+        .build();
+
+    let x = position.x;
+    let y = position.y;
+
+    // 上箭头
+    Line::new(Point::new(x, y - 7), Point::new(x, y - 1))
+        .into_styled(stroke.clone()).draw(target);
+    Line::new(Point::new(x - 3, y - 4), Point::new(x, y - 7))
+        .into_styled(stroke.clone()).draw(target);
+    Line::new(Point::new(x + 3, y - 4), Point::new(x, y - 7))
+        .into_styled(stroke.clone()).draw(target);
+    // 下箭头
+    Line::new(Point::new(x, y + 1), Point::new(x, y + 7))
+        .into_styled(stroke.clone()).draw(target);
+    Line::new(Point::new(x - 3, y + 4), Point::new(x, y + 7))
+        .into_styled(stroke.clone()).draw(target);
+    Line::new(Point::new(x + 3, y + 4), Point::new(x, y + 7))
+        .into_styled(stroke).draw(target);
 }
 
 pub struct WeatherPage {
@@ -198,15 +268,24 @@ impl Page for WeatherPage {
                 // ── 顶栏 ──
                 let today = &daily[0];
 
-                // ── 顶栏：时钟 + 电量 ──
+                // ── 顶栏：时钟 + 状态图标 + 电量 ──
                 if let Some(clock) = self.current_date {
                     let time_str = format_args!("{:02}:{:02}", clock.hour(), clock.minute()).to_string();
                     let _ = Self::draw_clock(display, time_str.as_str(),
                         Point::new(if is_small { 0 } else { 4 }, if is_small { 2 } else { 3 }));
                 }
 
+                let bat_y = if is_small { 2 } else { 10 };
+                let cy = bat_y + 7;
+                // 网络请求Loading
+                if crate::wifi::is_request_loading() {
+                    draw_loading_icon(Point::new(w - 118, cy), display);
+                }
+                // WiFi状态
+                draw_wifi_status(Point::new(w - 100, cy), display);
+                // 电量
                 if let Some(bat) = BATTERY.lock().await.as_ref() {
-                    let _ = draw_battery(bat.percent, Point::new(w - 65, if is_small { 2 } else { 10 }),
+                    let _ = draw_battery(bat.percent, Point::new(w - 65, bat_y),
                         Black, &font_small, display);
                 }
 
@@ -549,8 +628,14 @@ impl Page for WeatherPage {
         // 短按1刷新天气
         event::on_target(EventType::KeyShort(1), Self::mut_to_ptr(self), move |info| {
             return Box::pin(async move {
-                let _ = Weather::request().await;
+                crate::wifi::set_request_loading(true);
                 let mut_ref: &mut Self = Self::mut_by_ptr(info.ptr).unwrap();
+                QUICKLY_LUT_CHANNEL.send(false).await;
+                mut_ref.need_render = true;
+                mut_ref.render().await;
+                QUICKLY_LUT_CHANNEL.send(true).await;
+                let _ = Weather::request().await;
+                crate::wifi::set_request_loading(false);
                 QUICKLY_LUT_CHANNEL.send(false).await;
                 mut_ref.need_render = true;
                 Timer::after(Duration::from_millis(50)).await;
@@ -560,9 +645,15 @@ impl Page for WeatherPage {
         // 短按2刷新节假日
         event::on_target(EventType::KeyShort(2), Self::mut_to_ptr(self), move |info| {
             return Box::pin(async move {
+                crate::wifi::set_request_loading(true);
+                let mut_ref: &mut Self = Self::mut_by_ptr(info.ptr).unwrap();
+                QUICKLY_LUT_CHANNEL.send(false).await;
+                mut_ref.need_render = true;
+                mut_ref.render().await;
+                QUICKLY_LUT_CHANNEL.send(true).await;
                 let _ = get_clock().unwrap().local().await;
                 let _ = HolidayInfo::request().await;
-                let mut_ref: &mut Self = Self::mut_by_ptr(info.ptr).unwrap();
+                crate::wifi::set_request_loading(false);
                 QUICKLY_LUT_CHANNEL.send(false).await;
                 mut_ref.need_render = true;
                 Timer::after(Duration::from_millis(50)).await;

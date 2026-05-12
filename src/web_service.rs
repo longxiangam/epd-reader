@@ -644,46 +644,18 @@ async fn handle_configure_sleep(socket: &mut TcpSocket<'_>, req: &httparse::Requ
 }
 
 async fn handle_get_sleep_image(socket: &mut TcpSocket<'_>) {
-    let mut sd_guard = SD_MOUNT.lock().await;
-    let Some(ref mut sd) = *sd_guard else {
-        send_json(socket, b"{\"exists\":false,\"error\":\"SD not ready\"}").await;
-        return;
-    };
-
-    let mut volume0 = match sd.volume_manager.open_volume(embedded_sdmmc::VolumeIdx(0)) {
-        Ok(v) => v,
-        Err(_) => {
-            send_json(socket, b"{\"exists\":false,\"error\":\"open volume failed\"}").await;
-            return;
+    match crate::flash_sleep::get_sleep_image_size() {
+        Some(size) => {
+            let body = alloc::format!("{{\"exists\":true,\"size\":{}}}", size);
+            send_json(socket, body.as_bytes()).await;
         }
-    };
-    let mut root = match volume0.open_root_dir() {
-        Ok(r) => r,
-        Err(_) => {
-            send_json(socket, b"{\"exists\":false,\"error\":\"open root failed\"}").await;
-            return;
-        }
-    };
-    let mut images_dir = match root.open_dir("images") {
-        Ok(d) => d,
-        Err(_) => {
+        None => {
             send_json(socket, b"{\"exists\":false}").await;
-            return;
         }
-    };
-
-    if let Some(entry) = SdMount::find_entry_by_name(&mut images_dir, "sleep.bmp") {
-        let size = entry.size;
-        let body = alloc::format!("{{\"exists\":true,\"size\":{}}}", size);
-        send_json(socket, body.as_bytes()).await;
-    } else {
-        send_json(socket, b"{\"exists\":false}").await;
     }
 }
 
 async fn handle_upload_sleep_image(socket: &mut TcpSocket<'_>, req: &httparse::Request<'_, '_>, header_str: &str, header_data: &[u8]) {
-    use embedded_io_async::Write;
-
     let mut content_length: usize = 0;
     for h in req.headers.iter() {
         if h.name.eq_ignore_ascii_case("Content-Length") {
@@ -711,57 +683,20 @@ async fn handle_upload_sleep_image(socket: &mut TcpSocket<'_>, req: &httparse::R
     };
     let body_already_read = header_data.len().saturating_sub(header_end);
 
-    let mut sd_guard = SD_MOUNT.lock().await;
-    let Some(ref mut sd) = *sd_guard else {
-        send_json(socket, b"{\"success\":false,\"error\":\"SD not ready\"}").await;
-        return;
-    };
-
-    let mut volume0 = match sd.volume_manager.open_volume(embedded_sdmmc::VolumeIdx(0)) {
-        Ok(v) => v,
-        Err(_) => {
-            send_json(socket, b"{\"success\":false,\"error\":\"open volume failed\"}").await;
-            return;
-        }
-    };
-    let mut root = match volume0.open_root_dir() {
-        Ok(r) => r,
-        Err(_) => {
-            send_json(socket, b"{\"success\":false,\"error\":\"open root failed\"}").await;
-            return;
-        }
-    };
-    let mut images_dir = match root.open_dir("images") {
-        Ok(d) => d,
-        Err(_) => {
-            send_json(socket, b"{\"success\":false,\"error\":\"open images dir failed\"}").await;
-            return;
-        }
-    };
-
-    let mut file = match SdMount::open_file_by_name(&mut images_dir, "sleep.bmp", embedded_sdmmc::Mode::ReadWriteCreateOrTruncate) {
-        Ok(f) => f,
-        Err(_) => {
-            send_json(socket, b"{\"success\":false,\"error\":\"create file failed\"}").await;
-            return;
-        }
-    };
-
-    // Write body data already read with header
+    let mut raw_bmp = alloc::vec::Vec::with_capacity(content_length);
     if body_already_read > 0 {
-        let write_len = body_already_read.min(content_length);
-        let _ = file.write(&header_data[header_end..header_end + write_len]);
+        let len = body_already_read.min(content_length);
+        raw_bmp.extend_from_slice(&header_data[header_end..header_end + len]);
     }
 
-    // Read remaining body from socket
     let mut remaining = content_length.saturating_sub(body_already_read);
-    let mut body_buf = [0u8; 512];
+    let mut buf = [0u8; 512];
     while remaining > 0 {
-        let to_read = remaining.min(body_buf.len());
-        match socket.read(&mut body_buf[..to_read]).await {
+        let to_read = remaining.min(buf.len());
+        match socket.read(&mut buf[..to_read]).await {
             Ok(len) => {
                 if len == 0 { break; }
-                let _ = file.write(&body_buf[..len]);
+                raw_bmp.extend_from_slice(&buf[..len]);
                 remaining -= len;
             }
             Err(e) => {
@@ -771,51 +706,22 @@ async fn handle_upload_sleep_image(socket: &mut TcpSocket<'_>, req: &httparse::R
         }
     }
 
-    file.close();
-    drop(images_dir);
-    drop(root);
-    drop(volume0);
-    drop(sd_guard);
-
-    send_json(socket, b"{\"success\":true}").await;
+    match crate::flash_sleep::save_sleep_image(&raw_bmp) {
+        Ok(()) => send_json(socket, b"{\"success\":true}").await,
+        Err(e) => {
+            let msg = alloc::format!("{{\"success\":false,\"error\":\"{}\"}}", e);
+            send_json(socket, msg.as_bytes()).await;
+        }
+    }
 }
 
 async fn handle_delete_sleep_image(socket: &mut TcpSocket<'_>) {
-    let mut sd_guard = SD_MOUNT.lock().await;
-    let Some(ref mut sd) = *sd_guard else {
-        send_json(socket, b"{\"success\":false,\"error\":\"SD not ready\"}").await;
-        return;
-    };
-
-    let mut volume0 = match sd.volume_manager.open_volume(embedded_sdmmc::VolumeIdx(0)) {
-        Ok(v) => v,
-        Err(_) => {
-            send_json(socket, b"{\"success\":false,\"error\":\"open volume failed\"}").await;
-            return;
+    match crate::flash_sleep::delete_sleep_image() {
+        Ok(()) => send_json(socket, b"{\"success\":true}").await,
+        Err(e) => {
+            let msg = alloc::format!("{{\"success\":false,\"error\":\"{}\"}}", e);
+            send_json(socket, msg.as_bytes()).await;
         }
-    };
-    let mut root = match volume0.open_root_dir() {
-        Ok(r) => r,
-        Err(_) => {
-            send_json(socket, b"{\"success\":false,\"error\":\"open root failed\"}").await;
-            return;
-        }
-    };
-    let mut images_dir = match root.open_dir("images") {
-        Ok(d) => d,
-        Err(_) => {
-            send_json(socket, b"{\"success\":false,\"error\":\"images dir not found\"}").await;
-            return;
-        }
-    };
-
-    if let Some(entry) = SdMount::find_entry_by_name(&mut images_dir, "sleep.bmp") {
-        match images_dir.delete_file_in_dir(entry.name) {
-            Ok(_) => send_json(socket, b"{\"success\":true}").await,
-            Err(_) => send_json(socket, b"{\"success\":false,\"error\":\"delete failed\"}").await,
-        }
-    } else {
-        send_json(socket, b"{\"success\":false,\"error\":\"sleep image not found\"}").await;
     }
 }
 

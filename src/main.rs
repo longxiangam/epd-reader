@@ -26,6 +26,7 @@ mod battery;
 mod storage;
 mod panic;
 mod web_service;
+mod flash_sleep;
 
 extern crate alloc;
 use alloc::{format, vec};

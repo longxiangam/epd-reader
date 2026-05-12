@@ -8,8 +8,8 @@ use embassy_time::{Duration, Instant, Timer};
 use embedded_graphics::Drawable;
 use embedded_graphics::geometry::{Point, Size};
 use embedded_graphics::pixelcolor::BinaryColor;
-use embedded_graphics::prelude::{Dimensions, DrawTarget, OriginDimensions};
-use embedded_graphics::primitives::Rectangle;
+use embedded_graphics::prelude::{Dimensions, DrawTarget, OriginDimensions, Primitive};
+use embedded_graphics::primitives::{Circle, Line, PrimitiveStyleBuilder, Rectangle};
 use embedded_graphics::text::{Alignment, Baseline, Text, TextStyleBuilder};
 use epd_waveshare::color::{Black, Color};
 use epd_waveshare::color::Color::White;
@@ -33,6 +33,100 @@ use crate::widgets::calendar::Calendar;
 use crate::widgets::weather_icon::{WeatherKind, draw_weather_icon};
 use crate::wifi::WIFI_STATE;
 use crate::worldtime::{get_clock, sync_time_success};
+
+fn draw_moon_icon<D>(position: Point, target: &mut D)
+where
+    D: DrawTarget<Color = BinaryColor>,
+{
+    let fill = PrimitiveStyleBuilder::new()
+        .fill_color(BinaryColor::On)
+        .build();
+    let erase = PrimitiveStyleBuilder::new()
+        .fill_color(BinaryColor::Off)
+        .build();
+
+    let r: u32 = 7;
+    let cx = position.x + r as i32;
+    let cy = position.y + r as i32;
+
+    let _ = Circle::new(Point::new(cx - r as i32, cy - r as i32), r * 2)
+        .into_styled(fill)
+        .draw(target);
+    let _ = Circle::new(Point::new(cx - r as i32 + 5, cy - r as i32 - 2), r * 2)
+        .into_styled(erase)
+        .draw(target);
+}
+
+fn sleep_renderer(display: &mut crate::display::EpdDisplay) {
+    let w = display.bounding_box().size.width as i32;
+    let cy = 11;
+    if crate::wifi::is_request_loading() {
+        draw_loading_icon(Point::new(w - 118, cy), display);
+    }
+    draw_wifi_status(Point::new(w - 100, cy), display);
+    draw_moon_icon(Point::new(w - 82, 4), display);
+}
+
+fn draw_wifi_status<D>(position: Point, target: &mut D)
+where
+    D: DrawTarget<Color = BinaryColor>,
+{
+    let stroke = PrimitiveStyleBuilder::new()
+        .stroke_color(BinaryColor::On)
+        .stroke_width(1)
+        .build();
+    let dot = PrimitiveStyleBuilder::new()
+        .fill_color(BinaryColor::On)
+        .build();
+
+    let x = position.x;
+    let y = position.y;
+
+    let state = embassy_futures::block_on(WIFI_STATE.lock());
+    let connected = matches!(state.as_ref(), Some(crate::wifi::WifiNetState::WifiConnected));
+
+    Line::new(Point::new(x - 3, y), Point::new(x + 3, y))
+        .into_styled(stroke.clone()).draw(target);
+    Line::new(Point::new(x - 6, y - 3), Point::new(x + 6, y - 3))
+        .into_styled(stroke.clone()).draw(target);
+    Line::new(Point::new(x - 9, y - 6), Point::new(x + 9, y - 6))
+        .into_styled(stroke.clone()).draw(target);
+    Circle::new(Point::new(x - 1, y + 2), 3)
+        .into_styled(dot.clone()).draw(target);
+
+    if !connected {
+        Line::new(Point::new(x - 7, y - 7), Point::new(x + 7, y + 5))
+            .into_styled(stroke).draw(target);
+    }
+}
+
+fn draw_loading_icon<D>(position: Point, target: &mut D)
+where
+    D: DrawTarget<Color = BinaryColor>,
+{
+    let stroke = PrimitiveStyleBuilder::new()
+        .stroke_color(BinaryColor::On)
+        .stroke_width(1)
+        .build();
+
+    let x = position.x;
+    let y = position.y;
+
+    // 上箭头
+    Line::new(Point::new(x, y - 7), Point::new(x, y - 1))
+        .into_styled(stroke.clone()).draw(target);
+    Line::new(Point::new(x - 3, y - 4), Point::new(x, y - 7))
+        .into_styled(stroke.clone()).draw(target);
+    Line::new(Point::new(x + 3, y - 4), Point::new(x, y - 7))
+        .into_styled(stroke.clone()).draw(target);
+    // 下箭头
+    Line::new(Point::new(x, y + 1), Point::new(x, y + 7))
+        .into_styled(stroke.clone()).draw(target);
+    Line::new(Point::new(x - 3, y + 4), Point::new(x, y + 7))
+        .into_styled(stroke.clone()).draw(target);
+    Line::new(Point::new(x + 3, y + 4), Point::new(x, y + 7))
+        .into_styled(stroke).draw(target);
+}
 
 pub struct CalendarPage {
     running: bool,
@@ -87,12 +181,20 @@ impl Page for CalendarPage {
             if let Some(display) = display_mut() {
                 let _ = display.clear_buffer(White);
 
-                // 电量图标（右上角）
+                // 状态图标（右上角）
                 {
+                    let w = display.bounding_box().size.width as i32;
+                    let cy: i32 = 11;
                     let font: FontRenderer = FontRenderer::new::<fonts::u8g2_font_wqy12_t_gb2312>();
+                    // 网络请求Loading
+                    if crate::wifi::is_request_loading() {
+                        draw_loading_icon(Point::new(w - 118, cy), display);
+                    }
+                    // WiFi状态
+                    draw_wifi_status(Point::new(w - 100, cy), display);
+                    // 电量
                     if let Some(bat) = BATTERY.lock().await.as_ref() {
-                        let bat_x = display.bounding_box().size.width as i32 - 60;
-                        let _ = draw_battery(bat.percent, Point::new(bat_x, 4), Black, &font, display);
+                        let _ = draw_battery(bat.percent, Point::new(w - 60, 4), Black, &font, display);
                     }
                 }
 
@@ -189,6 +291,7 @@ impl Page for CalendarPage {
 
     async fn run(&mut self, spawner: Spawner) {
         self.running = true;
+        crate::display::set_sleep_renderer(Some(sleep_renderer));
         refresh_active_time().await;
         let mut last_refresh_time = Instant::now();
         self.need_render = true;
@@ -264,6 +367,7 @@ impl Page for CalendarPage {
             }
             Timer::after(Duration::from_millis(50)).await;
         }
+        crate::display::set_sleep_renderer(None);
     }
 
     async fn bind_event(&mut self) {
@@ -329,8 +433,14 @@ impl Page for CalendarPage {
         // 短按1刷新天气
         event::on_target(EventType::KeyShort(1), Self::mut_to_ptr(self), move |info| {
             return Box::pin(async move {
-                let _ = Weather::request().await;
+                crate::wifi::set_request_loading(true);
                 let mut_ref: &mut Self = Self::mut_by_ptr(info.ptr).unwrap();
+                crate::display::QUICKLY_LUT_CHANNEL.send(false).await;
+                mut_ref.need_render = true;
+                mut_ref.render().await;
+                crate::display::QUICKLY_LUT_CHANNEL.send(true).await;
+                let _ = Weather::request().await;
+                crate::wifi::set_request_loading(false);
                 crate::display::QUICKLY_LUT_CHANNEL.send(false).await;
                 mut_ref.need_render = true;
                 Timer::after(Duration::from_millis(50)).await;
@@ -340,9 +450,15 @@ impl Page for CalendarPage {
         // 短按2刷新节假日
         event::on_target(EventType::KeyShort(2), Self::mut_to_ptr(self), move |info| {
             return Box::pin(async move {
-                let local = get_clock().unwrap().local().await;
-                let _ = HolidayInfo::request().await;
+                crate::wifi::set_request_loading(true);
                 let mut_ref: &mut Self = Self::mut_by_ptr(info.ptr).unwrap();
+                crate::display::QUICKLY_LUT_CHANNEL.send(false).await;
+                mut_ref.need_render = true;
+                mut_ref.render().await;
+                crate::display::QUICKLY_LUT_CHANNEL.send(true).await;
+                let _ = get_clock().unwrap().local().await;
+                let _ = HolidayInfo::request().await;
+                crate::wifi::set_request_loading(false);
                 crate::display::QUICKLY_LUT_CHANNEL.send(false).await;
                 mut_ref.need_render = true;
                 Timer::after(Duration::from_millis(50)).await;

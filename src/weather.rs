@@ -47,8 +47,9 @@ impl Weather {
             Ok(v) => {
                 println!("请求 stack 成功");
                 let mut request = RequestClient::new(v).await;
-                println!("开始请求成功");
+                crate::wifi::set_request_loading(true);
                 let result = request.send_request(url.as_str()).await;
+                crate::wifi::set_request_loading(false);
                 match result {
                     Ok(response) => {
                         let mut daily_result = form_json(&response.data[..response.length]);
@@ -185,8 +186,9 @@ impl HolidayInfo {
                 let mut request = RequestClient::new(v).await;
                 println!("开始请求节假日");
                 let current_year =  get_clock().unwrap().now().await.year() as u32;
-                // 这里请替换为实际的节假日API地址
+                crate::wifi::set_request_loading(true);
                 let result = request.send_request(format!("https://api.jiejiariapi.com/v1/holidays/{}",current_year).as_str()).await;
+                crate::wifi::set_request_loading(false);
             
                 match result {
                     Ok(response) => {
