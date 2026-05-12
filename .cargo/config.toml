@@ -1,5 +1,5 @@
 [target.riscv32imc-unknown-none-elf]
-runner = "espflash flash --chip  esp32c3 --baud 115200 --monitor "
+runner = "espflash flash --chip  esp32c3 --baud 115200 --monitor --partition-table ./partitions.csv"
 #runner = "probe-rs run --chip  esp32c3"
 
 
