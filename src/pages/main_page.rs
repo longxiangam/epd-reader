@@ -21,11 +21,12 @@ use crate::display::{display_mut,  RENDER_CHANNEL, RenderInfo};
 use crate::event::EventType;
 use crate::pages::{MenuItem, Page, PageEnum};
 use crate::pages::calendar_page::CalendarPage;
-use crate::pages::PageEnum::{ECalendarPage,  EClockPage, EDebugPage, EReadPage, ESettingPage, ETimerPage, EWeatherPage};
+use crate::pages::PageEnum::{ECalendarPage,  EClockPage, EDebugPage, EReadPage, ESettingPage, ETimerPage, EWeatherPage, EImageListPage};
 use crate::pages::IconType;
 use crate::widgets::icon_grid_widget::IconGridWidget;
 use crate::pages::debug_page::DebugPage;
 use crate::pages::read_page::ReadPage;
+use crate::pages::image_page::ImagePage;
 use crate::pages::setting_page::SettingPage;
 use crate::pages::weather_page::WeatherPage;
 use crate::storage::NvsStorage;
@@ -60,7 +61,7 @@ impl MainPage {
                 println!("最新错误信息:");
                 println!("{}", error_log.last_error);
                 println!("================================");
-                page_index = 4;
+                page_index = 5;
             }
         } 
         MAIN_PAGE.lock().await.replace(MainPage::new());
@@ -111,6 +112,7 @@ impl Page for  MainPage{
         menus.push(MenuItem::new(String::<20>::from_str("电子书").unwrap(), EReadPage, IconType::Book));
         menus.push(MenuItem::new(String::<20>::from_str("天气").unwrap(), EWeatherPage, IconType::Weather));
         menus.push(MenuItem::new(String::<20>::from_str("日历").unwrap(), ECalendarPage, IconType::Calendar));
+        menus.push(MenuItem::new(String::<20>::from_str("图片").unwrap(), EImageListPage, IconType::Image));
         menus.push(MenuItem::new(String::<20>::from_str("设置").unwrap(), ESettingPage, IconType::Settings));
         menus.push(MenuItem::new(String::<20>::from_str("调试").unwrap(), EDebugPage, IconType::Debug));
 
@@ -229,6 +231,12 @@ impl Page for  MainPage{
                     let mut read_page = ReadPage::new();
                     read_page.bind_event().await;
                     read_page.run(spawner).await;
+                    self.back().await;
+                }
+                EImageListPage => {
+                    let mut image_page = ImagePage::new();
+                    image_page.bind_event().await;
+                    image_page.run(spawner).await;
                     self.back().await;
                 }
                 EClockPage => {

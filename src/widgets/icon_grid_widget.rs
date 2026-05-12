@@ -344,6 +344,38 @@ where
             .into_styled(fill)
             .draw(target)?;
         }
+        IconType::Image => {
+            // Photo/picture frame: rectangle with mountain and sun inside
+            let left = center.x - half;
+            let top = center.y - half;
+            let w = ICON_SIZE as i32;
+            let h = ICON_SIZE as i32;
+
+            // Frame
+            Rectangle::new(Point::new(left, top), Size::new(w as u32, h as u32))
+                .into_styled(style.clone())
+                .draw(target)?;
+
+            // Sun (small circle, top-right inside)
+            let sun_r = 3i32;
+            let sun_cx = left + w - 7;
+            let sun_cy = top + 7;
+            Circle::new(Point::new(sun_cx - sun_r, sun_cy - sun_r), sun_r as u32 * 2)
+                .into_styled(style.clone())
+                .draw(target)?;
+
+            // Mountain: triangle at bottom
+            let peak = Point::new(left + w / 2 - 2, top + h / 3);
+            let bl = Point::new(left + 3, top + h - 3);
+            let br = Point::new(left + w - 3, top + h - 3);
+            Line::new(peak, bl).into_styled(style.clone()).draw(target)?;
+            Line::new(peak, br).into_styled(style.clone()).draw(target)?;
+
+            // Second smaller mountain
+            let peak2 = Point::new(left + w * 3 / 4 + 2, top + h / 2 + 2);
+            let br2 = Point::new(left + w - 3, top + h - 3);
+            Line::new(peak2, br2).into_styled(style.clone()).draw(target)?;
+        }
         IconType::Debug => {
             // Terminal/console icon: rectangle with ">_" text
             let left = center.x - half;

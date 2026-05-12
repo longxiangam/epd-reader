@@ -5,6 +5,7 @@ use crate::pages::main_page::MainPage;
 
 pub mod main_page;
 
+mod image_page;
 mod calendar_page;
 pub(crate) mod read_page;
 mod read_menu_page;
@@ -15,6 +16,7 @@ pub mod debug_page;
 #[derive(Clone, Copy)]
 pub enum IconType {
     Book,
+    Image,
     Weather,
     Calendar,
     Settings,
@@ -30,6 +32,7 @@ enum PageEnum {
     EChip8Page,
     ESettingPage,
     EReadPage,
+    EImageListPage,
     EDebugPage,
 }
 struct  MenuItem{

@@ -168,6 +168,34 @@ impl SdMount{
 
     }
 
+    pub fn get_images(images_dir:&mut ActualDirectory)->Result<Vec<String<BOOK_NAME_MAX>,40>,SdError>
+    {
+        let mut images:Vec<String<BOOK_NAME_MAX>,40> = Vec::new();
+
+        let mut storage = [0u8; 512];
+        let mut lfn_buffer = LfnBuffer::new(&mut storage);
+        images_dir.iterate_dir_lfn(&mut lfn_buffer,|directory, lfn|{
+            if let Some(lfn) = lfn {
+                if lfn.starts_with('.') { return; }
+                if lfn.len() > BOOK_NAME_MAX { return; }
+                if !ends_with_ignore_case(lfn, ".bmp") { return; }
+                if let Some(dot_pos) = lfn.rfind('.') {
+                    let name_part = &lfn[..dot_pos];
+                    if let Ok(s) = String::from_str(name_part) {
+                        let _ = images.push(s);
+                    }
+                }
+            } else {
+                if directory.name.extension() == b"BMP" {
+                    let name = String::from_utf8(Vec::try_from(directory.name.base_name()).unwrap()).unwrap();
+                    let _ = images.push(name);
+                }
+            }
+        }).unwrap();
+
+        Ok(images)
+    }
+
     pub fn find_entry_by_name(books_dir: &mut ActualDirectory, file_name: &str) -> Option<embedded_sdmmc::DirEntry> {
         let mut storage = [0u8; 512];
         let mut lfn_buffer = LfnBuffer::new(&mut storage);
