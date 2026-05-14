@@ -1,67 +1,62 @@
 [package]
 name = "epd-reader"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 
 [dependencies]
-esp-hal = { package = "esp-hal", version = "0.19.0", default-features = false  ,features = ["esp32c3","async"]}
-esp-backtrace = { version = "0.13.0", features = ["esp32c3",  "exception-handler","println"] }
-esp-println       = { version = "0.10.0", features = ["esp32c3","log"] }
-esp-wifi = {version = "0.7.1", features = ["esp32c3", "async", "wifi","embassy-net","tcp","udp"] }
-esp-storage ={version = "0.3.0",features = ["esp32c3","storage"]}
-esp-hal-embassy = { version = "0.2.0",features = ["esp32c3"]}
+esp-hal = { version = "1.1.0", features = ["esp32c3", "unstable", "log-04"] }
+esp-backtrace = { version = "0.19.0", features = ["esp32c3", "println"] }
+esp-println = { version = "0.17.0", features = ["esp32c3", "log-04"] }
+esp-radio = { version = "0.18.0", features = ["esp32c3", "wifi", "log-04", "unstable"] }
+esp-storage = { version = "0.9.0", features = ["esp32c3"] }
+esp-rtos = { version = "0.3.0", features = ["esp32c3", "embassy", "esp-radio", "log-04"] }
+esp-alloc = { version = "0.10.0", features = ["esp32c3", "global-allocator"] }
+esp-bootloader-esp-idf = { version = "0.5.0", features = ["esp32c3"] }
 
-embedded-storage = {version = "0.3.1"}
-embedded-graphics = {version= "0.8",features = ["fixed"] }
+embedded-storage = "0.3.1"
+embedded-graphics = "0.8"
 embedded-layout = { version = "0.4", default-features = false }
-embedded-text ={version = "0.7.2"}
-u8g2-fonts = { version= "0.7.1",features = ["embedded_graphics_textstyle"] }
+embedded-text = "0.7.2"
+u8g2-fonts = { version = "0.7.1", features = ["embedded_graphics_textstyle"] }
 
+static_cell = { version = "2.1.0", features = ["nightly"] }
+critical-section = "1.2"
+futures = { version = "0.3.30", default-features = false, features = ["alloc"] }
 
-static_cell = { version = "2.0.0",features = ["nightly"] }
-futures = {version = "0.3.30",default-features = false,features = ["alloc"]}
+embassy-executor = { version = "0.10.0", features = ["nightly"] }
+embassy-time = "0.5.0"
+embassy-net = { version = "0.9.0", features = ["dhcpv4", "medium-ethernet", "tcp", "dns", "udp"] }
+embassy-futures = "0.1.2"
+embassy-sync = "0.8"
 
-embassy-executor = { version = "0.6.0",features = ["task-arena-size-98304", "integrated-timers", "arch-riscv32"]}
-embassy-time = { version = "0.3",features = [] }
-embassy-net = { version = "0.4",features = ["dhcpv4","udp","tcp","dns"] }
-embassy-futures = { version = "0.1" }
-embassy-sync = {version = "0.6.0" }
-
-
-
-embedded-hal = { version = "1", default-features = false }
-embedded-io-async = {version = "0.6"}
-embedded-hal-async={version = "1.0"}
-embedded-hal-bus ={version = "0.1",features = ["async"]}
-embedded-alloc = { version = "0.5"}
-time = { version = "0.3", default-features = false , features = ["alloc","rand","macros","parsing","serde"]}
+embedded-hal = "1.0.0"
+embedded-io-async = "0.7"
+embedded-hal-async = "1.0"
+embedded-hal-bus = { version = "0.3", features = ["async"] }
+time = { version = "0.3", default-features = false, features = ["alloc", "rand", "macros", "parsing", "serde"] }
 log = "0.4.21"
-heapless = { version = "0.8",default-features = false,features = ["serde"]}
-reqwless = { version = "0.11", default-features = false ,features = ["embedded-tls"]}
-embedded-tls={version = "0.17"  , default-features = false}
-sntpc = {version = "0.3",features = ["async"] , default-features = false}
-rand_core = { version = "0.6.4" , default-features = false ,features = ["alloc"]}
-micromath = {version = "2.1.0"}
-eg-seven-segment ={version = "0.2"}
-qrcodegen-no-heap ={version = "1.8"}
-dhcparse ={version = "1.0.0",default-features = false}
-httparse ={version = "1.9.3",default-features = false}
-embedded-sdmmc = {version = "0.9.0" }
+heapless = { version = "0.8", default-features = false, features = ["serde"] }
+reqwless = { version = "0.14.0", default-features = false }
+embedded-tls = { version = "0.18", default-features = false }
+sntpc = { version = "0.3", features = ["async"], default-features = false }
+no-std-net = "0.6"
+rand_core = { version = "0.6.4", default-features = false, features = ["alloc"] }
+micromath = "2.1.0"
+eg-seven-segment = "0.2"
+qrcodegen-no-heap = "1.8"
+dhcparse = { version = "1.0.0", default-features = false }
+httparse = { version = "1.9.3", default-features = false }
+embedded-sdmmc = "0.9.0"
 tinybmp = "0.6"
 
-epd-waveshare = {git="https://github.com/longxiangam/epd-waveshare-modify"}
-mini-json={git="https://github.com/longxiangam/mini-json"}
-[patch.crates-io]
-#embassy-executor-macros = { git = 'https://github.com/embassy-rs/embassy' }
-esp-hal = { git = 'https://github.com/esp-rs/esp-hal', rev = "5dcde78c" }
-esp-hal-embassy = { git = "https://github.com/esp-rs/esp-hal", rev = "5dcde78c"}
-esp-wifi = {git = 'https://github.com/esp-rs/esp-hal', rev = "5dcde78c" }
-embedded-sdmmc = {git = "https://github.com/rust-embedded-community/embedded-sdmmc-rs", tag = "v0.9.0"}
+epd-waveshare = { git = "https://github.com/longxiangam/epd-waveshare-modify" }
+mini-json = { git = "https://github.com/longxiangam/mini-json" }
 
 [features]
-epd2in9=[]
-epd4in2=[]
-enable_debug=[]
-weather-openmeteo=[]
+epd2in9 = []
+epd4in2 = []
+enable_debug = []
+weather-openmeteo = []
+
 [profile.release]
 opt-level = "s"

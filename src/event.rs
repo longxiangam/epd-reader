@@ -14,9 +14,8 @@ use embedded_hal_async::digital::Wait;
 use esp_hal::analog::adc::{Adc, AdcCalCurve, AdcConfig, AdcPin};
 use esp_println::println;
 use futures::FutureExt;
-use esp_hal::gpio::{Gpio2, GpioPin, Input, Pull};
-use esp_hal::gpio::{Gpio8,Gpio9,Gpio20};
-use esp_hal::peripherals::ADC1;
+use esp_hal::gpio::{Input, Pull};
+use esp_hal::Blocking;
 use futures::future::Either;
 use crate::sleep::refresh_active_time;
 use crate::worldtime::SntpcError::NoAddr;
@@ -44,8 +43,8 @@ pub struct EventInfo{
 struct Listener{
     callback:Box< dyn FnMut(EventInfo) -> (Pin<Box< dyn Future<Output = ()>  + 'static>>)  + Send + Sync + 'static>,
     event_type:EventType,
-    ptr:Option<usize>, //对象的裸指针，因为定义的一个全局vec保存listener ，泛型不好处理，这里直接用usize
-    fixed:bool,//是否常驻事件
+    ptr:Option<usize>,
+    fixed:bool,
 }
 
 static LISTENER:Mutex<CriticalSectionRawMutex,Vec<Listener,20>>  = Mutex::new(Vec::new()) ;
@@ -101,15 +100,15 @@ pub async fn toggle_event(event_type: EventType,ms:u64){
 
 
 #[embassy_executor::task]
-pub async  fn run(mut key1: Gpio9,mut key2: Gpio2){
-    let mut key1 = Input::new(key1,Pull::Up);
-    let mut key2 = Input::new(key2,Pull::Up);
-    
+pub async fn run(key1: esp_hal::peripherals::GPIO9<'static>, key2: esp_hal::peripherals::GPIO2<'static>){
+    let mut key1 = Input::new(key1, esp_hal::gpio::InputConfig::default().with_pull(Pull::Up));
+    let mut key2 = Input::new(key2, esp_hal::gpio::InputConfig::default().with_pull(Pull::Up));
+
     loop {
 
         let key1_edge = key1.wait_for_falling_edge();
         let key2_edge = key2.wait_for_falling_edge();
-        match  select(key1_edge,key2_edge).await {
+        match  select(key1_edge, key2_edge).await {
             First(_) => {
                 key_detection::<_,1>(&mut key1).await;
             }
@@ -122,9 +121,8 @@ pub async  fn run(mut key1: Gpio9,mut key2: Gpio2){
     }
 }
 
-type AdcCal = AdcCalCurve<ADC1>;
-pub static ADC_PIN:Mutex<CriticalSectionRawMutex,Option<AdcPin<GpioPin<2>,ADC1,AdcCal>>> = Mutex::new(None);
-pub static ADC_PER:Mutex<CriticalSectionRawMutex,Option<Adc<ADC1>>> = Mutex::new(None);
+pub static ADC_PIN: Mutex<CriticalSectionRawMutex, Option<AdcPin<esp_hal::peripherals::GPIO2<'static>, esp_hal::peripherals::ADC1, AdcCalCurve<esp_hal::peripherals::ADC1>>>> = Mutex::new(None);
+pub static ADC_PER: Mutex<CriticalSectionRawMutex, Option<Adc<'static, esp_hal::peripherals::ADC1, esp_hal::Blocking>>> = Mutex::new(None);
 
 pub static  ENABLE_DOUBLE:Mutex<CriticalSectionRawMutex,bool> = Mutex::new(false);
 pub async fn enable_double_click(){
@@ -145,7 +143,7 @@ where P:InputPin
             return;
         }
     }
-    
+
     loop {
         let mut is_low_times = 0;
         for i in 0..100 {
@@ -153,9 +151,9 @@ where P:InputPin
                 is_low_times += 1;
             }
         }
-      
+
         if is_low_times > 80 {
-           
+
             //按下
             let current = Instant::now().as_millis();
             if current - begin_ms > 500 {
@@ -233,10 +231,10 @@ async fn judge_adc_num() -> usize{
     } else {
         3
     };
-    
+
     if avg > 1000 {
         return 0;
     }
-    
+
     temp
 }

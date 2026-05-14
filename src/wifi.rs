@@ -1,33 +1,27 @@
 use alloc::string::ToString;
 use core::net::Ipv4Addr;
-use core::ops::{Deref, DerefMut};
-use core::str::{from_utf8, FromStr};
 use dhcparse::dhcpv4::{Addr, DhcpOption, Encode, Encoder, Message};
 use dhcparse::v4_options;
 use embassy_executor::Spawner;
 use embassy_futures::select::{Either, select};
-use embassy_net::{Config, IpAddress, IpEndpoint, IpListenEndpoint, Ipv4Address, Ipv4Cidr, Stack, StackResources, StaticConfigV4};
-use embassy_net::tcp::{AcceptError, TcpSocket};
+use embassy_net::{Config, IpEndpoint, Ipv4Address, Ipv4Cidr, Stack, StackResources, StaticConfigV4};
 use embassy_net::udp::UdpSocket;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::mutex::Mutex;
 use embassy_sync::signal::Signal;
 use embassy_time::{Duration, Instant, Timer};
-use esp_println::{print, println};
-use esp_storage::FlashStorageError;
-use esp_wifi::{EspWifiInitFor, initialize};
-use esp_wifi::wifi::{AccessPointConfiguration, AuthMethod, ClientConfiguration, Configuration, WifiApDevice, WifiController, WifiDevice, WifiError, WifiEvent, WifiStaDevice, WifiState};
-use esp_wifi::wifi::ipv4::{ RouterConfiguration, SocketAddrV4};
-use esp_hal::clock::Clocks;
-use esp_hal::peripherals::{RADIO_CLK, SYSTIMER, TIMG0, WIFI};
-use esp_hal::reset::software_reset;
+use esp_println::println;
 use esp_hal::rng::Rng;
-use esp_hal::system::SystemClockControl;
-use esp_hal::timer::PeriodicTimer;
 use heapless::{String, Vec};
-use httparse::Header;
-use static_cell::{ StaticCell};
-use crate::make_static;
+use static_cell::make_static;
+use esp_radio::wifi::{
+    Config as WifiConfig,
+    ControllerConfig,
+    Interface,
+    WifiController,
+    sta::StationConfig,
+    ap::AccessPointConfig,
+};
 
 
 #[derive(Eq, PartialEq,Copy, Clone,Debug)]
@@ -53,83 +47,84 @@ pub enum WifiNetError {
 
 
 
-const SSID: &str = env!("SSID");
-const PASSWORD: &str = env!("PASSWORD");
+const SSID: &str = match option_env!("SSID") {
+    Some(v) => v,
+    None => "",
+};
+const PASSWORD: &str = match option_env!("PASSWORD") {
+    Some(v) => v,
+    None => "",
+};
 
-const HOW_LONG_SECS_CLOSE:u64 = 30;//20秒未使用wifi 断开
+const HOW_LONG_SECS_CLOSE:u64 = 30;
 
-pub static mut IP_ADDRESS:String<20> = String::new();
+pub(crate) static mut IP_ADDRESS: String<20> = String::new();
 pub static STOP_WIFI_SIGNAL: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 pub static RECONNECT_WIFI_SIGNAL: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 pub static REINIT_WIFI_SIGNAL: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 pub static LAST_USE_TIME_SECS:Mutex<CriticalSectionRawMutex,Option<u64>>  =  Mutex::new(None);
 pub static WIFI_STATE:Mutex<CriticalSectionRawMutex,Option<WifiNetState>>  =  Mutex::new(None);
-pub static mut STACK_MUT: Option<&'static Stack<WifiDevice<'static, WifiStaDevice>>>  =  None;
-pub static mut AP_STACK_MUT: Option<&'static Stack<WifiDevice<'static, WifiApDevice>>>  =  None;
+pub(crate) static mut STACK_MUT: Option<&'static Stack<'static>> = None;
+pub(crate) static mut AP_STACK_MUT: Option<&'static Stack<'static>> = None;
 
 pub static HAL_RNG:Mutex<CriticalSectionRawMutex,Option<Rng>>  =  Mutex::new(None);
 
 
-pub static mut REQUEST_LOADING: bool = false;
+static mut REQUEST_LOADING: bool = false;
 
 pub fn is_request_loading() -> bool {
-    unsafe { REQUEST_LOADING }
+    unsafe { *core::ptr::addr_of!(REQUEST_LOADING) }
 }
 
 pub fn set_request_loading(loading: bool) {
-    unsafe { REQUEST_LOADING = loading };
+    unsafe { core::ptr::addr_of_mut!(REQUEST_LOADING).write(loading); }
 }
 pub static WIFI_MODEL:Mutex<CriticalSectionRawMutex,Option<WifiModel>> = Mutex::new(None);
+
 pub async fn connect_wifi(spawner: &Spawner,
-                          timg0: TIMG0,
                           rng: Rng,
-                          wifi: WIFI,
-                          radio_clk: RADIO_CLK,
-                          clocks: &Clocks<'_> )
-    -> Result<&'static Stack<WifiDevice<'static, WifiStaDevice>>, WifiNetError> {
+                          wifi: esp_hal::peripherals::WIFI<'_>,
+    ) -> Result<&'static Stack<'static>, WifiNetError> {
     println!("wait init wifi");
     REINIT_WIFI_SIGNAL.wait().await;
 
     println!("init wifi");
     HAL_RNG.lock().await.replace(rng);
 
-    let timer = esp_hal::timer::timg::TimerGroup::new(timg0, &clocks);
+    let ssid = crate::storage::WIFI_INFO.lock().await.as_ref().unwrap().wifi_ssid.clone();
+    let password = crate::storage::WIFI_INFO.lock().await.as_ref().unwrap().wifi_password.clone();
 
+    let station_config = WifiConfig::Station(
+        StationConfig::default()
+            .with_ssid(ssid.as_str())
+            .with_password(password.as_str().into()),
+    );
 
+    let (controller, interfaces) = esp_radio::wifi::new(
+        wifi,
+        ControllerConfig::default().with_initial_config(station_config),
+    ).unwrap();
 
-    let init = initialize(
-        EspWifiInitFor::Wifi,
-        timer.timer0,
-        rng,
-        radio_clk,
-        &clocks,
-    )
-        .unwrap();
-
-
-    let (wifi_interface, controller) =
-        esp_wifi::wifi::new_with_mode(&init, wifi, WifiStaDevice).unwrap();
-
+    let wifi_interface = interfaces.station;
 
     let config = Config::dhcpv4(Default::default());
 
-    let seed = 1234;
+    let rng = Rng::new();
+    let seed = (rng.random() as u64) << 32 | rng.random() as u64;
 
-    // Init network stack
-    let stack = &*make_static!(
-        Stack<WifiDevice<'_, WifiStaDevice>>,
-        Stack::new(
+    let (stack, runner) = embassy_net::new(
         wifi_interface,
         config,
-        make_static!(StackResources::<4>,StackResources::<4>::new()),
+        make_static!(StackResources::<4>::new()),
         seed
-    ));
+    );
+    let stack: &Stack<'static> = &*make_static!(stack);
 
     refresh_last_time().await;
 
-    spawner.spawn(connection_wifi(controller)).ok();
-    spawner.spawn(net_task(stack)).ok();
-    spawner.spawn(do_stop()).ok();
+    spawner.spawn(net_task(runner));
+    spawner.spawn(connection_wifi(controller).unwrap());
+    spawner.spawn(do_stop());
     loop {
         println!("Waiting is_link_up...");
         if stack.is_link_up() {
@@ -143,100 +138,87 @@ pub async fn connect_wifi(spawner: &Spawner,
         if let Some(config) = stack.config_v4() {
             println!("Got IP: {}", config.address);
             unsafe {
-                IP_ADDRESS =  config.address.address().to_string().parse().unwrap();
+                *core::ptr::addr_of_mut!(IP_ADDRESS) = config.address.address().to_string().parse().unwrap();
             }
             break;
         }
         Timer::after(Duration::from_millis(500)).await;
     }
     unsafe {
-        STACK_MUT = Some(stack);
+        core::ptr::addr_of_mut!(STACK_MUT).write(Some(stack));
     }
     Ok(stack)
 }
 
 #[embassy_executor::task]
-async fn ap_task(stack: &'static Stack<WifiDevice<'static, WifiApDevice>>) {
-    stack.run().await
-}
-
-#[embassy_executor::task]
-async fn net_task(stack: &'static Stack<WifiDevice<'static, WifiStaDevice>>) {
-    stack.run().await
+async fn net_task(mut runner: embassy_net::Runner<'static, Interface<'static>>) {
+    runner.run().await
 }
 
 #[embassy_executor::task]
 async fn connection_wifi(mut controller: WifiController<'static>) {
     println!("start connection task1");
-    println!("Device capabilities: {:?}", controller.get_capabilities());
     loop {
         println!("loop");
-        match esp_wifi::wifi::get_wifi_state() {
-            WifiState::StaConnected => {
-                // wait until we're no longer connected
-                WIFI_STATE.lock().await.replace(WifiNetState::WifiConnected);
-                let disconnect =  controller.wait_for_event(WifiEvent::StaDisconnected);
-                let closeconnect = STOP_WIFI_SIGNAL.wait();
+        if controller.is_connected() {
+            WIFI_STATE.lock().await.replace(WifiNetState::WifiConnected);
 
-                match select(disconnect,closeconnect).await {
+            // Wait for either disconnect or stop signal
+            let mut subscriber = controller.subscribe().unwrap();
+            let close_signal = STOP_WIFI_SIGNAL.wait();
+
+            // Poll for disconnect event or stop signal
+            loop {
+                match select(subscriber.next_message(), close_signal).await {
                     Either::First(_) => {
-                        WIFI_STATE.lock().await.replace(WifiNetState::WifiDisconnected);
-                        Timer::after(Duration::from_millis(1000)).await;
-                        println!("wifi disconnected...");
+                        // Check if we got a disconnect
+                        if !controller.is_connected() {
+                            WIFI_STATE.lock().await.replace(WifiNetState::WifiDisconnected);
+                            Timer::after(Duration::from_millis(1000)).await;
+                            println!("wifi disconnected...");
+                            break;
+                        }
                     }
                     Either::Second(_) => {
                         STOP_WIFI_SIGNAL.reset();
-                        controller.stop().await.expect("wifi stop error");
+                        let _ = controller.disconnect_async().await;
                         println!("wifi close...");
                         WIFI_STATE.lock().await.replace(WifiNetState::WifiStopped);
                         RECONNECT_WIFI_SIGNAL.wait().await;
                         RECONNECT_WIFI_SIGNAL.reset();
                         println!("restart connect...");
                         WIFI_STATE.lock().await.replace(WifiNetState::WifiDisconnected);
-
+                        break;
                     }
                 }
-
             }
-            _ => { WIFI_STATE.lock().await.replace(WifiNetState::WifiDisconnected);}
+        } else {
+            WIFI_STATE.lock().await.replace(WifiNetState::WifiDisconnected);
         }
-        if !matches!(controller.is_started(), Ok(true)) {
-            let ssid = crate::storage::WIFI_INFO.lock().await.as_ref().unwrap().wifi_ssid.clone();
-            let password = crate::storage::WIFI_INFO.lock().await.as_ref().unwrap().wifi_password.clone();
-            println!("ssid: {}", ssid);
-            println!("password: {}", password); 
-            loop {
 
-                let client_config = Configuration::Client(ClientConfiguration {
-                    ssid: ssid.clone(),
-                    password:password.clone(),
-                    //ssid:SSID.try_into().unwrap(),//wifi_info.wifi_ssid.clone(), //SSID.try_into().unwrap(),
-                    //password:PASSWORD.try_into().unwrap(),//wifi_info.wifi_password.clone(), //PASSWORD.try_into().unwrap(),
-                    ..Default::default()
-                });
-                match controller.set_configuration(&client_config) {
-                    Ok(_) => {}
-                    Err(e) => {
-                        println!("配置失败：{:?}",e);
-                    }
-                }
-                println!("Starting wifi");
-                controller.start().await.unwrap();
-                println!("Wifi started!");
-                break;
+        let ssid = crate::storage::WIFI_INFO.lock().await.as_ref().unwrap().wifi_ssid.clone();
+        let password = crate::storage::WIFI_INFO.lock().await.as_ref().unwrap().wifi_password.clone();
+        println!("ssid: {}", ssid);
 
-                Timer::after(Duration::from_millis(50)).await;
-
+        let station_config = WifiConfig::Station(
+            StationConfig::default()
+                .with_ssid(ssid.as_str())
+                .with_password(password.as_str().into()),
+        );
+        match controller.set_config(&station_config) {
+            Ok(_) => {}
+            Err(e) => {
+                println!("config error: {:?}", e);
             }
         }
+
         println!("About to connect...");
 
         WIFI_STATE.lock().await.replace(WifiNetState::WifiConnecting);
-        match controller.connect().await {
-            Ok(_) =>{
+        match controller.connect_async().await {
+            Ok(_) => {
                 println!("Wifi connected!");
                 WIFI_STATE.lock().await.replace(WifiNetState::WifiConnected);
-
             },
             Err(e) => {
                 println!("Failed to connect to wifi: {e:?}");
@@ -252,10 +234,9 @@ pub async fn refresh_last_time(){
 }
 
 
-//每次请求都要获取stack 并修改 WIFI_LOCK 为true,用完后 改回，同时多个任务容易崩
 const TIME_OUT_SECS: u64 = 10;
 static WIFI_LOCK:Mutex<CriticalSectionRawMutex,bool> = Mutex::new(false);
-pub async fn use_wifi() ->Result<&'static Stack<WifiDevice<'static, WifiStaDevice>>, WifiNetError>{
+pub async fn use_wifi() ->Result<&'static Stack<'static>, WifiNetError>{
     let secs = Instant::now().as_secs();
     loop {
         if !*WIFI_LOCK.lock().await  {
@@ -292,25 +273,24 @@ pub async fn use_wifi() ->Result<&'static Stack<WifiDevice<'static, WifiStaDevic
     }
 
 
-    let mut try_times = 10; 
+    let mut try_times = 10;
     loop {
         refresh_last_time().await;
         println!("use_wifi Waiting is_link_up...");
         unsafe {
-            if let Some(v) = STACK_MUT {
+            let stack = *core::ptr::addr_of!(STACK_MUT);
+            if let Some(v) = stack {
                 if v.is_link_up() {
-
                     v.wait_config_up().await;
                     return Ok(v);
-
-                }else if Instant::now().as_secs() - secs > TIME_OUT_SECS {
+                } else if Instant::now().as_secs() - secs > TIME_OUT_SECS {
                     return Err(WifiNetError::TimeOut);
                 }
-            }else if try_times == 0 {
+            } else if try_times == 0 {
                 return Err(WifiNetError::Infallible);
             }
 
-            try_times-=1;
+            try_times -= 1;
         }
         Timer::after(Duration::from_millis(500)).await;
     }
@@ -323,7 +303,7 @@ pub async fn finish_wifi(){
 }
 
 pub async fn wifi_is_idle()->bool{
-     !*WIFI_LOCK.lock().await  
+     !*WIFI_LOCK.lock().await
 }
 
 #[embassy_executor::task]
@@ -333,7 +313,6 @@ async fn do_stop(){
             if Instant::now().as_secs() - LAST_USE_TIME_SECS.lock().await.unwrap() > HOW_LONG_SECS_CLOSE {
                 println!("do_stop_wifi");
                 STOP_WIFI_SIGNAL.signal(());
-                //finish_wifi().await;
             }
         }
         Timer::after(Duration::from_millis(3000)).await
@@ -345,7 +324,7 @@ pub async fn force_stop_wifi(){
     if *WIFI_STATE.lock().await == None {
         return;
     }
-   
+
     if  WIFI_STATE.lock().await.unwrap() == WifiNetState::WifiStopped {
         return;
     }else{
@@ -357,21 +336,19 @@ pub async fn force_stop_wifi(){
             }
             Timer::after(Duration::from_millis(50)).await;
         }
-        
+
         //等待任务完成
         loop  {
-
             println!("current_secs:{}",Instant::now().as_secs());
             println!("last_secs:{}",LAST_USE_TIME_SECS.lock().await.unwrap());
-            
-            //wifi 最后更新时间要大于5s 才停止
+
             if Instant::now().as_secs() - LAST_USE_TIME_SECS.lock().await.unwrap() >  5{
                 break;
             }else{
                 println!("wait finish wifi");
                 Timer::after(Duration::from_secs(1)).await;
             }
-            
+
         }
         STOP_WIFI_SIGNAL.signal(());
         loop {
@@ -383,55 +360,48 @@ pub async fn force_stop_wifi(){
     }
 }
 
-/// ap 模式 配网
+/// AP mode
 pub async fn start_wifi_ap(spawner: &Spawner,
-                           timg0: TIMG0,
                            rng: Rng,
-                           wifi: WIFI,
-                           radio_clk: RADIO_CLK,
-                           clocks: &Clocks<'_> )
-                           -> Result<&'static Stack<WifiDevice<'static, WifiApDevice>>, WifiNetError> {
+                           wifi: esp_hal::peripherals::WIFI<'_>,
+    ) -> Result<&'static Stack<'static>, WifiNetError> {
 
     HAL_RNG.lock().await.replace(rng);
 
-    let timer =
-        esp_hal::timer::timg::TimerGroup::new(timg0, &clocks);
+    let ap_config = WifiConfig::AccessPoint(
+        AccessPointConfig::default()
+            .with_ssid("esp_wifi")
+            .with_password("123456789".into())
+    );
 
-    let init = initialize(
-        EspWifiInitFor::Wifi,
-        timer.timer0,
-        rng,
-        radio_clk,
-        &clocks,
-    )
-        .unwrap();
+    let (controller, interfaces) = esp_radio::wifi::new(
+        wifi,
+        ControllerConfig::default().with_initial_config(ap_config),
+    ).unwrap();
 
-    let (wifi_ap_interface, mut controller) =
-        esp_wifi::wifi::new_with_mode(&init, wifi, WifiApDevice).unwrap();
+    let wifi_ap_interface = interfaces.access_point;
 
-    let seed = 1234;
-    let ap_config = Config::ipv4_static(StaticConfigV4 {
+    let rng = Rng::new();
+    let seed = (rng.random() as u64) << 32 | rng.random() as u64;
+
+    let ap_net_config = Config::ipv4_static(StaticConfigV4 {
         address: Ipv4Cidr::new(Ipv4Address::new(192, 168, 2, 1), 24),
-        gateway: Some(Ipv4Address::from_bytes(&[192, 168, 2, 1])),
+        gateway: Some(Ipv4Address::new(192, 168, 2, 1)),
         dns_servers: Default::default(),
     });
-    let ap_stack: &Stack<WifiDevice<'static, WifiApDevice>> = &*make_static!(
-         Stack<WifiDevice<'_, WifiApDevice>>,
-            Stack::new(
-                wifi_ap_interface,
-                ap_config,
-                make_static!(StackResources::<4>, StackResources::<4>::new()),
-                seed
-            )
-        );
 
-    spawner.spawn(ap_task(&ap_stack)).ok();
-    spawner.spawn(dhcp_service()).ok();
-    spawner.spawn(dns_service()).ok();
-    spawner.spawn(connection_wifi_ap(controller)).ok();
+    let (ap_stack, runner) = embassy_net::new(
+        wifi_ap_interface,
+        ap_net_config,
+        make_static!(StackResources::<4>::new()),
+        seed
+    );
+    let ap_stack: &Stack<'static> = &*make_static!(ap_stack);
 
-
-
+    spawner.spawn(ap_task(runner));
+    spawner.spawn(dhcp_service());
+    spawner.spawn(dns_service());
+    spawner.spawn(connection_wifi_ap(controller).unwrap());
 
     loop {
         println!("Waiting is_link_up...");
@@ -446,60 +416,65 @@ pub async fn start_wifi_ap(spawner: &Spawner,
         if let Some(config) = ap_stack.config_v4() {
             println!("Got IP: {}", config.address);
             unsafe {
-                IP_ADDRESS =  config.address.address().to_string().parse().unwrap();
+                *core::ptr::addr_of_mut!(IP_ADDRESS) = config.address.address().to_string().parse().unwrap();
             }
             break;
         }
         Timer::after(Duration::from_millis(500)).await;
     }
     unsafe {
-        AP_STACK_MUT = Some(ap_stack);
+        core::ptr::addr_of_mut!(AP_STACK_MUT).write(Some(ap_stack));
     }
 
     Ok(ap_stack)
 }
 
 #[embassy_executor::task]
+async fn ap_task(mut runner: embassy_net::Runner<'static, Interface<'static>>) {
+    runner.run().await
+}
+
+#[embassy_executor::task]
 async fn connection_wifi_ap(mut controller: WifiController<'static>) {
     println!("start connection task");
-    println!("Device capabilities: {:?}", controller.get_capabilities());
-    loop {
-        match esp_wifi::wifi::get_wifi_state() {
-            WifiState::ApStarted => {
-                // wait until we're no longer connected
-                controller.wait_for_event(WifiEvent::ApStop).await;
-                Timer::after(Duration::from_millis(5000)).await
-            }
-            _ => {}
+    let ap_config = WifiConfig::AccessPoint(
+        AccessPointConfig::default()
+            .with_ssid("esp_wifi")
+            .with_password("123456789".into())
+    );
+    match controller.set_config(&ap_config) {
+        Ok(_) => {
+            println!("AP config set successfully");
         }
-        if !matches!(controller.is_started(), Ok(true)) {
-            let client_config = Configuration::AccessPoint(AccessPointConfiguration {
-                ssid: "esp_wifi".try_into().unwrap(),
-                password:String::from_str("123456789").unwrap(),
-                ..Default::default()
-            });
-            let result = controller.set_configuration(&client_config);
-            if let Err(e) = result {
-                println!("Error setting Wifi configuration: {:?}", e);
+        Err(e) => {
+            println!("Error setting Wifi configuration: {:?}", e);
+        }
+    }
+    loop {
+        if controller.is_connected() {
+            // AP is running, wait for stop event
+            let mut subscriber = controller.subscribe().unwrap();
+            subscriber.next_message().await;
+            if !controller.is_connected() {
+                println!("AP stopped, restarting...");
             }
-            println!("Starting wifi");
-            controller.start().await.unwrap();
-            println!("Wifi started!");
+        } else {
+            Timer::after(Duration::from_millis(5000)).await;
         }
     }
 }
 
 #[embassy_executor::task]
 async fn dhcp_service(){
-    const RX_BUFFER_SIZE: usize = 512; // 接收缓冲区大小
-    const TX_BUFFER_SIZE: usize = 512; // 发送缓冲区大小
-    const PACKET_META_SIZE: usize = 10; // 元数据大小
+    const RX_BUFFER_SIZE: usize = 512;
+    const TX_BUFFER_SIZE: usize = 512;
+    const PACKET_META_SIZE: usize = 10;
 
 
     loop {
-
         unsafe {
-            if let Some(ap_stack) = AP_STACK_MUT {
+            let ap_stack = *core::ptr::addr_of!(AP_STACK_MUT);
+            if let Some(ap_stack) = ap_stack {
                 loop {
                     if ap_stack.is_link_up() {
                         break;
@@ -511,10 +486,9 @@ async fn dhcp_service(){
                 let mut rx_buffer = [0u8; RX_BUFFER_SIZE];
                 let mut tx_meta = [embassy_net::udp::PacketMetadata::EMPTY; PACKET_META_SIZE];
                 let mut tx_buffer = [0u8; TX_BUFFER_SIZE];
-                let mut udp_socket = UdpSocket::new(ap_stack, &mut rx_meta, &mut rx_buffer, &mut tx_meta, &mut tx_buffer);
+                let mut udp_socket = UdpSocket::new(*ap_stack, &mut rx_meta, &mut rx_buffer, &mut tx_meta, &mut tx_buffer);
                 udp_socket.bind(67);
 
-                // 无限循环处理消息
                 loop {
                     let mut buf = [0u8; 512];
                     println!("等待请求") ;
@@ -539,8 +513,6 @@ async fn dhcp_service(){
                                 }
                                 Err(_) => {}
                             }
-
-                            //udp_socket.send_to(&buf[..n], src).await;
                         }
                         Err(e) => {
                             println!("Failed to receive UDP packet: {:?}", e);
@@ -558,7 +530,6 @@ async fn dhcp_service(){
 
 async fn send_dhcp_offer(udp_socket: &UdpSocket<'_>, src_addr: IpEndpoint, receive_msg: &Message<[u8; 512]>) {
     println!("send_dhcp_offer") ;
-    // 构造并发送 DHCP Offer 消息
     let router_ip:&Addr = (&[192u8,168,2,1][..]).try_into().unwrap();
     let submask:&Addr = (&[255u8,255,255,0][..]).try_into().unwrap();
 
@@ -598,7 +569,6 @@ async fn send_dhcp_offer(udp_socket: &UdpSocket<'_>, src_addr: IpEndpoint, recei
 
 async fn send_dhcp_ack(udp_socket: & UdpSocket<'_>, src_addr: IpEndpoint, receive_msg: &Message<[u8; 512]>) {
     println!("send_dhcp_ack") ;
-    // 构造并发送 DHCP Acknowledge 消息
     let router_ip:&Addr = (&[192u8,168,2,1][..]).try_into().unwrap();
     let submask:&Addr = (&[255u8,255,255,0][..]).try_into().unwrap();
     let mut offer_message = [0u8; 512];
@@ -634,20 +604,20 @@ async fn send_dhcp_ack(udp_socket: & UdpSocket<'_>, src_addr: IpEndpoint, receiv
     udp_socket.send_to(&offer_message, broadcast).await;
 }
 
-//dns劫持服务
+//DNS劫持服务
 #[embassy_executor::task]
 async fn dns_service(){
-    const RX_BUFFER_SIZE: usize = 512; // 接收缓冲区大小
-    const TX_BUFFER_SIZE: usize = 512; // 发送缓冲区大小
-    const PACKET_META_SIZE: usize = 10; // 元数据大小
+    const RX_BUFFER_SIZE: usize = 512;
+    const TX_BUFFER_SIZE: usize = 512;
+    const PACKET_META_SIZE: usize = 10;
 
 
     const LOCAL_IP:Ipv4Addr =  Ipv4Addr::new(192, 168, 2, 1);
 
     'main_loop: loop {
-
         unsafe {
-            if let Some(ap_stack) = AP_STACK_MUT {
+            let ap_stack = *core::ptr::addr_of!(AP_STACK_MUT);
+            if let Some(ap_stack) = ap_stack {
                 loop {
                     if ap_stack.is_link_up() {
                         break;
@@ -659,10 +629,9 @@ async fn dns_service(){
                 let mut rx_buffer = [0u8; RX_BUFFER_SIZE];
                 let mut tx_meta = [embassy_net::udp::PacketMetadata::EMPTY; PACKET_META_SIZE];
                 let mut tx_buffer = [0u8; TX_BUFFER_SIZE];
-                let mut udp_socket = UdpSocket::new(ap_stack, &mut rx_meta, &mut rx_buffer, &mut tx_meta, &mut tx_buffer);
+                let mut udp_socket = UdpSocket::new(*ap_stack, &mut rx_meta, &mut rx_buffer, &mut tx_meta, &mut tx_buffer);
                 udp_socket.bind(53);
 
-                // 无限循环处理消息
                 loop {
                     let mut buf = [0u8; 512];
                     println!("Dns等待请求") ;
@@ -673,8 +642,6 @@ async fn dns_service(){
 
                             let response = create_dns_response(LOCAL_IP,&buf[..n]);
                             udp_socket.send_to(&response, src).await.expect("发送数据失败");
-                            //break 'main_loop;
-
                         }
                         Err(e) => {
                             println!("Failed to receive UDP packet: {:?}", e);
@@ -694,22 +661,19 @@ async fn dns_service(){
 fn create_dns_response(ip:Ipv4Addr, request: &[u8]) -> Vec<u8, 512> {
     let mut response = Vec::new();
 
-    // 构建简单的 DNS 响应，将所有请求重定向到 ESP32 的 IP 地址
-    // 假设 DNS 请求符合规范并且无错误处理
-
-    response.extend_from_slice(&request[0..2]).unwrap(); // 复制 ID
-    response.extend_from_slice(&[0x81, 0x80]).unwrap(); // 标志：响应，无错误
-    response.extend_from_slice(&request[4..6]).unwrap(); // 问题数
-    response.extend_from_slice(&[0x00, 0x01]).unwrap(); // 答案数：1
-    response.extend_from_slice(&[0x00, 0x00]).unwrap(); // 权威答案数：0
-    response.extend_from_slice(&[0x00, 0x00]).unwrap(); // 附加记录数：0
-    response.extend_from_slice(&request[12..]).unwrap(); // 复制查询部分
-    response.extend_from_slice(&[0xc0, 0x0c]).unwrap(); // 指针到查询部分
-    response.extend_from_slice(&[0x00, 0x01]).unwrap(); // 类型：A
-    response.extend_from_slice(&[0x00, 0x01]).unwrap(); // 类别：IN
-    response.extend_from_slice(&[0x00, 0x00, 0x00, 0x3c]).unwrap(); // TTL：60秒
-    response.extend_from_slice(&[0x00, 0x04]).unwrap(); // 数据长度：4字节
-    response.extend_from_slice(&ip.octets()).unwrap(); // IP 地址
+    response.extend_from_slice(&request[0..2]).unwrap();
+    response.extend_from_slice(&[0x81, 0x80]).unwrap();
+    response.extend_from_slice(&request[4..6]).unwrap();
+    response.extend_from_slice(&[0x00, 0x01]).unwrap();
+    response.extend_from_slice(&[0x00, 0x00]).unwrap();
+    response.extend_from_slice(&[0x00, 0x00]).unwrap();
+    response.extend_from_slice(&request[12..]).unwrap();
+    response.extend_from_slice(&[0xc0, 0x0c]).unwrap();
+    response.extend_from_slice(&[0x00, 0x01]).unwrap();
+    response.extend_from_slice(&[0x00, 0x01]).unwrap();
+    response.extend_from_slice(&[0x00, 0x00, 0x00, 0x3c]).unwrap();
+    response.extend_from_slice(&[0x00, 0x04]).unwrap();
+    response.extend_from_slice(&ip.octets()).unwrap();
 
     response
 }

@@ -9,8 +9,8 @@ use embedded_graphics::prelude::Primitive;
 use embedded_sdmmc::ShortFileName;
 use epd_waveshare::color::{Black, Color,White};
 use epd_waveshare::graphics::{Display, DisplayRotation};
-use esp_hal::macros::ram;
-use esp_hal::reset::get_reset_reason;
+use esp_hal::ram;
+use esp_hal::system::reset_reason;
 use esp_hal::rtc_cntl::SocResetReason;
 use esp_println::{print, println};
 use futures::FutureExt;
@@ -634,8 +634,8 @@ impl ReadPage{
 
 
 }
-#[ram(rtc_fast)]
-pub static mut PAGE_INDEX:Option<u32>   = None ;
+#[ram(unstable(rtc_fast))]
+pub(crate) static mut PAGE_INDEX:Option<u32> = None;
 
 impl Page for ReadPage{
     fn new() -> Self {
@@ -668,7 +668,7 @@ impl Page for ReadPage{
         };
 
         unsafe{
-            if let Some(v) = PAGE_INDEX {
+            if let Some(v) = unsafe { *core::ptr::addr_of!(PAGE_INDEX) } {
                 temp.choose_index = v;
                 temp.change_page = true;
                 temp.reading = true;
@@ -1011,7 +1011,7 @@ impl Page for ReadPage{
                         if mut_ref.reading {
                             // 长按退出阅读，回到书单
                             mut_ref.reading = false;
-                            unsafe { PAGE_INDEX = None; }
+                            unsafe { core::ptr::addr_of_mut!(PAGE_INDEX).write(None); }
                             mut_ref.menu_state = MenuState::Closed;
                             mut_ref.need_render = true;
                         } else {
@@ -1032,7 +1032,7 @@ impl Page for ReadPage{
                             0 => {
                                 // 返回书单
                                 mut_ref.reading = false;
-                                unsafe { PAGE_INDEX = None; }
+                                unsafe { core::ptr::addr_of_mut!(PAGE_INDEX).write(None); }
                             }
                             1 => {
                                 // 收藏书签
@@ -1119,7 +1119,7 @@ impl Page for ReadPage{
                             mut_ref.change_page = true;
                             mut_ref.page_index = 0;
                             mut_ref.book_pages = None;
-                            unsafe { PAGE_INDEX = Some(mut_ref.choose_index); }
+                            unsafe { core::ptr::addr_of_mut!(PAGE_INDEX).write(Some(mut_ref.choose_index)); }
                             mut_ref.need_render = true;
                         }
                     }

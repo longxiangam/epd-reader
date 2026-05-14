@@ -1,14 +1,13 @@
 use alloc::vec;
 use alloc::vec::Vec;
 use core::num::ParseIntError;
-use embassy_net::{IpAddress,  Stack};
+use embassy_net::{IpAddress, Stack};
 use embassy_net::dns::DnsQueryType;
 use embassy_net::tcp::{ConnectError, TcpSocket};
-use embedded_tls::{Aes128GcmSha256, NoVerify, TlsConfig, TlsConnection, TlsContext, TlsError};
+use embedded_tls::{Aes128GcmSha256, TlsConfig, TlsConnection, TlsContext, TlsError, UnsecureProvider};
 use esp_println::println;
-use esp_wifi::wifi::{WifiDevice, WifiStaDevice};
 use reqwless::Error;
-use reqwless::request::{Method, Request, RequestBuilder};
+use reqwless::request::{Method, Request};
 use reqwless::response::Response;
 use crate::random::RngWrapper;
 
@@ -46,7 +45,7 @@ impl From<TlsError> for RequestError {
 }
 
 pub struct RequestClient{
-    stack:&'static Stack<WifiDevice<'static,WifiStaDevice>>,
+    stack: &'static Stack<'static>,
     rng: RngWrapper,
     rx_buffer: Vec<u8>,
     tx_buffer: Vec<u8>,
@@ -61,7 +60,7 @@ pub struct ResponseData {
 
 
 impl RequestClient{
-    pub async fn new(stack:&'static Stack<WifiDevice<'static,WifiStaDevice>>) -> RequestClient {
+    pub async fn new(stack: &'static Stack<'static>) -> RequestClient {
         let rng = crate::wifi::HAL_RNG.lock().await.unwrap();
         RequestClient{
             stack,
@@ -122,7 +121,7 @@ impl RequestClient{
 
         let mut request = Request::get(url).host(host).build();
 
-        request.write(&mut socket).await?;
+        request.write_header(&mut socket).await?;
 
 
         let mut headers_buf = vec![0u8; 1024];
@@ -160,7 +159,7 @@ impl RequestClient{
         socket.connect(remote_endpoint).await?;
         println!("Connected to HTTP server");
 
-        let config: TlsConfig<Aes128GcmSha256> = TlsConfig::new()
+        let config = TlsConfig::new()
             .with_server_name(host)
             .enable_rsa_signatures();
         let mut tls = TlsConnection::new(
@@ -171,12 +170,12 @@ impl RequestClient{
         );
 
         println!("Perform TLS handshake");
-        tls.open::<_, NoVerify>(TlsContext::new(&config, &mut self.rng))
+        tls.open(TlsContext::new(&config, UnsecureProvider::new::<Aes128GcmSha256>(&mut self.rng)))
             .await?;
         println!("TLS handshake succeeded");
 
         let request = Request::get(url).host(host).build();
-        request.write(&mut tls).await?;
+        request.write_header(&mut tls).await?;
 
         let mut headers_buf = vec![0u8; 1024];
         let mut buf = vec![0u8; BUFFER_SIZE];

@@ -5,14 +5,15 @@ use core::iter::once;
 use core::pin::Pin;
 use embassy_time::{Instant, Timer};
 use embedded_graphics::prelude::Point;
+use core::cell::RefCell;
 use embedded_hal_bus::spi::CriticalSectionDevice;
+use critical_section::Mutex as CsMutex;
 use embedded_sdmmc::{File, SdCard, ShortFileName};
 
 use embassy_time::Delay;
 use esp_hal::gpio::Output;
-use esp_hal::peripherals::SPI2;
-use esp_hal::spi::FullDuplexMode;
 use esp_hal::spi::master::Spi;
+use esp_hal::Blocking;
 use esp_println::{print, println};
 use heapless::{String, Vec};
 use log::debug;
@@ -51,7 +52,8 @@ pub struct TxtReader;
 const ZH_WIDTH:u32 = 16;
 const LINE_OVERFLOW:u32 = 8;
 
-type FileObject<'a,'b,CS: esp_hal::gpio::OutputPin> = File<'b,SdCard<&'a mut CriticalSectionDevice<'a,Spi<'a,SPI2, FullDuplexMode>, Output<'a,CS>, Delay>, Delay>, TimeSource, 4, 4, 1>;
+type SpiDevice<'a> = CriticalSectionDevice<'a, CsMutex<RefCell<Spi<'a, esp_hal::Blocking>>>, Output<'a>, embedded_hal_bus::spi::NoDelay>;
+type FileObject<'a,'b> = File<'b, SdCard<SpiDevice<'a>, Delay>, TimeSource, 4, 4, 1>;
 impl TxtReader {
      pub async fn generate_pages<F>(books_dir:&mut ActualDirectory<'_>,book_name:&str, book_short_name:&ShortFileName, display_width:u32, display_lines:u32, mut process: F) ->Option<BookPages>
      where F:FnMut(f32) -> (Pin<Box<dyn Future<Output=()>>>)
@@ -212,7 +214,7 @@ impl TxtReader {
          return book_pages;
     }
 
-    pub fn get_page_content<CS: esp_hal::gpio::OutputPin>(my_file: &mut FileObject<CS>,start_position:u32,end_position:u32,display_width:u32)->String<ONE_PAGE_CONTENT_LEN>{
+    pub fn get_page_content<'a,'b>(my_file: &mut FileObject<'a,'b>,start_position:u32,end_position:u32,display_width:u32)->String<ONE_PAGE_CONTENT_LEN>{
 
         let mut line_width = 0;//当前行宽 用于换行
         let mut lines_num = 0;//当前行数 用于换屏
@@ -281,7 +283,7 @@ impl TxtReader {
     }
 
 
-    pub fn save_pages<CS: esp_hal::gpio::OutputPin>(my_file: &mut FileObject<CS>,pages_vec:&Vec<u32, PAGES_VEC_MAX>){
+    pub fn save_pages<'a,'b>(my_file: &mut FileObject<'a,'b>,pages_vec:&Vec<u32, PAGES_VEC_MAX>){
         const LEN:usize = PAGES_VEC_MAX * 4;
         let mut buffer:Vec<u8, LEN> = Vec::new() ;
 
@@ -297,7 +299,7 @@ impl TxtReader {
 
     }
 
-    pub fn save_log_raw<CS: esp_hal::gpio::OutputPin>(my_file: &mut FileObject<CS>, log_vec:&Vec<u32,LOG_VEC_MAX>){
+    pub fn save_log_raw<'a,'b>(my_file: &mut FileObject<'a,'b>, log_vec:&Vec<u32,LOG_VEC_MAX>){
         const LEN:usize = LOG_VEC_MAX * 4;
         let mut buffer:Vec<u8, LEN> = Vec::new() ;
         for i in 0..log_vec.len() {
@@ -318,7 +320,7 @@ impl TxtReader {
         }
     }
 
-    pub fn save_log<CS: esp_hal::gpio::OutputPin>(my_file: &mut FileObject<CS>, log_vec:&mut Vec<u32,LOG_VEC_MAX>,page:u32,is_favorite:bool){
+    pub fn save_log<'a,'b>(my_file: &mut FileObject<'a,'b>, log_vec:&mut Vec<u32,LOG_VEC_MAX>,page:u32,is_favorite:bool){
 
         //let mut log_vec:Vec<u32,LOG_VEC_MAX> = Self::read_log(my_file);
 
@@ -360,7 +362,7 @@ impl TxtReader {
         }
 
     }
-    pub fn read_log<CS: esp_hal::gpio::OutputPin>(my_file: &mut FileObject<CS>)->Vec<u32,LOG_VEC_MAX>{
+    pub fn read_log<'a,'b>(my_file: &mut FileObject<'a,'b>)->Vec<u32,LOG_VEC_MAX>{
         let mut log_vec:Vec<u32,LOG_VEC_MAX> = Vec::new();
         let mut buffer = [0u8; LOG_VEC_MAX * 4];
         let mut num_read = 0;
@@ -469,7 +471,7 @@ impl BookPages {
         }
     }
 
-    pub fn get_end_page_position<CS: esp_hal::gpio::OutputPin>(&mut self,my_file: &mut FileObject<CS> )->u32{
+    pub fn get_end_page_position<'a,'b>(&mut self,my_file: &mut FileObject<'a,'b> )->u32{
         my_file.seek_from_end(4);
         let mut buffer = [0u8;4];
         let num_read = my_file.read(&mut buffer).unwrap();
@@ -478,7 +480,7 @@ impl BookPages {
         return value;
     }
 
-    pub fn get_page_content_position<CS: esp_hal::gpio::OutputPin>(&mut self,my_file: &mut FileObject<CS> )->(u32,u32){
+    pub fn get_page_content_position<'a,'b>(&mut self,my_file: &mut FileObject<'a,'b> )->(u32,u32){
         if self.need_read_page_vec {
 
             if self.current_vec_num > 0 {

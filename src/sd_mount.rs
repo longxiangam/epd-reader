@@ -1,5 +1,6 @@
 use alloc::string::ToString;
 use alloc::format;
+use core::cell::RefCell;
 use core::str::FromStr;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::mutex::Mutex;
@@ -7,14 +8,12 @@ use embedded_hal_bus::spi::CriticalSectionDevice;
 use embedded_sdmmc::{Block, BlockCount, BlockIdx, Directory, Error, File, LfnBuffer, Mode, SdCard, ShortFileName, Volume, VolumeManager};
 use embassy_time::Delay;
 use esp_hal::gpio::Output;
-use esp_hal::peripherals::SPI2;
-use esp_hal::spi::FullDuplexMode;
 use esp_hal::spi::master::Spi;
-use esp_hal::gpio::GpioPin;
+use esp_hal::Blocking;
 use esp_println::println;
 use heapless::{String, Vec};
 use log::info;
-use crate::make_static;
+use critical_section::Mutex as CsMutex;
 use crate::sd_mount::SdError::{OpenBooksError, OpenRootError, OpenVolumeError, RootAlreadyOpen, FileNotFound};
 
 pub struct TimeSource;
@@ -32,8 +31,9 @@ impl embedded_sdmmc::TimeSource for TimeSource {
         }
     }
 }
-pub type SdCsPin = Output<'static,GpioPin<5>> ;
-pub type ActualSdCard = SdCard<&'static mut CriticalSectionDevice<'static,Spi<'static,SPI2, FullDuplexMode>, SdCsPin, Delay>, Delay>;
+pub type SdCsPin = Output<'static>;
+pub type ActualSpi = CriticalSectionDevice<'static, CsMutex<RefCell<Spi<'static, esp_hal::Blocking>>>, SdCsPin, embedded_hal_bus::spi::NoDelay>;
+pub type ActualSdCard = SdCard<ActualSpi, Delay>;
 pub type ActualVolumeManager = VolumeManager<ActualSdCard, TimeSource>;
 pub type ActualVolume<'a> = Volume<'a,ActualSdCard, TimeSource,4,4,1>;
 pub type ActualDirectory<'a> = Directory<'a,ActualSdCard, TimeSource,4,4,1>;

@@ -13,9 +13,8 @@ use embassy_net::{
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, mutex::Mutex};
 use embassy_time::{Instant, Timer};
 use esp_println::println;
-use esp_wifi::wifi::ipv4::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs};
-use esp_wifi::wifi::{WifiDevice, WifiStaDevice};
-use esp_hal::prelude::ram;
+use no_std_net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs};
+use esp_hal::ram;
 
 use sntpc::{async_impl::{get_time,NtpUdpSocket }, NtpContext, NtpTimestampGenerator };
 use static_cell::{make_static, StaticCell};
@@ -119,23 +118,33 @@ struct NtpSocket<'a> {
 }
 
 impl<'a> NtpUdpSocket for NtpSocket<'a> {
-    async fn send_to<T: ToSocketAddrs + Send>(&self, buf: &[u8], addr: T) -> sntpc::Result<usize> {
-        let mut addr_iter = addr
-            .to_socket_addrs()
-            .map_err(|_| SntpcError::ToSocketAddrs)?;
-        let addr = addr_iter.next().ok_or(SntpcError::NoAddr)?;
-        self.sock
-            .send_to(buf, sock_addr_to_emb_endpoint(addr))
-            .await
-            .map_err(|_| SntpcError::UdpSend)
-            .unwrap();
-        Ok(buf.len())
+    fn send_to<T: ToSocketAddrs + Send>(
+        &self,
+        buf: &[u8],
+        addr: T,
+    ) -> impl core::future::Future<Output = sntpc::Result<usize>> {
+        async move {
+            let mut addr_iter = addr
+                .to_socket_addrs()
+                .map_err(|_| SntpcError::ToSocketAddrs)?;
+            let addr = addr_iter.next().ok_or(SntpcError::NoAddr)?;
+            self.sock
+                .send_to(buf, sock_addr_to_emb_endpoint(addr))
+                .await
+                .map_err(|_| SntpcError::UdpSend)?;
+            Ok(buf.len())
+        }
     }
 
-    async fn recv_from(&self, buf: &mut [u8]) -> sntpc::Result<(usize, SocketAddr)> {
-        match self.sock.recv_from(buf).await {
-            Ok((size, ip_endpoint)) => Ok((size, emb_endpoint_to_sock_addr(ip_endpoint))),
-            Err(_) => panic!("not exp"),
+    fn recv_from(
+        &self,
+        buf: &mut [u8],
+    ) -> impl core::future::Future<Output = sntpc::Result<(usize, SocketAddr)>> {
+        async move {
+            match self.sock.recv_from(buf).await {
+                Ok((size, ip_endpoint)) => Ok((size, emb_endpoint_to_sock_addr(ip_endpoint))),
+                Err(_) => panic!("not exp"),
+            }
         }
     }
 }
@@ -152,11 +161,11 @@ fn emb_endpoint_to_sock_addr(endpoint: IpEndpoint) -> SocketAddr {
     let port = endpoint.port;
     let addr = match endpoint.addr {
         embassy_net::IpAddress::Ipv4(ipv4) => {
-            let octets = ipv4.as_bytes();
+            let octets = ipv4.octets();
             let ipv4_addr = Ipv4Addr::new(octets[0], octets[1], octets[2], octets[3]);
             IpAddr::V4(ipv4_addr)
         }
-        _ => {IpAddr::V4(Ipv4Addr::UNSPECIFIED)}
+        _ => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
     };
 
     SocketAddr::new(addr, port)
@@ -202,7 +211,7 @@ impl NtpTimestampGenerator for TimestampGen {
 
 
 pub async fn ntp_request(
-    stack: &'static Stack<WifiDevice<'static,WifiStaDevice>>,
+    stack: &'static Stack<'static>,
     clock: &'static Clock,
 ) -> Result<(), SntpcError> {
     println!("Prepare NTP request");
@@ -222,7 +231,10 @@ pub async fn ntp_request(
         let addr = addrs.pop().ok_or(SntpcError::DnsEmptyResponse)?;
         println!("NTP DNS: {:?}", addr);
 
-        let octets = addr.as_bytes();
+        let octets = match addr {
+            embassy_net::IpAddress::Ipv4(ip) => ip.octets(),
+            _ => [0u8; 4],
+        };
         let ipv4_addr = Ipv4Addr::new(octets[0], octets[1], octets[2], octets[3]);
         let sock_addr = SocketAddr::new(IpAddr::V4(ipv4_addr), 123);
 
@@ -272,13 +284,13 @@ pub async fn ntp_request(
         }
     }
 }
-#[ram(rtc_fast)]
-pub static mut WHEN_SLEEP_TIME_TIMESTAMP:u64 = 0;
-#[ram(rtc_fast)]
-pub static mut CLOCK_SYNC_TIME_SECOND:u64   =  0;
+#[ram(unstable(rtc_fast))]
+static mut WHEN_SLEEP_TIME_TIMESTAMP:u64 = 0;
+#[ram(unstable(rtc_fast))]
+static mut CLOCK_SYNC_TIME_SECOND:u64 = 0;
 
 
-pub static mut CLOCK: Option<&'static Clock>  =  None;
+static mut CLOCK: Option<&'static Clock> = None;
 
 pub static CLOCK_CELL: StaticCell<Clock>  =  StaticCell::new();
 
@@ -286,18 +298,20 @@ pub static CLOCK_CELL: StaticCell<Clock>  =  StaticCell::new();
 
 pub fn get_clock()->Option<&'static Clock>{
     unsafe {
-        return CLOCK;
+        *core::ptr::addr_of!(CLOCK)
     }
 }
 pub fn sync_time_success()->bool{
      unsafe {
-        CLOCK_SYNC_TIME_SECOND > 0
+        *core::ptr::addr_of!(CLOCK_SYNC_TIME_SECOND) > 0
     }
 }
 
 pub async fn save_time_to_rtc(){
     unsafe {
-        WHEN_SLEEP_TIME_TIMESTAMP = get_clock().unwrap().now().await.unix_timestamp() as u64;
+        core::ptr::addr_of_mut!(WHEN_SLEEP_TIME_TIMESTAMP).write(
+            get_clock().unwrap().now().await.unix_timestamp() as u64
+        );
     }
 }
 
@@ -305,33 +319,26 @@ pub async fn save_time_to_rtc(){
 pub async fn ntp_worker() {
     let clock = CLOCK_CELL.init(Clock::new());
     unsafe {
-        CLOCK.replace(clock);
+        core::ptr::addr_of_mut!(CLOCK).write(Some(clock));
     }
-    //let mut init_page = InitPage::new();
-    //init_page.append_log("开始同步时间").await;
-    //Timer::after_secs(1).await;
-    //rtc 是否保存了启动时间
     unsafe {
-        if WHEN_SLEEP_TIME_TIMESTAMP > 0 {
-            let current_second = WHEN_SLEEP_TIME_TIMESTAMP + get_sleep_ms().await  / 1000;
+        if *core::ptr::addr_of!(WHEN_SLEEP_TIME_TIMESTAMP) > 0 {
+            let current_second = *core::ptr::addr_of!(WHEN_SLEEP_TIME_TIMESTAMP) + get_sleep_ms().await / 1000;
             let now =
                 OffsetDateTime::from_unix_timestamp(current_second as i64).unwrap();
             clock.set_time(now).await;
-            //init_page.append_log(format!("时间：{}:{}:{}",clock.local().await.hour(),clock.local().await.minute(),clock.local().await.second()).as_str()).await;
             Timer::after_secs(5).await;
         }
     }
     let mut err_times = 0;
     loop {
         let mut sleep_sec = 3600;
-        let sync_time_second = unsafe{CLOCK_SYNC_TIME_SECOND};
-        //判断同步时间 12 小时
-        if get_clock().unwrap().now().await.unix_timestamp() as u64 - sync_time_second  > 3600
-            ||  sync_time_second == 0 {
+        let sync_time_second = unsafe { *core::ptr::addr_of!(CLOCK_SYNC_TIME_SECOND) };
+        if get_clock().unwrap().now().await.unix_timestamp() as u64 - sync_time_second > 3600
+            || sync_time_second == 0 {
             match use_wifi().await {
                 Ok(stack) => {
                     println!("NTP Request");
-                    //init_page.append_log("NTP Request").await;
                     match ntp_request(stack, get_clock().unwrap()).await {
                         Err(e) => {
                             finish_wifi().await;
@@ -348,7 +355,9 @@ pub async fn ntp_worker() {
                             finish_wifi().await;
                             println!("NTP ok ?");
                             unsafe {
-                                CLOCK_SYNC_TIME_SECOND =  get_clock().unwrap().now().await.unix_timestamp() as u64;
+                                core::ptr::addr_of_mut!(CLOCK_SYNC_TIME_SECOND).write(
+                                    get_clock().unwrap().now().await.unix_timestamp() as u64
+                                );
                             }
                             err_times = 0;
                             sleep_sec = 3600;
@@ -365,13 +374,9 @@ pub async fn ntp_worker() {
             sleep_sec = 3600;
         }
 
-        //待时间完成后同步天气与节假日
         if sync_time_success() {
-
             Weather::sync_weather().await;
-
             HolidayInfo::sync_holiday().await;
-
         }
         embassy_time::Timer::after(embassy_time::Duration::from_secs(sleep_sec)).await;
     }

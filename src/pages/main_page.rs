@@ -12,7 +12,7 @@ use embedded_graphics::geometry::Dimensions;
 
 use embedded_graphics::prelude::{DrawTarget, Point, Size};
 use esp_println::println;
-use esp_hal::macros::ram;
+use esp_hal::ram;
 use epd_waveshare::color::{Black, Color, White};
 
 use epd_waveshare::prelude::{Display, RefreshLut, WaveshareDisplay};
@@ -34,8 +34,8 @@ use crate::storage::NvsStorage;
 
 static MAIN_PAGE:Mutex<CriticalSectionRawMutex,Option<MainPage> > = Mutex::new(None);
 
-#[ram(rtc_fast)]
-pub static mut PAGE_INDEX:i32 = 1;
+#[ram(unstable(rtc_fast))]
+static mut PAGE_INDEX:i32 = 1;
 
 ///每个page 包含状态与绘制与逻辑处理
 ///状态通过事件改变，并触发绘制
@@ -50,7 +50,7 @@ pub struct MainPage{
 impl MainPage {
 
     pub async fn init(spawner: Spawner){
-        let mut page_index = unsafe{ PAGE_INDEX };
+        let mut page_index = unsafe { *core::ptr::addr_of!(PAGE_INDEX) };
         
         
         // 检查是否有错误日志，如果有则进入debug_page
@@ -161,7 +161,7 @@ impl Page for  MainPage{
                 let mut_ref = Self::get_mut().await.unwrap();
                 mut_ref.current_page = Some( mut_ref.choose_index);
                 unsafe {
-                    PAGE_INDEX = mut_ref.choose_index as i32;
+                    unsafe { *core::ptr::addr_of_mut!(PAGE_INDEX) = mut_ref.choose_index as i32; }
                 }
                 println!("current_page:{}",Self::get_mut().await.unwrap().choose_index );
             });

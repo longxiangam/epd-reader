@@ -10,7 +10,7 @@ use embedded_graphics::prelude::{DrawTarget, DrawTargetExt, Primitive};
 use embedded_graphics::primitives::{Line, PrimitiveStyleBuilder, Rectangle, StrokeAlignment};
 use embedded_graphics::text::{Alignment, Baseline, Text, TextStyleBuilder};
 use embedded_text::TextBox;
-use esp_hal::reset::software_reset;
+use esp_hal::system::software_reset;
 use heapless::{String, Vec};
 use u8g2_fonts::{FontRenderer, U8g2TextStyle};
 use u8g2_fonts::fonts;

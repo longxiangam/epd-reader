@@ -5,7 +5,7 @@ use core::fmt::Write;
 use esp_println::println;
 use heapless::String;
 use crate::storage::{ErrorLogStorage, NvsStorage};
-use esp_backtrace::arch;
+use esp_backtrace::Backtrace;
 
 #[panic_handler]
 fn panic_handler(info: &PanicInfo) -> ! {
@@ -16,7 +16,7 @@ fn panic_handler(info: &PanicInfo) -> ! {
 
     // 构建错误信息字符串
     let mut error_msg = heapless::String::<200>::new();
-    
+
     // 添加panic位置信息
     if let Some(location) = info.location() {
         let _ = error_msg.push_str("location: ");
@@ -35,19 +35,17 @@ fn panic_handler(info: &PanicInfo) -> ! {
     let _ = error_msg.push_str("error: ");
     let _ = write!(error_msg, "{}", message);
     let _ = error_msg.push_str("\n");
-    
+
     // 添加调用栈信息
     let _ = error_msg.push_str("stack:\n");
-    let backtrace = arch::backtrace();
+    let backtrace = Backtrace::capture();
     let mut stack_count = 0;
-    for addr in backtrace {
-        if let Some(addr) = addr {
-            if stack_count < 10 { // 限制调用栈深度为10层
-                let _ = write!(error_msg, "  #{} 0x{:x}\n", stack_count, addr);
-                stack_count += 1;
-            } else {
-                break;
-            }
+    for frame in backtrace.frames() {
+        if stack_count < 10 { // 限制调用栈深度为10层
+            let _ = write!(error_msg, "  #{} 0x{:x}\n", stack_count, frame.program_counter());
+            stack_count += 1;
+        } else {
+            break;
         }
     }
     if stack_count == 0 {

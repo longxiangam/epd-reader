@@ -9,13 +9,12 @@ use crate::model::holiday::HolidayResponse;
 use crate::model::seniverse::DailyResult;
 
 pub fn write_flash(flash_addr:u32, bytes: &[u8]) -> Result<(), FlashStorageError> {
-    let mut flash = FlashStorage::new();
-    //println!("write_flash:{}",flash_addr);
+    let flash = unsafe { esp_hal::peripherals::FLASH::steal() };
+    let mut flash = FlashStorage::new(flash);
     let result = flash.write(flash_addr, bytes);
 
     match result {
         Ok(_) => {
-            //println!("save success");
             Ok(())
         }
         Err(e) => {
@@ -26,12 +25,11 @@ pub fn write_flash(flash_addr:u32, bytes: &[u8]) -> Result<(), FlashStorageError
 
 }
 pub fn read_flash(flash_addr:u32, bytes: &mut [u8]) -> Result<(), FlashStorageError> {
-    let mut flash = FlashStorage::new();
-    //println!("read_flash:{}",flash_addr);
+    let flash = unsafe { esp_hal::peripherals::FLASH::steal() };
+    let mut flash = FlashStorage::new(flash);
     let result = flash.read(flash_addr,bytes);
     match result {
         Ok(_) => {
-            //println!("read success");
             Ok(())
         }
         Err(e) => {

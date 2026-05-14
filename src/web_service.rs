@@ -6,12 +6,10 @@ use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::signal::Signal;
 use embassy_time::{Duration, Timer};
 use esp_println::{print, println};
-use esp_wifi::wifi::WifiDevice;
-use esp_hal::reset::software_reset;
+use esp_hal::system::software_reset;
 use heapless::Vec;
-use crate::wifi::{AP_STACK_MUT, finish_wifi,  use_wifi, WIFI_MODEL, WifiModel};
+use crate::wifi::{finish_wifi, use_wifi, WIFI_MODEL, WifiModel};
 use crate::sd_mount::{SdMount, SD_MOUNT, url_decode, BOOK_NAME_MAX};
-// use crate::storage::{NvsStorage, WIFI_INFO};
 use crate::storage::NvsStorage;
 
 pub static STOP_WEB_SERVICE: Signal<CriticalSectionRawMutex,()> = Signal::new();
@@ -20,36 +18,35 @@ pub async fn web_service(){
     match WIFI_MODEL.lock().await.unwrap() {
         WifiModel::AP => {
             unsafe {
-                if let Some(stack) = AP_STACK_MUT {
+                let stack = *core::ptr::addr_of!(crate::wifi::AP_STACK_MUT);
+                if let Some(stack) = stack {
                     web_tcp_socket(stack).await;
                 }
                 Timer::after(Duration::from_millis(100)).await;
             }
         }
         WifiModel::STA => {
-            unsafe {
-                loop {
-                    match use_wifi().await {
-                        Ok(stack) => {
-                            web_tcp_socket(stack).await;
-                            finish_wifi().await;
-                            break;
-                        }
-                        Err(_) => {}
+            loop {
+                match use_wifi().await {
+                    Ok(stack) => {
+                        web_tcp_socket(stack).await;
+                        finish_wifi().await;
+                        break;
                     }
-                    Timer::after(Duration::from_millis(100)).await;
+                    Err(_) => {}
                 }
+                Timer::after(Duration::from_millis(100)).await;
             }
         }
     }
 }
 
-async fn  web_tcp_socket<D: esp_wifi::wifi::WifiDeviceMode> (stack:&Stack<WifiDevice<'_,D>>){
+async fn web_tcp_socket(stack: &'static Stack<'static>){
 
     let mut rx_buffer = [0; 1536];
     let mut tx_buffer = [0; 1536];
     //网页配置服务
-    let mut socket = TcpSocket::new(stack, &mut rx_buffer, &mut tx_buffer);
+    let mut socket = TcpSocket::new(*stack, &mut rx_buffer, &mut tx_buffer);
     socket.set_timeout(Some(embassy_time::Duration::from_secs(10)));
     loop {
         println!("Wait for connection...");

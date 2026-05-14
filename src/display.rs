@@ -2,16 +2,15 @@ use core::convert::Infallible;
 use embassy_futures::select::{Either, select};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
-use embassy_time::{Delay, Duration, TimeoutError, Timer, with_timeout};
+use embassy_time::{Duration, TimeoutError, Timer, with_timeout};
 use embedded_graphics::draw_target::DrawTarget;
 use embedded_graphics::geometry::Point;
 use embedded_graphics::mono_font::MonoTextStyleBuilder;
 use embedded_graphics::text::{Baseline, Text, TextStyleBuilder};
-use embedded_hal_bus::spi::{DeviceError, ExclusiveDevice};
-use esp_hal::riscv::_export::critical_section::Mutex;
-use core::{borrow::BorrowMut, cell::RefCell};
+use core::cell::RefCell;
 
-use esp_hal::gpio::{Gpio1, Gpio5, Gpio6, Gpio7, Input, Level, Output, NO_PIN, Pull, Gpio20, Gpio3};
+use esp_hal::gpio::{Input, Level, Output, Pull};
+use esp_hal::Blocking;
 use esp_hal::peripherals::SPI2;
 
 use epd_waveshare::color::{Black, Color, White};
@@ -21,17 +20,16 @@ use epd_waveshare::prelude::{Display, RefreshLut, WaveshareDisplay};
 use embedded_graphics::{Drawable };
 use embedded_graphics::prelude::Dimensions;
 use esp_println::println;
-use esp_hal::Async;
-use esp_hal::spi::{Error, FullDuplexMode, SpiDataMode, SpiMode};
+use esp_hal::spi::master::Spi;
 use embedded_hal_bus::spi::CriticalSectionDevice;
 use epd_waveshare::epd4in2_v3::{Display4in2, Epd4in2};
-use esp_hal::spi::master::Spi;
 use epd_waveshare::prelude::DisplayRotation;
-use esp_hal::peripheral::Peripheral;
 use u8g2_fonts::fonts;
 use u8g2_fonts::FontRenderer;
 use u8g2_fonts::types::{FontColor, HorizontalAlignment, VerticalPosition};
-use esp_hal::macros::ram;
+use esp_hal::ram;
+
+use critical_section::Mutex as CsMutex;
 
 pub struct RenderInfo{
     pub time:i32,
@@ -49,86 +47,84 @@ pub type EpdDisplay = Display4in2;
 pub type EpdControl<SPI, BUSY, DC, RST, DELAY> = Epd4in2<SPI, BUSY, DC, RST, DELAY>;
 
 
-#[ram(rtc_fast)]
+#[ram(unstable(rtc_fast))]
 static mut RENDER_TIMES:u32 = 0;
 
-pub static mut DISPLAY:Option<EpdDisplay>  = None;
-
+static mut DISPLAY: Option<EpdDisplay> = None;
 static mut SLEEP_RENDERER: Option<fn(&mut EpdDisplay)> = None;
 
 pub fn set_sleep_renderer(renderer: Option<fn(&mut EpdDisplay)>) {
-    unsafe { SLEEP_RENDERER = renderer; }
+    unsafe { core::ptr::addr_of_mut!(SLEEP_RENDERER).write(renderer); }
 }
 
-pub static RENDER_CHANNEL: Channel<CriticalSectionRawMutex,RenderInfo, 64> = Channel::new();
-pub static QUICKLY_LUT_CHANNEL: Channel<CriticalSectionRawMutex,bool, 64> = Channel::new();
+pub static RENDER_CHANNEL: Channel<CriticalSectionRawMutex, RenderInfo, 64> = Channel::new();
+pub static QUICKLY_LUT_CHANNEL: Channel<CriticalSectionRawMutex, bool, 64> = Channel::new();
 
-type ActualSpi = CriticalSectionDevice<'static,Spi<'static,SPI2, FullDuplexMode>, Output<'static,Gpio3>, Delay>;
+type ActualSpi<'a> = CriticalSectionDevice<'a, CsMutex<RefCell<Spi<'static, esp_hal::Blocking>>>, Output<'a>, embedded_hal_bus::spi::NoDelay>;
+
 #[embassy_executor::task]
-pub async  fn render(mut spi_device: &'static mut ActualSpi,
-                     mut busy:Gpio6 ,
-                           rst:Gpio7,
-                           dc: Gpio20)
+pub async fn render(
+    mut spi_device: &'static mut ActualSpi<'static>,
+    busy: esp_hal::peripherals::GPIO6<'static>,
+    rst: esp_hal::peripherals::GPIO7<'static>,
+    dc: esp_hal::peripherals::GPIO20<'static>,
+)
 {
-    let busy = Input::new(busy, Pull::Down);
-    let rst = Output::new( rst, Level::High);
-    let dc = Output::new( dc, Level::High);
+    let busy = Input::new(busy, esp_hal::gpio::InputConfig::default().with_pull(Pull::Down));
+    let rst = Output::new(rst, Level::High, esp_hal::gpio::OutputConfig::default());
+    let dc = Output::new(dc, Level::High, esp_hal::gpio::OutputConfig::default());
 
-    let mut epd = EpdControl::new(&mut spi_device,  busy, dc, rst, &mut Delay).unwrap();
+    let mut epd = EpdControl::new(&mut spi_device, busy, dc, rst, &mut embassy_time::Delay).unwrap();
     let mut display: EpdDisplay = EpdDisplay::default();
-    //display.set_rotation(DisplayRotation::Rotate90);
     display.clear_buffer(Color::White);
 
     let receiver = RENDER_CHANNEL.receiver();
     let quickly_lut = QUICKLY_LUT_CHANNEL.receiver();
     unsafe {
-        DISPLAY.replace(display);
-    }
-   
-    let mut refresh_lut:RefreshLut=RefreshLut::Quick;
-    let mut is_sleep = false;
-    if refresh_lut ==  RefreshLut::Quick {
-        spi_device  = set_refresh_mode(RefreshLut::Quick,&mut epd,spi_device); 
+        core::ptr::addr_of_mut!(DISPLAY).write(Some(display));
     }
 
-    const FORCE_FULL_REFRESH_TIMES:u32 =  5;
+    let mut refresh_lut:RefreshLut = RefreshLut::Quick;
+    let mut is_sleep = false;
+    if refresh_lut == RefreshLut::Quick {
+        spi_device = set_refresh_mode(RefreshLut::Quick, &mut epd, spi_device);
+    }
+
+    const FORCE_FULL_REFRESH_TIMES:u32 = 5;
     loop {
 
         let render_sign = receiver.receive();
         let quickly_lut = quickly_lut.receive();
-        match select(render_sign,quickly_lut).await {
+        match select(render_sign, quickly_lut).await {
             Either::First(render_info) => {
                 add_render_times();
                 println!("begin render");
 
                 if is_sleep {
-                    //唤醒
-                    epd.wake_up(&mut spi_device,&mut Delay);
+                    epd.wake_up(&mut spi_device, &mut embassy_time::Delay);
                     is_sleep = false;
                 }
-                let buffer = unsafe { DISPLAY.as_mut().unwrap().buffer() };
+                let buffer = unsafe { (*core::ptr::addr_of_mut!(DISPLAY)).as_mut().unwrap().buffer() };
                 let len = buffer.len();
                 let mut need_force_full = false;
                 if get_render_times() % FORCE_FULL_REFRESH_TIMES == 0 && refresh_lut == RefreshLut::Quick{
                     need_force_full = true;
-                    spi_device  = set_refresh_mode(RefreshLut::Full,&mut epd,spi_device);
+                    spi_device = set_refresh_mode(RefreshLut::Full, &mut epd, spi_device);
                 }
-                epd.update_and_display_frame(&mut spi_device, buffer, &mut Delay);
+                epd.update_and_display_frame(&mut spi_device, buffer, &mut embassy_time::Delay);
                 if need_force_full {
-                    spi_device  = set_refresh_mode(RefreshLut::Quick,&mut epd,spi_device);
+                    spi_device = set_refresh_mode(RefreshLut::Quick, &mut epd, spi_device);
                 }
 
                 if render_info.need_sleep {
                     is_sleep = true;
-                    epd.sleep(&mut spi_device, &mut Delay);
+                    epd.sleep(&mut spi_device, &mut embassy_time::Delay);
                     println!("sleep epd");
                 }
 
-                if(refresh_lut == RefreshLut::Full){
-                    unsafe {
-                        RENDER_TIMES = 0;
-                    }
-                }else{
+                if refresh_lut == RefreshLut::Full {
+                    reset_render_times();
+                } else {
                     add_render_times();
                 }
 
@@ -137,10 +133,10 @@ pub async  fn render(mut spi_device: &'static mut ActualSpi,
             Either::Second(v) => {
                 if v {
                     refresh_lut = RefreshLut::Quick;
-                    spi_device  = set_refresh_mode(RefreshLut::Quick,&mut epd,spi_device);
-                }else{
+                    spi_device = set_refresh_mode(RefreshLut::Quick, &mut epd, spi_device);
+                } else {
                     refresh_lut = RefreshLut::Full;
-                    spi_device  = set_refresh_mode(RefreshLut::Full,&mut epd,spi_device);
+                    spi_device = set_refresh_mode(RefreshLut::Full, &mut epd, spi_device);
                 }
             },
         }
@@ -151,24 +147,24 @@ pub async  fn render(mut spi_device: &'static mut ActualSpi,
 
 pub fn add_render_times(){
     unsafe {
-        RENDER_TIMES +=1;
+        *core::ptr::addr_of_mut!(RENDER_TIMES) += 1;
     }
 }
 
 pub fn get_render_times()->u32{
     unsafe {
-        RENDER_TIMES
+        *core::ptr::addr_of!(RENDER_TIMES)
     }
 }
 
 pub fn reset_render_times(){
     unsafe {
-        RENDER_TIMES = 0;
+        core::ptr::addr_of_mut!(RENDER_TIMES).write(0);
     }
 }
 
-pub fn set_refresh_mode< BUSY, DC, RST > (mode:RefreshLut,epd:&mut EpdControl<&'static mut ActualSpi, BUSY, DC, RST,Delay>,mut spi_device: &'static mut  ActualSpi)
--> &'static mut ActualSpi
+pub fn set_refresh_mode< BUSY, DC, RST > (mode:RefreshLut, epd:&mut EpdControl<&'static mut ActualSpi<'static>, BUSY, DC, RST, embassy_time::Delay>, mut spi_device: &'static mut ActualSpi<'static>)
+-> &'static mut ActualSpi<'static>
 where BUSY: embedded_hal::digital::InputPin, DC: embedded_hal::digital::OutputPin,  RST: embedded_hal::digital::OutputPin
 {
     #[cfg(feature = "epd2in9")]
@@ -176,7 +172,7 @@ where BUSY: embedded_hal::digital::InputPin, DC: embedded_hal::digital::OutputPi
 
     #[cfg(feature = "epd4in2")]
     {
-        epd.set_refresh(&mut spi_device,&mut Delay,mode).expect("切换刷新模式失败");
+        epd.set_refresh(&mut spi_device, &mut embassy_time::Delay, mode).expect("切换刷新模式失败");
     }
 
     return spi_device;
@@ -185,11 +181,11 @@ where BUSY: embedded_hal::digital::InputPin, DC: embedded_hal::digital::OutputPi
 
 pub fn display_mut()->Option<&'static mut EpdDisplay>{
     unsafe {
-        DISPLAY.as_mut()
+        (*core::ptr::addr_of_mut!(DISPLAY)).as_mut()
     }
 }
 
-pub async fn show_error(error:&str,need_clear:bool) {
+pub async fn show_error(error:&str, need_clear:bool) {
     embassy_time::Timer::after_secs(1).await;
     if let Some(display) = display_mut() {
         let font: FontRenderer = FontRenderer::new::<fonts::u8g2_font_wqy15_t_gb2312>();
@@ -207,12 +203,7 @@ pub async fn show_error(error:&str,need_clear:bool) {
             display,
         );
 
-
-
-
-
-
-        RENDER_CHANNEL.send(RenderInfo { time: 0,need_sleep:true }).await;
+        RENDER_CHANNEL.send(RenderInfo { time: 0, need_sleep:true }).await;
         Timer::after_secs(1).await;
     }
 }
@@ -221,11 +212,11 @@ pub async fn show_error(error:&str,need_clear:bool) {
 pub async fn show_sleep() {
     embassy_time::Timer::after_secs(1).await;
     if let Some(display) = display_mut() {
-        let renderer = unsafe { SLEEP_RENDERER };
+        let renderer = unsafe { *core::ptr::addr_of!(SLEEP_RENDERER) };
         if let Some(r) = renderer {
             r(display);
         } else {
-            display.set_rotation(DisplayRotation::Rotate90);//默认的都竖向显示图片
+            display.set_rotation(DisplayRotation::Rotate90);
             display.clear_buffer(Color::White);
             let drawn = crate::flash_sleep::draw_sleep_image(display);
             if !drawn {
@@ -244,7 +235,7 @@ pub async fn show_sleep() {
                 );
             }
         }
-        RENDER_CHANNEL.send(RenderInfo { time: 0,need_sleep:true }).await;
+        RENDER_CHANNEL.send(RenderInfo { time: 0, need_sleep:true }).await;
         Timer::after_secs(1).await;
     }
 }

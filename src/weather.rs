@@ -1,5 +1,7 @@
 use alloc::format;
-use esp_hal::macros::ram;
+use esp_hal::ram;
+#[allow(internal_features)]
+use core::ptr::{addr_of, addr_of_mut};
 use esp_println::println;
 use crate::model::seniverse::{DailyResult, form_json};
 use crate::request::RequestClient;
@@ -124,47 +126,47 @@ impl Weather {
     }
   
     pub async fn sync_weather(){
-        
-        if unsafe{WEATHER_SYNC_SECOND} == 0 {
-            Self::get_weather().await;//加载同步时间
+
+        if unsafe { *addr_of!(WEATHER_SYNC_SECOND) } == 0 {
+            Self::get_weather().await;
         }
 
-        let now_sec =  get_clock().unwrap().now().await.unix_timestamp() as u64;
-        // 天气：5小时刷新一次
-        if !sync_weather_success() || now_sec - unsafe { WEATHER_SYNC_SECOND } > 3600 * 5 {
+        let now_sec = get_clock().unwrap().now().await.unix_timestamp() as u64;
+        if !sync_weather_success() || now_sec - unsafe { *addr_of!(WEATHER_SYNC_SECOND) } > 3600 * 5 {
             let _ = Weather::request().await;
         }
     }
     pub async fn get_weather()->Option<DailyResult>{
         let weather_storage = WeatherStorage::read().unwrap();
         unsafe {
-            WEATHER_SYNC_SECOND = weather_storage.sync_time_second;
+            *addr_of_mut!(WEATHER_SYNC_SECOND) = weather_storage.sync_time_second;
         }
         //判断时间
         weather_storage.weather_data
     } 
     
+    #[inline(always)]
     pub async fn save(daily_result: DailyResult){
         unsafe {
-            WEATHER_SYNC_SECOND = get_clock().unwrap().now().await.unix_timestamp() as u64;
+            *addr_of_mut!(WEATHER_SYNC_SECOND) = get_clock().unwrap().now().await.unix_timestamp() as u64;
         }
-        
+
         let mut weather_storage = WeatherStorage::default();
         weather_storage.weather_data =  Some(daily_result);
-        weather_storage.sync_time_second =  unsafe{WEATHER_SYNC_SECOND};
+        weather_storage.sync_time_second =  unsafe{ *addr_of!(WEATHER_SYNC_SECOND) };
         weather_storage.write().unwrap();
     }
    
 }
 
 
-#[ram(rtc_fast)]
-pub static mut WEATHER_SYNC_SECOND:u64   =  0;
-pub static mut WEATHER_SYNC_SECOND_ERROR_SECOND:u64  = 0;
+#[ram(unstable(rtc_fast))]
+static mut WEATHER_SYNC_SECOND:u64 = 0;
+static mut WEATHER_SYNC_SECOND_ERROR_SECOND:u64 = 0;
 
 pub fn sync_weather_success()->bool{
     unsafe {
-        WEATHER_SYNC_SECOND > 0
+        *addr_of!(WEATHER_SYNC_SECOND) > 0
     }
 }
 
@@ -221,16 +223,16 @@ impl HolidayInfo {
 
     pub async fn sync_holiday(){
 
-        if unsafe{HOLIDAY_SYNC_SECOND} == 0 {
-            Self::get_holiday().await;//加载同步时间
+        if unsafe { *addr_of!(HOLIDAY_SYNC_SECOND) } == 0 {
+            Self::get_holiday().await;
         }
 
 
         let current_second = get_clock().unwrap().now().await.unix_timestamp() as u64;
         let current_year =  get_clock().unwrap().now().await.year() as u32;
-        if !sync_holiday_success()  || unsafe { HOLIDAY_SYNC_YEAR !=  current_year } {
-            let error_second = unsafe{ HOLIDAY_SYNC_ERROR_SECOND };
-            if error_second ==0 || current_second - error_second > 60 {
+        if !sync_holiday_success() || unsafe { *addr_of!(HOLIDAY_SYNC_YEAR) != current_year } {
+            let error_second = unsafe { *addr_of!(HOLIDAY_SYNC_ERROR_SECOND) };
+            if error_second == 0 || current_second - error_second > 60 {
                 let mut try_times = 3;
                 loop{
                     if let Ok(v) = HolidayInfo::request().await {
@@ -238,11 +240,11 @@ impl HolidayInfo {
                     }else{
                         try_times-=1;
                         if try_times == 0 {
-                            unsafe{HOLIDAY_SYNC_ERROR_SECOND =  current_second};
+                            unsafe { *addr_of_mut!(HOLIDAY_SYNC_ERROR_SECOND) = current_second; }
                             break;
                         }
                     }
-        
+
                 }
             }
         }
@@ -250,9 +252,9 @@ impl HolidayInfo {
     pub async fn get_holiday()->Option<HolidayResponse>{
         let holiday_storage = HolidayStorage::read().unwrap();
         unsafe {
-            HOLIDAY_SYNC_SECOND = holiday_storage.sync_time_second;
+            *addr_of_mut!(HOLIDAY_SYNC_SECOND) = holiday_storage.sync_time_second;
             if let Some(ref temp) = holiday_storage.holiday_response{
-                HOLIDAY_SYNC_YEAR = temp.year;
+                *addr_of_mut!(HOLIDAY_SYNC_YEAR) = temp.year;
             }
         }
         //判断时间
@@ -262,14 +264,14 @@ impl HolidayInfo {
     #[inline(always)]
     pub async fn save(holiday_response: HolidayResponse){
         unsafe {
-            HOLIDAY_SYNC_SECOND = get_clock().unwrap().now().await.unix_timestamp() as u64;
+            *addr_of_mut!(HOLIDAY_SYNC_SECOND) = get_clock().unwrap().now().await.unix_timestamp() as u64;
         }
 
-        println!("HOLIDAY_SYNC_SECOND:{}", unsafe{HOLIDAY_SYNC_SECOND});
+        println!("HOLIDAY_SYNC_SECOND:{}", unsafe { *addr_of!(HOLIDAY_SYNC_SECOND) });
 
         let mut holiday_storage = HolidayStorage::default();
         holiday_storage.holiday_response =  Some(holiday_response);
-        holiday_storage.sync_time_second =  unsafe{HOLIDAY_SYNC_SECOND};
+        holiday_storage.sync_time_second =  unsafe { *addr_of!(HOLIDAY_SYNC_SECOND) };
         holiday_storage.write().unwrap();
     }
 
@@ -277,15 +279,15 @@ impl HolidayInfo {
 }
 
 
-#[ram(rtc_fast)]
-pub static mut HOLIDAY_SYNC_SECOND: u64 = 0;
-#[ram(rtc_fast)]
-pub static mut HOLIDAY_SYNC_YEAR: u32 = 0;
+#[ram(unstable(rtc_fast))]
+pub(crate) static mut HOLIDAY_SYNC_SECOND: u64 = 0;
+#[ram(unstable(rtc_fast))]
+static mut HOLIDAY_SYNC_YEAR: u32 = 0;
 
-pub static mut HOLIDAY_SYNC_ERROR_SECOND: u64 = 0;
+static mut HOLIDAY_SYNC_ERROR_SECOND: u64 = 0;
 
 pub fn sync_holiday_success() -> bool {
-    unsafe { HOLIDAY_SYNC_SECOND > 0 }
+    unsafe { *addr_of!(HOLIDAY_SYNC_SECOND) > 0 }
 }
 
 
