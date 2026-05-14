@@ -29,6 +29,7 @@ use crate::pages::read_page::ReadPage;
 use crate::pages::image_page::ImagePage;
 use crate::pages::setting_page::SettingPage;
 use crate::pages::weather_page::WeatherPage;
+use crate::sleep::to_sleep_tips;
 use crate::storage::NvsStorage;
 
 static MAIN_PAGE:Mutex<CriticalSectionRawMutex,Option<MainPage> > = Mutex::new(None);
@@ -126,7 +127,7 @@ impl Page for  MainPage{
     }
     async fn bind_event(&mut self){
         event::clear().await;
-        event::on(EventType::KeyShort(1),  move |info|  {
+        event::on(EventType::KeyShort(2),  move |info|  {
             println!("current_page:" );
             return Box::pin(async {
                 Self::get_mut().await.unwrap().increase();
@@ -147,7 +148,7 @@ impl Page for  MainPage{
 
             });
         }).await;
-        event::on(EventType::KeyShort(2),  |info|  {
+        event::on(EventType::KeyShort(1),  |info|  {
             println!("current_page:" );
             return Box::pin( async {
                 Self::get_mut().await.unwrap().decrease();
@@ -217,6 +218,7 @@ impl Page for  MainPage{
 
             if  None == self.current_page {
                 self.render().await;
+                to_sleep_tips(Duration::from_secs(0), Duration::from_secs(30),true).await;
                 Timer::after(Duration::from_millis(50)).await;
                 continue;
             }
@@ -271,7 +273,7 @@ impl Page for  MainPage{
                 }
                 _ => { self.back().await;}
             }
-
+            to_sleep_tips(Duration::from_secs(0), Duration::from_secs(30),true).await;
             Timer::after(Duration::from_millis(50)).await;
         }
     }

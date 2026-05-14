@@ -10,17 +10,19 @@ use crate::model::seniverse::DailyResult;
 
 pub fn write_flash(flash_addr:u32, bytes: &[u8]) -> Result<(), FlashStorageError> {
     let mut flash = FlashStorage::new();
-    println!("write_flash:{}",flash_addr);
+    //println!("write_flash:{}",flash_addr);
     let result = flash.write(flash_addr, bytes);
 
     match result {
-        Ok(_) => { println!("save success");}
+        Ok(_) => {
+            //println!("save success");
+            Ok(())
+        }
         Err(e) => {
             println!("save fail：{:?}",e);
+            Err(e)
         }
     }
-
-    Ok(())
 
 }
 pub fn read_flash(flash_addr:u32, bytes: &mut [u8]) -> Result<(), FlashStorageError> {
@@ -33,7 +35,7 @@ pub fn read_flash(flash_addr:u32, bytes: &mut [u8]) -> Result<(), FlashStorageEr
             Ok(())
         }
         Err(e) => {
-            //println!("read fail：{:?}",e);
+            println!("read fail：{:?}",e);
             Err(e)
         }
     }

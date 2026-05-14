@@ -296,6 +296,95 @@ impl SdMount{
         }
     }
 
+    /// Generate a unique 8.3 short name for a new image file in the images/ directory.
+    fn generate_unique_image_short_name(images_dir: &mut ActualDirectory) -> Result<ShortFileName, SdError> {
+        let mut max_num: u32 = 0;
+        let mut storage = [0u8; 512];
+        let mut lfn_buffer = LfnBuffer::new(&mut storage);
+        let _ = images_dir.iterate_dir_lfn(&mut lfn_buffer, |dir_entry, _lfn| {
+            let name_str = dir_entry.name.to_string();
+            if name_str.starts_with("IM") && name_str.contains('~') {
+                if let Some(tilde_pos) = name_str.find('~') {
+                    let num_str = &name_str[2..tilde_pos];
+                    if let Ok(n) = num_str.parse::<u32>() {
+                        if n > max_num { max_num = n; }
+                    }
+                }
+            }
+        });
+        let next_num = max_num + 1;
+        let short = format!("IM{:04X}~1.BMP", next_num);
+        ShortFileName::create_from_str(&short).map_err(|_| FileNotFound)
+    }
+
+    /// Create a new image file with LFN support in the images/ directory.
+    pub fn create_image_file_with_lfn(
+        volume_mgr: &mut ActualVolumeManager,
+        long_name: &str,
+    ) -> Result<(ShortFileName, embedded_sdmmc::BlockIdx, u32), SdError> {
+        let short_name = {
+            let mut vol = volume_mgr.open_volume(embedded_sdmmc::VolumeIdx(0)).map_err(|_| OpenVolumeError)?;
+            let mut root = vol.open_root_dir().map_err(|_| OpenRootError)?;
+            let mut images_dir = root.open_dir("images").map_err(|_| OpenBooksError)?;
+            Self::generate_unique_image_short_name(&mut images_dir)?
+        };
+        {
+            let mut vol = volume_mgr.open_volume(embedded_sdmmc::VolumeIdx(0)).map_err(|_| OpenVolumeError)?;
+            let mut root = vol.open_root_dir().map_err(|_| OpenRootError)?;
+            let mut images_dir = root.open_dir("images").map_err(|_| OpenBooksError)?;
+            let file = images_dir.open_file_in_dir(short_name.clone(), Mode::ReadWriteCreateOrTruncate)
+                .map_err(|_| FileNotFound)?;
+            file.close();
+        }
+        let dir_entry = {
+            let mut vol = volume_mgr.open_volume(embedded_sdmmc::VolumeIdx(0)).map_err(|_| OpenVolumeError)?;
+            let mut root = vol.open_root_dir().map_err(|_| OpenRootError)?;
+            let mut images_dir = root.open_dir("images").map_err(|_| OpenBooksError)?;
+            images_dir.find_directory_entry(short_name.clone())
+                .map_err(|e| { println!("find_directory_entry error: {:?}", e); FileNotFound })?
+        };
+        let entry_block = dir_entry.entry_block;
+        let entry_offset = dir_entry.entry_offset;
+
+        let checksum = Self::lfn_checksum(&short_name);
+        let utf16_chars: alloc::vec::Vec<u16> = long_name.encode_utf16().collect();
+        let num_lfn_entries = (utf16_chars.len() + 12) / 13;
+        let entry_idx = (entry_offset / 32) as usize;
+        if entry_idx + num_lfn_entries >= 16 {
+            return Ok((short_name, entry_block, entry_offset));
+        }
+
+        volume_mgr.device(|block_dev| {
+            let mut blocks = [Block::new()];
+            match embedded_sdmmc::BlockDevice::read(block_dev, &mut blocks, entry_block) {
+                Ok(_) => {
+                    let data = &mut blocks[0].contents;
+                    let shift_bytes = num_lfn_entries * 32;
+                    let src_start = entry_offset as usize;
+                    for i in (src_start..512 - shift_bytes).rev() {
+                        data[i + shift_bytes] = data[i];
+                    }
+                    for seq in 0..num_lfn_entries {
+                        let lfn_seq = num_lfn_entries - seq;
+                        let is_last = seq == 0;
+                        let seq_byte = if is_last { 0x40 | (lfn_seq as u8) } else { lfn_seq as u8 };
+                        let start_char = (lfn_seq as usize - 1) * 13;
+                        let end_char = core::cmp::min(lfn_seq as usize * 13, utf16_chars.len());
+                        let chunk = &utf16_chars[start_char..end_char];
+                        let lfn_entry = Self::build_lfn_entry(seq_byte, checksum, chunk);
+                        let offset = src_start + seq * 32;
+                        data[offset..offset + 32].copy_from_slice(&lfn_entry);
+                    }
+                    let _ = embedded_sdmmc::BlockDevice::write(block_dev, &blocks, entry_block);
+                }
+                Err(e) => { println!("Image LFN read error: {:?}", e); }
+            }
+            TimeSource
+        });
+
+        Ok((short_name, entry_block, entry_offset))
+    }
+
     /// Calculate LFN checksum from a ShortFileName (FAT32 spec algorithm).
     /// Reconstructs the 11-byte on-disk representation from the string form.
     fn lfn_checksum(sfn: &ShortFileName) -> u8 {

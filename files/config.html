@@ -168,6 +168,7 @@
         <button class="tab-link" data-tab="weather">天气</button>
         <button class="tab-link" data-tab="sleep">睡眠</button>
         <button class="tab-link" data-tab="books">书籍</button>
+        <button class="tab-link" data-tab="images">图片</button>
        <!-- <button class="tab-link" data-tab="timer">定时功能</button>-->
 
     </div>
@@ -219,6 +220,16 @@
         <div id="uploadProgress"></div>
         <div id="bookMessage" class="message"></div>
     </div>
+    <div id="images" class="tab-content">
+        <h3 style="margin-top:0;">图片列表</h3>
+        <div id="imageList"></div>
+        <hr style="margin:16px 0;">
+        <h3>上传图片</h3>
+        <input type="file" id="imageFile" accept=".bmp" style="margin-top:8px;width:100%;box-sizing:border-box;">
+        <button id="imageUploadBtn" disabled style="background-color:#28a745;color:white;padding:8px 16px;border:none;border-radius:4px;cursor:pointer;font-size:14px;margin-top:8px;width:100%;">上传图片</button>
+        <div id="imageUploadProgress" style="margin-top:8px;font-size:14px;color:#555;"></div>
+        <div id="imageMessage" class="message"></div>
+    </div>
 <!--    <div id="timer" class="tab-content">
         <form action="/configure_timer" method="POST">
             <label for="start-time">Start Time:</label>
@@ -245,6 +256,9 @@
 
             if (tabId === 'books') {
                 loadBooks();
+            }
+            if (tabId === 'images') {
+                loadImages();
             }
         });
     });
@@ -535,6 +549,116 @@
 
     function showSleepImageMessage(text, type) {
         const el = document.getElementById('sleepImageMessage');
+        el.textContent = text;
+        el.className = 'message ' + type;
+        el.style.display = 'block';
+        setTimeout(() => { el.style.display = 'none'; }, 3000);
+    }
+
+    // ===== Images Management =====
+    const IMAGE_CHUNK_SIZE = 65536;
+
+    async function loadImages() {
+        const listEl = document.getElementById('imageList');
+        listEl.innerHTML = '加载中...';
+        try {
+            const resp = await fetch('/images');
+            const data = await resp.json();
+            if (!data.images || data.images.length === 0) {
+                listEl.innerHTML = '<p>暂无图片</p>';
+                return;
+            }
+            listEl.innerHTML = '';
+            data.images.forEach(name => {
+                const item = document.createElement('div');
+                item.className = 'book-item';
+                const span = document.createElement('span');
+                span.textContent = name;
+                const btn = document.createElement('button');
+                btn.textContent = '删除';
+                btn.onclick = () => deleteImage(name, item);
+                item.appendChild(span);
+                item.appendChild(btn);
+                listEl.appendChild(item);
+            });
+        } catch (e) {
+            listEl.innerHTML = '<p>加载失败: ' + e.message + '</p>';
+        }
+    }
+
+    async function deleteImage(name, itemEl) {
+        if (!confirm('确定删除 "' + name + '" 吗？')) return;
+        try {
+            const resp = await fetch('/delete_image', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                body: 'name=' + encodeURIComponent(name)
+            });
+            const data = await resp.json();
+            if (data.success) {
+                itemEl.remove();
+                showImageMsg('已删除: ' + name, 'success');
+            } else {
+                showImageMsg('删除失败: ' + (data.error || '未知错误'), 'error');
+            }
+        } catch (e) {
+            showImageMsg('删除出错: ' + e.message, 'error');
+        }
+    }
+
+    const imageFileInput = document.getElementById('imageFile');
+    const imageUploadBtn = document.getElementById('imageUploadBtn');
+    const imageUploadProgress = document.getElementById('imageUploadProgress');
+
+    imageFileInput.addEventListener('change', () => {
+        imageUploadBtn.disabled = !imageFileInput.files.length;
+    });
+
+    imageUploadBtn.addEventListener('click', async () => {
+        const file = imageFileInput.files[0];
+        if (!file) return;
+
+        let fileName = file.name;
+        if (!fileName.toLowerCase().endsWith('.bmp')) {
+            fileName += '.bmp';
+        }
+
+        imageUploadBtn.disabled = true;
+        imageUploadProgress.textContent = '准备上传...';
+
+        const totalChunks = Math.ceil(file.size / IMAGE_CHUNK_SIZE);
+        try {
+            for (let i = 0; i < totalChunks; i++) {
+                const start = i * IMAGE_CHUNK_SIZE;
+                const end = Math.min(start + IMAGE_CHUNK_SIZE, file.size);
+                const chunk = file.slice(start, end);
+                const buf = await chunk.arrayBuffer();
+
+                const resp = await fetch('/upload_image?name=' + encodeURIComponent(fileName) + '&chunk=' + i, {
+                    method: 'POST',
+                    body: buf
+                });
+                const data = await resp.json();
+                if (!data.success) {
+                    throw new Error(data.error || '上传失败');
+                }
+                const pct = Math.round(((i + 1) / totalChunks) * 100);
+                imageUploadProgress.textContent = '上传进度: ' + pct + '% (' + (i + 1) + '/' + totalChunks + ')';
+            }
+            showImageMsg('上传成功: ' + fileName, 'success');
+            imageUploadProgress.textContent = '';
+            imageFileInput.value = '';
+            imageUploadBtn.disabled = true;
+            loadImages();
+        } catch (e) {
+            showImageMsg('上传失败: ' + e.message, 'error');
+        } finally {
+            imageUploadBtn.disabled = false;
+        }
+    });
+
+    function showImageMsg(text, type) {
+        const el = document.getElementById('imageMessage');
         el.textContent = text;
         el.className = 'message ' + type;
         el.style.display = 'block';

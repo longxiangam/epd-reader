@@ -147,6 +147,248 @@ async fn send_json(socket: &mut TcpSocket<'_>, body: &[u8]) {
     let _ = socket.write_all(body).await;
 }
 
+async fn handle_get_images(socket: &mut TcpSocket<'_>) {
+    use embedded_io_async::Write;
+
+    let mut sd_guard = SD_MOUNT.lock().await;
+    let Some(ref mut sd) = *sd_guard else {
+        send_json(socket, b"{\"images\":[],\"error\":\"SD not ready\"}").await;
+        return;
+    };
+
+    let mut volume0 = match sd.volume_manager.open_volume(embedded_sdmmc::VolumeIdx(0)) {
+        Ok(v) => v,
+        Err(e) => {
+            println!("open_volume error: {:?}", e);
+            send_json(socket, b"{\"images\":[],\"error\":\"open volume failed\"}").await;
+            return;
+        }
+    };
+    let mut root = match volume0.open_root_dir() {
+        Ok(r) => r,
+        Err(e) => {
+            println!("open_root error: {:?}", e);
+            send_json(socket, b"{\"images\":[],\"error\":\"open root failed\"}").await;
+            return;
+        }
+    };
+    let mut images_dir = match root.open_dir("images") {
+        Ok(d) => d,
+        Err(e) => {
+            println!("open_dir images error: {:?}", e);
+            send_json(socket, b"{\"images\":[],\"error\":\"open images dir failed\"}").await;
+            return;
+        }
+    };
+
+    let images = SdMount::get_images(&mut images_dir).unwrap_or_default();
+
+    let mut body_len: usize = 11; // {"images":[
+    for (i, img) in images.iter().enumerate() {
+        if i > 0 { body_len += 1; }
+        body_len += 2;
+        for c in img.chars() {
+            match c {
+                '"' | '\\' => body_len += 2,
+                '\n' | '\r' => body_len += 2,
+                _ => body_len += c.len_utf8(),
+            }
+        }
+    }
+    body_len += 2; // ]}
+
+    let header = alloc::format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: keep-alive\r\n\r\n",
+        body_len
+    );
+    let _ = socket.write_all(header.as_bytes()).await;
+    let _ = socket.write_all(b"{\"images\":[").await;
+
+    for (i, img) in images.iter().enumerate() {
+        if i > 0 { let _ = socket.write_all(b",").await; }
+        let mut json_name = heapless::String::<{ BOOK_NAME_MAX + 10 }>::new();
+        json_name.push('"').ok();
+        for c in img.chars() {
+            match c {
+                '"' => { json_name.push_str("\\\"").ok(); }
+                '\\' => { json_name.push_str("\\\\").ok(); }
+                '\n' => { json_name.push_str("\\n").ok(); }
+                '\r' => { json_name.push_str("\\r").ok(); }
+                _ => { json_name.push(c).ok(); }
+            }
+        }
+        json_name.push('"').ok();
+        let _ = socket.write_all(json_name.as_bytes()).await;
+    }
+    let _ = socket.write_all(b"]}").await;
+}
+
+async fn handle_delete_image(socket: &mut TcpSocket<'_>, req: &httparse::Request<'_, '_>, header_str: &str) {
+    let body = match header_str.split_once("\r\n\r\n") {
+        Some((_, b)) => b,
+        None => { send_json(socket, b"{\"success\":false}").await; return; }
+    };
+    let name_encoded = body.strip_prefix("name=").unwrap_or("").trim_end_matches('&');
+    let image_name = match url_decode(name_encoded) {
+        Some(n) => n,
+        None => { send_json(socket, b"{\"success\":false,\"error\":\"invalid name\"}").await; return; }
+    };
+    println!("delete image: {}", image_name);
+
+    let mut sd_guard = SD_MOUNT.lock().await;
+    let Some(ref mut sd) = *sd_guard else {
+        send_json(socket, b"{\"success\":false,\"error\":\"SD not ready\"}").await;
+        return;
+    };
+    let mut volume0 = match sd.volume_manager.open_volume(embedded_sdmmc::VolumeIdx(0)) {
+        Ok(v) => v,
+        Err(_) => { send_json(socket, b"{\"success\":false,\"error\":\"open volume failed\"}").await; return; }
+    };
+    let mut root = match volume0.open_root_dir() {
+        Ok(r) => r,
+        Err(_) => { send_json(socket, b"{\"success\":false,\"error\":\"open root failed\"}").await; return; }
+    };
+    let mut images_dir = match root.open_dir("images") {
+        Ok(d) => d,
+        Err(_) => { send_json(socket, b"{\"success\":false,\"error\":\"open images dir failed\"}").await; return; }
+    };
+
+    let bmp_file_name = alloc::format!("{}.bmp", image_name);
+    if let Some(entry) = SdMount::find_entry_by_name(&mut images_dir, &bmp_file_name) {
+        let _ = images_dir.delete_file_in_dir(entry.name);
+        send_json(socket, b"{\"success\":true}").await;
+    } else {
+        send_json(socket, b"{\"success\":false,\"error\":\"image not found\"}").await;
+    }
+}
+
+async fn handle_upload_image(socket: &mut TcpSocket<'_>, req: &httparse::Request<'_, '_>, header_str: &str, header_data: &[u8]) {
+    let path = req.path.unwrap_or("");
+    let (mut file_name_encoded, mut chunk_index_str) = ("", "0");
+    if let Some(query) = path.split('?').nth(1) {
+        for param in query.split('&') {
+            if let Some(val) = param.strip_prefix("name=") {
+                file_name_encoded = val;
+            } else if let Some(val) = param.strip_prefix("chunk=") {
+                chunk_index_str = val;
+            }
+        }
+    }
+    let mut content_length: usize = 0;
+    for h in req.headers.iter() {
+        if h.name.eq_ignore_ascii_case("Content-Length") {
+            if let Ok(s) = from_utf8(h.value) {
+                content_length = s.trim().parse::<usize>().unwrap_or(0);
+            }
+        }
+    }
+    if file_name_encoded.is_empty() {
+        send_json(socket, b"{\"success\":false,\"error\":\"missing name\"}").await;
+        return;
+    }
+    let chunk_index: u32 = chunk_index_str.trim().parse().unwrap_or(0);
+    let file_name = match url_decode(file_name_encoded) {
+        Some(n) => n,
+        None => { send_json(socket, b"{\"success\":false,\"error\":\"invalid file name\"}").await; return; }
+    };
+    println!("upload image: {} chunk={} len={}", file_name, chunk_index, content_length);
+
+    let header_end = match header_str.find("\r\n\r\n") {
+        Some(pos) => pos + 4,
+        None => { send_json(socket, b"{\"success\":false}").await; return; }
+    };
+    let body_already_read = header_data.len().saturating_sub(header_end);
+
+    let mut sd_guard = SD_MOUNT.lock().await;
+    let Some(ref mut sd) = *sd_guard else {
+        send_json(socket, b"{\"success\":false,\"error\":\"SD not ready\"}").await;
+        return;
+    };
+
+    let mode = if chunk_index == 0 {
+        embedded_sdmmc::Mode::ReadWriteCreateOrTruncate
+    } else {
+        embedded_sdmmc::Mode::ReadWriteCreateOrAppend
+    };
+
+    let mut lfn_short_name: Option<embedded_sdmmc::ShortFileName> = None;
+    if chunk_index == 0 && !file_name.is_ascii() {
+        match SdMount::create_image_file_with_lfn(&mut sd.volume_manager, &file_name) {
+            Ok((short_name, _block, _offset)) => {
+                println!("Image LFN created: {} -> {}", file_name, short_name);
+                lfn_short_name = Some(short_name);
+            }
+            Err(_) => {
+                send_json(socket, b"{\"success\":false,\"error\":\"create image lfn failed\"}").await;
+                return;
+            }
+        }
+    }
+
+    let mut volume0 = match sd.volume_manager.open_volume(embedded_sdmmc::VolumeIdx(0)) {
+        Ok(v) => v,
+        Err(_) => { send_json(socket, b"{\"success\":false,\"error\":\"open volume failed\"}").await; return; }
+    };
+    let mut root = match volume0.open_root_dir() {
+        Ok(r) => r,
+        Err(_) => { send_json(socket, b"{\"success\":false,\"error\":\"open root failed\"}").await; return; }
+    };
+    let mut images_dir = match root.open_dir("images") {
+        Ok(d) => d,
+        Err(_) => { send_json(socket, b"{\"success\":false,\"error\":\"open images dir failed\"}").await; return; }
+    };
+
+    let mut file = if let Some(ref sn) = lfn_short_name {
+        match images_dir.open_file_in_dir(sn.clone(), mode) {
+            Ok(f) => f,
+            Err(e) => {
+                println!("open by short name failed: {:?}", e);
+                send_json(socket, b"{\"success\":false,\"error\":\"open file failed\"}").await;
+                return;
+            }
+        }
+    } else {
+        match SdMount::open_file_by_name(&mut images_dir, &file_name, mode) {
+            Ok(f) => f,
+            Err(_) => {
+                send_json(socket, b"{\"success\":false,\"error\":\"open file failed\"}").await;
+                return;
+            }
+        }
+    };
+
+    if body_already_read > 0 && content_length > 0 {
+        let write_len = body_already_read.min(content_length);
+        let _ = file.write(&header_data[header_end..header_end + write_len]);
+    }
+
+    let mut remaining = content_length.saturating_sub(body_already_read);
+    let mut body_buf = [0u8; 512];
+    while remaining > 0 {
+        let to_read = remaining.min(body_buf.len());
+        match socket.read(&mut body_buf[..to_read]).await {
+            Ok(len) => {
+                if len == 0 { break; }
+                let _ = file.write(&body_buf[..len]);
+                remaining -= len;
+            }
+            Err(e) => {
+                println!("image upload read error: {:?}", e);
+                break;
+            }
+        }
+    }
+
+    file.close();
+    drop(images_dir);
+    drop(root);
+    drop(volume0);
+    drop(sd_guard);
+
+    let body = alloc::format!("{{\"success\":true,\"chunk\":{}}}", chunk_index);
+    send_json(socket, body.as_bytes()).await;
+}
+
 async fn process_http(socket:&mut TcpSocket<'_>, header_data: &[u8]) {
     use embedded_io_async::Write;
 
@@ -175,11 +417,20 @@ async fn process_http(socket:&mut TcpSocket<'_>, header_data: &[u8]) {
         (Some("GET"), Some("/books")) => {
             handle_get_books(socket).await;
         }
+        (Some("GET"), Some("/images")) => {
+            handle_get_images(socket).await;
+        }
         (Some("POST"), Some("/delete")) => {
             handle_delete(socket, &req, header_str).await;
         }
+        (Some("POST"), Some("/delete_image")) => {
+            handle_delete_image(socket, &req, header_str).await;
+        }
         (Some("POST"), Some(path)) if path.starts_with("/upload?") => {
             handle_upload(socket, &req, header_str, header_data).await;
+        }
+        (Some("POST"), Some(path)) if path.starts_with("/upload_image?") => {
+            handle_upload_image(socket, &req, header_str, header_data).await;
         }
         (Some("GET"), Some("/")) | (Some("GET"), Some("/index.html")) => {
             let html = include_str!("../files/config.html");

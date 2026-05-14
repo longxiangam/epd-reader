@@ -809,7 +809,13 @@ impl Page for ReadPage{
                         Ok(mut root) => {
                             let books_dir_res = root.open_dir("books");
                             if let Ok(mut books_dir) = books_dir_res {
-                                let books = SdMount::get_books(&mut books_dir).unwrap();
+                                let books = match SdMount::get_books(&mut books_dir) {
+                                    Ok(b) => b,
+                                    Err(e) => {
+                                        println!("get_books error: {:?}", e);
+                                        Vec::new()
+                                    }
+                                };
                                 self.menus = Some(books);
                                 self.load_book_progress(&mut books_dir);
 
@@ -952,6 +958,14 @@ impl Page for ReadPage{
                                         to_sleep_tips(Duration::from_secs(0), Duration::from_secs(read_sleep_seconds),true).await;
                                     }
 
+                                    Timer::after_millis(50).await;
+                                }
+                            } else {
+                                println!("books dir not found");
+                                self.menus = Some(Vec::new());
+                                loop {
+                                    if !self.running { break; }
+                                    self.render().await;
                                     Timer::after_millis(50).await;
                                 }
                             }

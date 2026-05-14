@@ -225,16 +225,24 @@ pub async fn show_sleep() {
         if let Some(r) = renderer {
             r(display);
         } else {
-            let font: FontRenderer = FontRenderer::new::<fonts::u8g2_font_wqy15_t_gb2312>();
-            let mut font = font.with_ignore_unknown_chars(true);
-            let _ = font.render_aligned(
-                "睡眠中",
-                Point::new(10, 10),
-                VerticalPosition::Center,
-                HorizontalAlignment::Left,
-                FontColor::Transparent(Black),
-                display,
-            );
+            display.set_rotation(DisplayRotation::Rotate90);//默认的都竖向显示图片
+            display.clear_buffer(Color::White);
+            let drawn = crate::flash_sleep::draw_sleep_image(display);
+            if !drawn {
+                let font: FontRenderer = FontRenderer::new::<fonts::u8g2_font_wqy15_t_gb2312>();
+                let mut font = font.with_ignore_unknown_chars(true);
+                let _ = font.render_aligned(
+                    "睡眠中",
+                    Point::new(
+                        display.bounding_box().size.width as i32 / 2,
+                        display.bounding_box().size.height as i32 / 2,
+                    ),
+                    VerticalPosition::Center,
+                    HorizontalAlignment::Center,
+                    FontColor::Transparent(Black),
+                    display,
+                );
+            }
         }
         RENDER_CHANNEL.send(RenderInfo { time: 0,need_sleep:true }).await;
         Timer::after_secs(1).await;

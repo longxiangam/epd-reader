@@ -227,8 +227,8 @@ async fn judge_adc_num() -> usize{
         }
     }
     let avg = adc_valute_sum / 20;
-    
-    let temp = if avg < 400 {
+    println!("btn avg:{:?}",avg);
+    let temp = if avg < 200 {
         2
     } else {
         3

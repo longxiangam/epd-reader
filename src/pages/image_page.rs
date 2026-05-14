@@ -32,7 +32,8 @@ const VIS_H: u32 = PHYS_W; // 400
 // Max source row buffer on stack (supports up to 512px wide at 32bpp)
 const SRC_ROW_BUF: usize = 2048;
 
-const IMAGE_MENU_ITEMS: &[&str] = &["设置为壁纸", "返回列表"];
+const IMAGE_MENU_ITEMS: &[&str] = &["返回列表", "设置为壁纸"];
+const LIST_EXIT_LABEL: &str = "退出";
 
 enum ImageMenuState {
     Closed,
@@ -66,6 +67,14 @@ fn read_exact(file: &mut crate::sd_mount::ActualFile, buf: &mut [u8]) -> bool {
 impl ImagePage {
     async fn back(&mut self) {
         self.running = false;
+    }
+
+    /// Get the actual image index (0-based in menus), accounting for "退出" at index 0.
+    /// Returns None if choose_index points to "退出" or is out of range.
+    fn image_index(&self) -> Option<usize> {
+        if self.choose_index == 0 { return None; }
+        let idx = (self.choose_index - 1) as usize;
+        self.menus.as_ref().and_then(|m| if idx < m.len() { Some(idx) } else { None })
     }
 
     /// Convert one BMP source row to packed 1-bit and write directly into the
@@ -129,38 +138,41 @@ impl ImagePage {
         }
     }
 
-    /// Stream-read BMP from SD and draw directly to display buffer.
+    /// Stream-read BMP from SD and draw directly into the provided buffer.
+    /// Caller must ensure buf is filled with 0xFF (white) before calling.
     /// Returns false on failure.
-    fn draw_image_to_display(&mut self, images_dir: &mut ActualDirectory<'_>) -> bool {
-        let image_name = match self.menus.as_ref() {
-            Some(m) if !m.is_empty() && (self.choose_index as usize) < m.len() => {
-                m[self.choose_index as usize].clone()
-            }
-            _ => return false,
+    fn draw_image_to_buffer(&mut self, buf: &mut [u8], images_dir: &mut ActualDirectory<'_>) -> bool {
+        let image_name = match self.image_index().and_then(|i| self.menus.as_ref().map(|m| m[i].clone())) {
+            Some(n) => n,
+            None => return false,
         };
 
         let file_name = format!("{}.bmp", image_name);
+        println!("[img] opening: {}", file_name);
         let file_result = SdMount::open_file_by_name(images_dir, &file_name, embedded_sdmmc::Mode::ReadOnly);
         let mut file = match file_result {
             Ok(f) => f,
-            Err(e) => { println!("image open error: {:?}", e); return false; }
+            Err(e) => { println!("[img] open error: {:?}", e); return false; }
         };
 
         // Read BMP header
         let mut hdr = [0u8; 54];
         if !read_exact(&mut file, &mut hdr) {
-            println!("image header read failed");
+            println!("[img] header read failed");
             file.close();
             return false;
         }
+        println!("[img] header read ok");
 
         let info = match crate::flash_sleep::BmpInfo::parse(&hdr) {
             Some(i) => i,
-            None => { println!("invalid BMP header"); file.close(); return false; }
+            None => { println!("[img] invalid BMP header"); file.close(); return false; }
         };
+        println!("[img] BMP {}x{} bpp={} offset={} stride={} top_down={}",
+            info.bmp_w, info.bmp_h, info.bpp, info.pixel_offset, info.src_row_stride, info.top_down);
 
         if info.src_row_stride > SRC_ROW_BUF {
-            println!("BMP row too wide: {} bytes", info.src_row_stride);
+            println!("[img] row too wide: {} bytes", info.src_row_stride);
             file.close();
             return false;
         }
@@ -169,33 +181,27 @@ impl ImagePage {
         let hdr_end = 54;
         if info.pixel_offset > hdr_end {
             let skip = info.pixel_offset - hdr_end;
+            println!("[img] skipping {} bytes to pixel data", skip);
             let mut skip_buf = [0u8; 512];
             let mut remaining = skip;
             while remaining > 0 {
                 let to_read = remaining.min(skip_buf.len());
                 if !read_exact(&mut file, &mut skip_buf[..to_read]) {
+                    println!("[img] skip read failed");
                     file.close();
                     return false;
                 }
                 remaining -= to_read;
             }
         }
+        println!("[img] pixel data ready, reading rows...");
 
-        // Get display buffer and fill with white
-        let display = match display_mut() {
-            Some(d) => d,
-            None => { file.close(); return false; }
-        };
-        display.clear_buffer(Color::White);
-        let buf = display.get_mut_buffer();
-
-        // Track which visual rows have been written
-        // (multiple source rows can map to same visual row due to scaling)
         let mut row_buf = [0u8; SRC_ROW_BUF];
 
         // Read source rows sequentially and draw
         for src_row_idx in 0..info.bmp_h {
             if !read_exact(&mut file, &mut row_buf[..info.src_row_stride]) {
+                println!("[img] row {} read failed, stopping", src_row_idx);
                 break;
             }
 
@@ -207,19 +213,61 @@ impl ImagePage {
                     Self::write_visual_row(buf, dy, &row_buf[..info.src_row_stride], &info);
                 }
             }
+
+            if src_row_idx % 100 == 0 {
+                println!("[img] row {}/{}", src_row_idx, info.bmp_h);
+            }
         }
 
+        println!("[img] done, closing file");
         file.close();
         true
     }
 
+    /// Show "处理中..." on screen, render it, then save wallpaper.
+    async fn save_wallpaper_with_prompt(&mut self, images_dir: &mut ActualDirectory<'_>) {
+        // Show processing indicator
+        if let Some(display) = display_mut() {
+            let _ = display.clear_buffer(Color::White);
+            let font = FontRenderer::new::<fonts::u8g2_font_wqy15_t_gb2312>();
+            let _ = font.render_aligned(
+                "处理中...",
+                Point::new(VIS_W as i32 / 2, VIS_H as i32 / 2),
+                VerticalPosition::Center,
+                HorizontalAlignment::Center,
+                FontColor::Transparent(Black),
+                display,
+            );
+        }
+        RENDER_CHANNEL.send(RenderInfo { time: 0, need_sleep: false }).await;
+        Timer::after(Duration::from_millis(500)).await;
+
+        self.save_wallpaper(images_dir).await;
+
+        // Show result
+        if let Some(display) = display_mut() {
+            let _ = display.clear_buffer(Color::White);
+            let msg = self.status_msg.unwrap_or("壁纸设置失败");
+            let font = FontRenderer::new::<fonts::u8g2_font_wqy15_t_gb2312>();
+            let _ = font.render_aligned(
+                msg,
+                Point::new(VIS_W as i32 / 2, VIS_H as i32 / 2),
+                VerticalPosition::Center,
+                HorizontalAlignment::Center,
+                FontColor::Transparent(Black),
+                display,
+            );
+        }
+        RENDER_CHANNEL.send(RenderInfo { time: 0, need_sleep: false }).await;
+        Timer::after(Duration::from_millis(1500)).await;
+        self.status_msg = None;
+    }
+
     /// Save current image as wallpaper by re-reading from SD and writing to flash row by row.
     async fn save_wallpaper(&mut self, images_dir: &mut ActualDirectory<'_>) {
-        let image_name = match self.menus.as_ref() {
-            Some(m) if !m.is_empty() && (self.choose_index as usize) < m.len() => {
-                m[self.choose_index as usize].clone()
-            }
-            _ => { self.status_msg = Some("壁纸设置失败"); return; }
+        let image_name = match self.image_index().and_then(|i| self.menus.as_ref().map(|m| m[i].clone())) {
+            Some(n) => n,
+            None => { self.status_msg = Some("壁纸设置失败"); return; }
         };
 
         let file_name = format!("{}.bmp", image_name);
@@ -311,8 +359,9 @@ impl ImagePage {
     }
 }
 
-/// Sleep renderer: no-op, display buffer already has the image.
-fn image_sleep_renderer(_display: &mut crate::display::EpdDisplay) {}
+fn image_sleep_renderer(display: &mut crate::display::EpdDisplay) {
+    //保持图片不绘制
+}
 
 impl Page for ImagePage {
     fn new() -> Self {
@@ -365,7 +414,7 @@ impl Page for ImagePage {
                                         // Handle wallpaper save
                                         if self.save_wallpaper_flag {
                                             self.save_wallpaper_flag = false;
-                                            self.save_wallpaper(&mut images_dir).await;
+                                            self.save_wallpaper_with_prompt(&mut images_dir).await;
                                             self.viewing = false;
                                             self.menu_state = ImageMenuState::Closed;
                                             self.need_render = true;
@@ -375,6 +424,7 @@ impl Page for ImagePage {
                                             self.need_render = false;
 
                                             if self.viewing && self.loading {
+                                                println!("[img] showing loading screen");
                                                 // First pass: show loading indicator
                                                 if let Some(display) = display_mut() {
                                                     let _ = display.clear_buffer(Color::White);
@@ -397,8 +447,13 @@ impl Page for ImagePage {
 
                                             if let Some(display) = display_mut() {
                                                 if self.viewing {
-                                                    // Stream BMP to display buffer
-                                                    if !self.draw_image_to_display(&mut images_dir) {
+                                                    println!("[img] begin draw_image_to_buffer");
+                                                    let ok = {
+                                                        display.clear_buffer(Color::White);
+                                                        let buf = display.get_mut_buffer();
+                                                        self.draw_image_to_buffer(buf, &mut images_dir)
+                                                    };
+                                                    if !ok {
                                                         let _ = display.clear_buffer(Color::White);
                                                         let font = FontRenderer::new::<fonts::u8g2_font_wqy15_t_gb2312>();
                                                         let _ = font.render_aligned(
@@ -430,6 +485,7 @@ impl Page for ImagePage {
                                                             );
                                                         } else {
                                                             let mut all_items: Vec<&str, 20> = Vec::new();
+                                                            let _ = all_items.push(LIST_EXIT_LABEL);
                                                             for item in menus.iter() {
                                                                 if all_items.push(item.as_str()).is_err() { break; }
                                                             }
@@ -455,14 +511,19 @@ impl Page for ImagePage {
                                                     }
                                                 }
                                                 RENDER_CHANNEL.send(RenderInfo { time: 0, need_sleep: true }).await;
+                                                println!("[img] render sent");
+                                                refresh_active_time().await;
                                             }
                                         }
 
+                                        //保持图片显示
                                         if self.viewing {
-                                            to_sleep_tips(Duration::from_secs(0), Duration::from_secs(3), true).await;
-                                        } else {
-                                            Timer::after(Duration::from_millis(50)).await;
+                                            display::set_sleep_renderer(Some(image_sleep_renderer));
+                                        }else{
+                                            display::set_sleep_renderer(None);
                                         }
+                                        to_sleep_tips(Duration::from_secs(0), Duration::from_secs(20), true).await;
+                                        Timer::after(Duration::from_millis(100)).await;
                                     }
                                 }
                                 Err(e) => {
@@ -518,19 +579,21 @@ impl Page for ImagePage {
                 refresh_active_time().await;
                 match r.menu_state {
                     ImageMenuState::Popup { menu_index } => match menu_index {
-                        0 => { r.save_wallpaper_flag = true; }
-                        _ => {
+                        0 => {
                             r.viewing = false;
                             r.menu_state = ImageMenuState::Closed;
                             r.need_render = true;
                         }
+                        _ => { r.save_wallpaper_flag = true; }
                     },
                     ImageMenuState::Closed => {
                         if r.viewing {
                             r.menu_state = ImageMenuState::Popup { menu_index: 0 };
                             r.need_render = true;
                         } else if let Some(ref menus) = r.menus {
-                            if !menus.is_empty() {
+                            if r.choose_index == 0 {
+                                r.back().await;
+                            } else if (r.choose_index as usize) <= menus.len() {
                                 r.viewing = true;
                                 r.loading = true;
                                 r.menu_state = ImageMenuState::Closed;
@@ -547,12 +610,21 @@ impl Page for ImagePage {
             Box::pin(async move {
                 let r: &mut Self = Self::mut_by_ptr(info.ptr).unwrap();
                 refresh_active_time().await;
-                if !r.viewing {
-                    let max = r.menus.as_ref().map(|m| m.len()).unwrap_or(0);
-                    if max > 0 && r.choose_index < (max - 1) as u32 {
-                        r.choose_index += 1;
-                        r.need_render = true;
+                match r.menu_state {
+                    ImageMenuState::Popup { ref mut menu_index } => {
+                        if *menu_index < (IMAGE_MENU_ITEMS.len() - 1) as u32 {
+                            *menu_index += 1;
+                            r.need_render = true;
+                        }
                     }
+                    ImageMenuState::Closed if !r.viewing => {
+                        let max = r.menus.as_ref().map(|m| m.len() + 1).unwrap_or(1);
+                        if r.choose_index < (max - 1) as u32 {
+                            r.choose_index += 1;
+                            r.need_render = true;
+                        }
+                    }
+                    _ => {}
                 }
             })
         }).await;
@@ -567,8 +639,8 @@ impl Page for ImagePage {
                         Timer::after_millis(200).await;
                     }
                     ImageMenuState::Closed if !r.viewing => {
-                        let max = r.menus.as_ref().map(|m| m.len()).unwrap_or(0);
-                        if max > 0 && r.choose_index < (max - 1) as u32 {
+                        let max = r.menus.as_ref().map(|m| m.len() + 1).unwrap_or(1);
+                        if r.choose_index < (max - 1) as u32 {
                             r.choose_index += 1;
                             r.need_render = true;
                         }
@@ -584,9 +656,20 @@ impl Page for ImagePage {
             Box::pin(async move {
                 let r: &mut Self = Self::mut_by_ptr(info.ptr).unwrap();
                 refresh_active_time().await;
-                if !r.viewing && r.choose_index > 0 {
-                    r.choose_index -= 1;
-                    r.need_render = true;
+                match r.menu_state {
+                    ImageMenuState::Popup { ref mut menu_index } => {
+                        if *menu_index > 0 {
+                            *menu_index -= 1;
+                            r.need_render = true;
+                        }
+                    }
+                    ImageMenuState::Closed if !r.viewing => {
+                        if r.choose_index > 0 {
+                            r.choose_index -= 1;
+                            r.need_render = true;
+                        }
+                    }
+                    _ => {}
                 }
             })
         }).await;
