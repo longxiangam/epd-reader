@@ -4,8 +4,8 @@ use dhcparse::dhcpv4::{Addr, DhcpOption, Encode, Encoder, Message};
 use dhcparse::v4_options;
 use embassy_executor::Spawner;
 use embassy_futures::select::{Either, select};
-use embassy_net::{Config, IpEndpoint, Ipv4Address, Ipv4Cidr, Stack, StackResources, StaticConfigV4};
-use embassy_net::udp::UdpSocket;
+use embassy_net::{Config, Ipv4Address, Ipv4Cidr, Stack, StackResources, StaticConfigV4};
+use embassy_net::udp::{UdpSocket, UdpMetadata};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::mutex::Mutex;
 use embassy_sync::signal::Signal;
@@ -83,7 +83,7 @@ pub static WIFI_MODEL:Mutex<CriticalSectionRawMutex,Option<WifiModel>> = Mutex::
 
 pub async fn connect_wifi(spawner: &Spawner,
                           rng: Rng,
-                          wifi: esp_hal::peripherals::WIFI<'_>,
+                          wifi: esp_hal::peripherals::WIFI<'static>,
     ) -> Result<&'static Stack<'static>, WifiNetError> {
     println!("wait init wifi");
     REINIT_WIFI_SIGNAL.wait().await;
@@ -122,9 +122,10 @@ pub async fn connect_wifi(spawner: &Spawner,
 
     refresh_last_time().await;
 
-    spawner.spawn(net_task(runner));
+    spawner.spawn(net_task(runner).unwrap());
     spawner.spawn(connection_wifi(controller).unwrap());
-    spawner.spawn(do_stop());
+    spawner.spawn(do_stop().unwrap());
+    let _ = spawner;
     loop {
         println!("Waiting is_link_up...");
         if stack.is_link_up() {
@@ -164,14 +165,14 @@ async fn connection_wifi(mut controller: WifiController<'static>) {
             WIFI_STATE.lock().await.replace(WifiNetState::WifiConnected);
 
             // Wait for either disconnect or stop signal
-            let mut subscriber = controller.subscribe().unwrap();
-            let close_signal = STOP_WIFI_SIGNAL.wait();
-
             // Poll for disconnect event or stop signal
             loop {
-                match select(subscriber.next_message(), close_signal).await {
+                let mut subscriber = controller.subscribe().unwrap();
+                let close_signal = STOP_WIFI_SIGNAL.wait();
+                match select(subscriber.next_event_pure(), close_signal).await {
                     Either::First(_) => {
                         // Check if we got a disconnect
+                        drop(subscriber);
                         if !controller.is_connected() {
                             WIFI_STATE.lock().await.replace(WifiNetState::WifiDisconnected);
                             Timer::after(Duration::from_millis(1000)).await;
@@ -180,6 +181,7 @@ async fn connection_wifi(mut controller: WifiController<'static>) {
                         }
                     }
                     Either::Second(_) => {
+                        drop(subscriber);
                         STOP_WIFI_SIGNAL.reset();
                         let _ = controller.disconnect_async().await;
                         println!("wifi close...");
@@ -363,7 +365,7 @@ pub async fn force_stop_wifi(){
 /// AP mode
 pub async fn start_wifi_ap(spawner: &Spawner,
                            rng: Rng,
-                           wifi: esp_hal::peripherals::WIFI<'_>,
+                           wifi: esp_hal::peripherals::WIFI<'static>,
     ) -> Result<&'static Stack<'static>, WifiNetError> {
 
     HAL_RNG.lock().await.replace(rng);
@@ -398,10 +400,11 @@ pub async fn start_wifi_ap(spawner: &Spawner,
     );
     let ap_stack: &Stack<'static> = &*make_static!(ap_stack);
 
-    spawner.spawn(ap_task(runner));
-    spawner.spawn(dhcp_service());
-    spawner.spawn(dns_service());
+    spawner.spawn(ap_task(runner).unwrap());
+    spawner.spawn(dhcp_service().unwrap());
+    spawner.spawn(dns_service().unwrap());
     spawner.spawn(connection_wifi_ap(controller).unwrap());
+    let _ = spawner;
 
     loop {
         println!("Waiting is_link_up...");
@@ -454,7 +457,7 @@ async fn connection_wifi_ap(mut controller: WifiController<'static>) {
         if controller.is_connected() {
             // AP is running, wait for stop event
             let mut subscriber = controller.subscribe().unwrap();
-            subscriber.next_message().await;
+            subscriber.next_event_pure().await;
             if !controller.is_connected() {
                 println!("AP stopped, restarting...");
             }
@@ -528,7 +531,7 @@ async fn dhcp_service(){
     }
 }
 
-async fn send_dhcp_offer(udp_socket: &UdpSocket<'_>, src_addr: IpEndpoint, receive_msg: &Message<[u8; 512]>) {
+async fn send_dhcp_offer(udp_socket: &UdpSocket<'_>, src_addr: UdpMetadata, receive_msg: &Message<[u8; 512]>) {
     println!("send_dhcp_offer") ;
     let router_ip:&Addr = (&[192u8,168,2,1][..]).try_into().unwrap();
     let submask:&Addr = (&[255u8,255,255,0][..]).try_into().unwrap();
@@ -564,10 +567,10 @@ async fn send_dhcp_offer(udp_socket: &UdpSocket<'_>, src_addr: IpEndpoint, recei
 
 
     let broadcast = ( Ipv4Address::BROADCAST,68);
-    udp_socket.send_to(&offer_message, broadcast).await;
+    let _ = udp_socket.send_to(&offer_message, broadcast).await;
 }
 
-async fn send_dhcp_ack(udp_socket: & UdpSocket<'_>, src_addr: IpEndpoint, receive_msg: &Message<[u8; 512]>) {
+async fn send_dhcp_ack(udp_socket: & UdpSocket<'_>, src_addr: UdpMetadata, receive_msg: &Message<[u8; 512]>) {
     println!("send_dhcp_ack") ;
     let router_ip:&Addr = (&[192u8,168,2,1][..]).try_into().unwrap();
     let submask:&Addr = (&[255u8,255,255,0][..]).try_into().unwrap();
@@ -601,7 +604,7 @@ async fn send_dhcp_ack(udp_socket: & UdpSocket<'_>, src_addr: IpEndpoint, receiv
     println!("{:?}",&offer_message);
 
     let broadcast = ( Ipv4Address::BROADCAST,68);
-    udp_socket.send_to(&offer_message, broadcast).await;
+    let _ = udp_socket.send_to(&offer_message, broadcast).await;
 }
 
 //DNS劫持服务
@@ -641,7 +644,7 @@ async fn dns_service(){
                             println!("Dns Received:{:?} ", buf );
 
                             let response = create_dns_response(LOCAL_IP,&buf[..n]);
-                            udp_socket.send_to(&response, src).await.expect("发送数据失败");
+                            let _ = udp_socket.send_to(&response, src).await;
                         }
                         Err(e) => {
                             println!("Failed to receive UDP packet: {:?}", e);

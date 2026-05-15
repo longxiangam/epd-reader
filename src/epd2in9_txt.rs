@@ -25,7 +25,7 @@ use u8g2_fonts::types::FontColor;
 use u8g2_fonts::types::HorizontalAlignment;
 use crate::epd2in9_txt::CharType::{Ascii, Other, Tail, Zh};
 use crate::pages::read_page::PAGE_INDEX;
-use crate::sd_mount::{ActualDirectory, TimeSource};
+use crate::sd_mount::{ActualDirectory, ActualFile, TimeSource};
 
 #[cfg(feature = "epd2in9")]
 const LINES_NUM:u32 = 7;//行数
@@ -52,8 +52,8 @@ pub struct TxtReader;
 const ZH_WIDTH:u32 = 16;
 const LINE_OVERFLOW:u32 = 8;
 
-type SpiDevice<'a> = CriticalSectionDevice<'a, CsMutex<RefCell<Spi<'a, esp_hal::Blocking>>>, Output<'a>, embedded_hal_bus::spi::NoDelay>;
-type FileObject<'a,'b> = File<'b, SdCard<SpiDevice<'a>, Delay>, TimeSource, 4, 4, 1>;
+type SpiDevice<'a> = CriticalSectionDevice<'a, Spi<'a, esp_hal::Blocking>, Output<'a>, embedded_hal_bus::spi::NoDelay>;
+type FileObject<'a,'b> = ActualFile<'b>;
 impl TxtReader {
      pub async fn generate_pages<F>(books_dir:&mut ActualDirectory<'_>,book_name:&str, book_short_name:&ShortFileName, display_width:u32, display_lines:u32, mut process: F) ->Option<BookPages>
      where F:FnMut(f32) -> (Pin<Box<dyn Future<Output=()>>>)

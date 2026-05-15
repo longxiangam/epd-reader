@@ -1,7 +1,7 @@
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::mutex::Mutex;
 use embassy_time::{ Duration, Instant};
-use esp_hal::gpio::Output;
+use esp_hal::gpio::{Output, RtcPinWithResistors};
 use esp_hal::ram;
 use esp_hal::rtc_cntl::sleep::{RtcioWakeupSource, TimerWakeupSource, WakeSource, WakeupLevel};
 use esp_println::println;
@@ -12,7 +12,7 @@ use crate::worldtime::save_time_to_rtc;
 
 pub static RTC_MANGE:Mutex<CriticalSectionRawMutex,Option<esp_hal::rtc_cntl::Rtc<'static>>> = Mutex::new(None);
 pub static LAST_ACTIVE_TIME:Mutex<CriticalSectionRawMutex,Instant> = Mutex::new(Instant::MAX);
-static mut WAKEUP_PINS: Vec<(&'static mut dyn esp_hal::gpio::RtcPin, WakeupLevel), 5> = Vec::new();
+static mut WAKEUP_PINS: Vec<(&'static mut dyn RtcPinWithResistors, WakeupLevel), 5> = Vec::new();
 
 pub static EINK_PWER_PIN: Mutex<CriticalSectionRawMutex, Option<Output<'static>>> = Mutex::new(None);
 pub static SD_PWER_PIN: Mutex<CriticalSectionRawMutex, Option<Output<'static>>> = Mutex::new(None);
@@ -35,10 +35,8 @@ pub async fn to_sleep_tips(sleep_time:Duration, idle_time:Duration, show_sleep:b
     if Instant::now().duration_since(*LAST_ACTIVE_TIME.lock().await) > idle_time  {
         force_stop_wifi().await;
 
-        let wakeup_pins: &mut [(&mut dyn esp_hal::gpio::RtcPin, WakeupLevel)] = unsafe {
-            (*core::ptr::addr_of_mut!(WAKEUP_PINS)).as_mut()
-        };
-        let rtcio = RtcioWakeupSource::new(wakeup_pins);
+        let wakeup_pins = unsafe { core::ptr::addr_of_mut!(WAKEUP_PINS).as_mut().unwrap() };
+        let rtcio = RtcioWakeupSource::new(wakeup_pins.as_mut_slice());
 
         let mut wakeup_source = TimerWakeupSource::new(core::time::Duration::from_micros(sleep_time.as_micros()));
 
@@ -70,7 +68,7 @@ pub async fn get_sleep_ms()->u64{
     get_rtc_ms().await - unsafe { *core::ptr::addr_of!(WHEN_SLEEP_RTC_MS) }
 }
 
-pub async fn add_rtcio(rtcpin: &'static mut dyn esp_hal::gpio::RtcPin, wakeup_level: WakeupLevel){
+pub async fn add_rtcio(rtcpin: &'static mut dyn RtcPinWithResistors, wakeup_level: WakeupLevel){
     unsafe {
         (*core::ptr::addr_of_mut!(WAKEUP_PINS)).push((rtcpin, wakeup_level));
     }

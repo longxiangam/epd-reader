@@ -102,7 +102,7 @@ esp_bootloader_esp_idf::esp_app_desc!();
 
 #[esp_rtos::main]
 async fn main(spawner: Spawner) -> ! {
-    esp_alloc::heap_allocator!(size: 38 * 1024);
+    esp_alloc::heap_allocator!(size: 80 * 1024);
 
     println!("entry");
     let config = HalConfig::default().with_cpu_clock(CpuClock::max());
@@ -163,12 +163,12 @@ async fn main(spawner: Spawner) -> ! {
 
     // Keys
     let key1 = peripherals.GPIO9;
-    let key2 = peripherals.GPIO2;
 
     // ADC setup
     let mut adc1_config = AdcConfig::new();
     let adc_pin = unsafe { peripherals.GPIO2.clone_unchecked() };
     let rtc_pin = unsafe { peripherals.GPIO2.clone_unchecked() };
+    let key2 = peripherals.GPIO2;
     let mut adc1_pin = adc1_config.enable_pin_with_cal::<_, AdcCalCurve<esp_hal::peripherals::ADC1>>(adc_pin, Attenuation::_11dB);
     let bat_adc1_pin = adc1_config.enable_pin_with_cal::<_, AdcCalCurve<esp_hal::peripherals::ADC1>>(peripherals.GPIO4, Attenuation::_11dB);
 

@@ -60,7 +60,7 @@ pub fn set_sleep_renderer(renderer: Option<fn(&mut EpdDisplay)>) {
 pub static RENDER_CHANNEL: Channel<CriticalSectionRawMutex, RenderInfo, 64> = Channel::new();
 pub static QUICKLY_LUT_CHANNEL: Channel<CriticalSectionRawMutex, bool, 64> = Channel::new();
 
-type ActualSpi<'a> = CriticalSectionDevice<'a, CsMutex<RefCell<Spi<'static, esp_hal::Blocking>>>, Output<'a>, embedded_hal_bus::spi::NoDelay>;
+type ActualSpi<'a> = CriticalSectionDevice<'a, Spi<'a, esp_hal::Blocking>, Output<'a>, embedded_hal_bus::spi::NoDelay>;
 
 #[embassy_executor::task]
 pub async fn render(
@@ -168,7 +168,7 @@ pub fn set_refresh_mode< BUSY, DC, RST > (mode:RefreshLut, epd:&mut EpdControl<&
 where BUSY: embedded_hal::digital::InputPin, DC: embedded_hal::digital::OutputPin,  RST: embedded_hal::digital::OutputPin
 {
     #[cfg(feature = "epd2in9")]
-    epd.set_lut( spi_device, Some(mode));
+    epd.set_lut( &mut spi_device, Some(mode));
 
     #[cfg(feature = "epd4in2")]
     {

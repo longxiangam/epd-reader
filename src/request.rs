@@ -7,7 +7,7 @@ use embassy_net::tcp::{ConnectError, TcpSocket};
 use embedded_tls::{Aes128GcmSha256, TlsConfig, TlsConnection, TlsContext, TlsError, UnsecureProvider};
 use esp_println::println;
 use reqwless::Error;
-use reqwless::request::{Method, Request};
+use reqwless::request::{Method, Request, RequestBuilder};
 use reqwless::response::Response;
 use crate::random::RngWrapper;
 
@@ -75,6 +75,8 @@ impl RequestClient{
         if let Some(rest) = url.strip_prefix("https://") {
             println!("Rest: {rest}");
             let (host_and_port, path) = rest.split_once('/').unwrap_or((rest, ""));
+            let path = if path.is_empty() { "/" } else { path };
+            let path = if path.starts_with('/') { path } else { alloc::format!("/{}", path).leak() };
             println!("Host and port: {host_and_port}, path: {path}");
             let (host, port) = host_and_port
                 .split_once(':')
@@ -85,6 +87,8 @@ impl RequestClient{
         } else if let Some(rest) = url.strip_prefix("http://") {
             println!("Rest: {rest}");
             let (host_and_port, path) = rest.split_once('/').unwrap_or((rest, ""));
+            let path = if path.is_empty() { "/" } else { path };
+            let path = if path.starts_with('/') { path } else { alloc::format!("/{}", path).leak() };
             println!("Host and port: {host_and_port}, path: {path}");
             let (host, port) = host_and_port
                 .split_once(':')
@@ -112,14 +116,14 @@ impl RequestClient{
         let remote_endpoint = (ip_address, port);
 
         println!("Create TCP socket");
-        let mut socket = TcpSocket::new(self.stack, &mut self.rx_buffer, &mut self.tx_buffer);
+        let mut socket = TcpSocket::new(*self.stack, &mut self.rx_buffer, &mut self.tx_buffer);
         socket.set_timeout(Some(embassy_time::Duration::from_secs(10)));
 
         println!("Connect to HTTP server");
         socket.connect(remote_endpoint).await?;
         println!("Connected to HTTP server");
 
-        let mut request = Request::get(url).host(host).build();
+        let mut request = Request::get(path).host(host).build();
 
         request.write_header(&mut socket).await?;
 
@@ -152,7 +156,7 @@ impl RequestClient{
         let ip_address = self.resolve(host).await?;
         let remote_endpoint = (ip_address, port);
 
-        let mut socket = TcpSocket::new(self.stack, &mut self.rx_buffer, &mut self.tx_buffer);
+        let mut socket = TcpSocket::new(*self.stack, &mut self.rx_buffer, &mut self.tx_buffer);
         socket.set_timeout(Some(embassy_time::Duration::from_secs(10)));
 
         println!("Connect to HTTP server");
@@ -174,7 +178,7 @@ impl RequestClient{
             .await?;
         println!("TLS handshake succeeded");
 
-        let request = Request::get(url).host(host).build();
+        let request = Request::get(path).host(host).build();
         request.write_header(&mut tls).await?;
 
         let mut headers_buf = vec![0u8; 1024];

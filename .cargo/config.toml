@@ -6,7 +6,6 @@ runner = "espflash flash --chip  esp32c3 --baud 115200 --monitor --partition-tab
 [build]
 rustflags = [
   "-C", "link-arg=-Tlinkall.x",
-  "-C", "link-arg=-Trom_functions.x",
   "-C", "force-frame-pointers",
 ]
 #"--cfg", "portable_atomic_unsafe_assume_single_core"

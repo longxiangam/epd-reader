@@ -32,8 +32,8 @@ impl embedded_sdmmc::TimeSource for TimeSource {
     }
 }
 pub type SdCsPin = Output<'static>;
-pub type ActualSpi = CriticalSectionDevice<'static, CsMutex<RefCell<Spi<'static, esp_hal::Blocking>>>, SdCsPin, embedded_hal_bus::spi::NoDelay>;
-pub type ActualSdCard = SdCard<ActualSpi, Delay>;
+pub type ActualSpi = CriticalSectionDevice<'static, Spi<'static, esp_hal::Blocking>, SdCsPin, embedded_hal_bus::spi::NoDelay>;
+pub type ActualSdCard = SdCard<&'static mut ActualSpi, Delay>;
 pub type ActualVolumeManager = VolumeManager<ActualSdCard, TimeSource>;
 pub type ActualVolume<'a> = Volume<'a,ActualSdCard, TimeSource,4,4,1>;
 pub type ActualDirectory<'a> = Directory<'a,ActualSdCard, TimeSource,4,4,1>;

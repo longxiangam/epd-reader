@@ -142,7 +142,10 @@ impl<'a> NtpUdpSocket for NtpSocket<'a> {
     ) -> impl core::future::Future<Output = sntpc::Result<(usize, SocketAddr)>> {
         async move {
             match self.sock.recv_from(buf).await {
-                Ok((size, ip_endpoint)) => Ok((size, emb_endpoint_to_sock_addr(ip_endpoint))),
+                Ok((size, meta)) => {
+                    let addr = emb_endpoint_to_sock_addr(meta.endpoint);
+                    Ok((size, addr))
+                }
                 Err(_) => panic!("not exp"),
             }
         }
@@ -244,7 +247,7 @@ pub async fn ntp_request(
         let mut tx_meta = [PacketMetadata::EMPTY; 16];
 
         let mut socket = UdpSocket::new(
-            stack,
+            *stack,
             &mut rx_meta,
             &mut rx_buffer,
             &mut tx_meta,
@@ -322,12 +325,14 @@ pub async fn ntp_worker() {
         core::ptr::addr_of_mut!(CLOCK).write(Some(clock));
     }
     unsafe {
-        if *core::ptr::addr_of!(WHEN_SLEEP_TIME_TIMESTAMP) > 0 {
-            let current_second = *core::ptr::addr_of!(WHEN_SLEEP_TIME_TIMESTAMP) + get_sleep_ms().await / 1000;
-            let now =
-                OffsetDateTime::from_unix_timestamp(current_second as i64).unwrap();
-            clock.set_time(now).await;
-            Timer::after_secs(5).await;
+        let ts = *core::ptr::addr_of!(WHEN_SLEEP_TIME_TIMESTAMP);
+        // Sanity check: valid unix timestamps are between year 2020 and 2100
+        if ts > 1577836800 && ts < 4102444800 {
+            let current_second = ts + get_sleep_ms().await / 1000;
+            if let Ok(now) = OffsetDateTime::from_unix_timestamp(current_second as i64) {
+                clock.set_time(now).await;
+                Timer::after_secs(5).await;
+            }
         }
     }
     let mut err_times = 0;

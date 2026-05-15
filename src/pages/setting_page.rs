@@ -186,7 +186,7 @@ impl Page for SettingPage {
                 
                 
                 
-                let ip = unsafe { &IP_ADDRESS };
+                let ip = unsafe { &*core::ptr::addr_of!(IP_ADDRESS) };
                 let mut url:String<50> = String::new();
                 url.push_str("http://");
                 url.push_str(ip);
@@ -258,7 +258,8 @@ impl Page for SettingPage {
     async fn run(&mut self, spawner: Spawner) {
         crate::display::QUICKLY_LUT_CHANNEL.send(false).await;
         STOP_WEB_SERVICE.reset();
-        spawner.spawn(web_service()).ok();
+        spawner.spawn(web_service().unwrap());
+        let _ = spawner;
         self.running = true;
         self.need_render = true;
         match  *WIFI_MODEL.lock().await {
@@ -278,7 +279,7 @@ impl Page for SettingPage {
             }
             crate::wifi::refresh_last_time().await;
          
-            if !has_ip && unsafe{!IP_ADDRESS.is_empty()}  {
+            if !has_ip && unsafe{!core::ptr::addr_of!(IP_ADDRESS).read().is_empty()}  {
                 has_ip = true;
                 self.need_render = true;
             }
