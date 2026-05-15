@@ -126,6 +126,8 @@ impl RequestClient{
         let mut request = Request::get(path).host(host).build();
 
         request.write_header(&mut socket).await?;
+        use embedded_io_async::Write;
+        let _ = socket.flush().await;
 
 
         let mut headers_buf = vec![0u8; 1024];
@@ -180,6 +182,8 @@ impl RequestClient{
 
         let request = Request::get(path).host(host).build();
         request.write_header(&mut tls).await?;
+        use embedded_io_async::Write;
+        let _ = tls.flush().await;
 
         let mut headers_buf = vec![0u8; 1024];
         let mut buf = vec![0u8; BUFFER_SIZE];
