@@ -1,27 +1,3 @@
-/** 阳历1900.1.31＝阴历0.1.1
- * 每个32位数据各代表一年，其中bit0 - bit16共17位有意义。
-bit [3:0]	数值范围为0 - C 。0 代表此年不存在闰月，非零表示此年有闰月，具体数值 1 - C 表示闰月月份
-bit [15:4]	bit 15 - bit 4 分别代表此年的1 - 12月，为 0 表示此月为小月（29日），为 1 表示大月（30日）
-bit16	在bit [3:0] 为 0 时忽略；其值仅在bit [3:0]不为 0 时有效，为1时表示该年闰月为大月，为 0 时表小月
- * 
- * 使用示例:
- * ```rust
- * use crate::model::lunar::Lunar;
- * 
- * // 创建2024年1月的阴历转换器
- * let lunar = Lunar::new(2024, 1);
- * 
- * // 获取1月1日的阴历信息
- * if let Some(lunar_day) = lunar.get_lunar_day(1) {
- *     println!("阴历月份: {}", lunar_day.get_month_name());
- *     println!("阴历日期: {}", lunar_day.get_day_name());
- * }
- * 
- * // 获取所有阴历日期
- * let all_days = lunar.get_all_lunar_days();
- * ```
- */
-use esp_println::{print, println};
 
 const LUNAR_DATA:[u32; 201 ] = [
 

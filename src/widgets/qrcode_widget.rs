@@ -5,9 +5,7 @@ use embedded_graphics::geometry::{Point, Size};
 use embedded_graphics::prelude::{ PixelColor, Primitive };
 
 use embedded_graphics::primitives::{PrimitiveStyleBuilder, Rectangle};
-use heapless::String;
 use qrcodegen_no_heap::{QrCode, QrCodeEcc, Version};
-use time::Date;
 
 #[derive(Eq, PartialEq)]
 pub struct QrcodeWidget<'a,C>{

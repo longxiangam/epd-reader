@@ -54,7 +54,7 @@ impl Weather {
                 crate::wifi::set_request_loading(false);
                 match result {
                     Ok(response) => {
-                        let mut daily_result = form_json(&response.data[..response.length]);
+                        let daily_result = form_json(&response.data[..response.length]);
                         if let Some(mut v) = daily_result {
                             Self::save(v.results.pop().unwrap()).await;
                         }
@@ -235,7 +235,7 @@ impl HolidayInfo {
             if error_second == 0 || current_second - error_second > 60 {
                 let mut try_times = 3;
                 loop{
-                    if let Ok(v) = HolidayInfo::request().await {
+                    if let Ok(_v) = HolidayInfo::request().await {
                         break;
                     }else{
                         try_times-=1;

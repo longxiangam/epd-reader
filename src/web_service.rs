@@ -153,7 +153,7 @@ async fn handle_get_images(socket: &mut TcpSocket<'_>) {
         return;
     };
 
-    let mut volume0 = match sd.volume_manager.open_volume(embedded_sdmmc::VolumeIdx(0)) {
+    let volume0 = match sd.volume_manager.open_volume(embedded_sdmmc::VolumeIdx(0)) {
         Ok(v) => v,
         Err(e) => {
             println!("open_volume error: {:?}", e);
@@ -161,7 +161,7 @@ async fn handle_get_images(socket: &mut TcpSocket<'_>) {
             return;
         }
     };
-    let mut root = match volume0.open_root_dir() {
+    let root = match volume0.open_root_dir() {
         Ok(r) => r,
         Err(e) => {
             println!("open_root error: {:?}", e);
@@ -220,7 +220,7 @@ async fn handle_get_images(socket: &mut TcpSocket<'_>) {
     let _ = socket.write_all(b"]}").await;
 }
 
-async fn handle_delete_image(socket: &mut TcpSocket<'_>, req: &httparse::Request<'_, '_>, header_str: &str) {
+async fn handle_delete_image(socket: &mut TcpSocket<'_>, _req: &httparse::Request<'_, '_>, header_str: &str) {
     let body = match header_str.split_once("\r\n\r\n") {
         Some((_, b)) => b,
         None => { send_json(socket, b"{\"success\":false}").await; return; }
@@ -237,11 +237,11 @@ async fn handle_delete_image(socket: &mut TcpSocket<'_>, req: &httparse::Request
         send_json(socket, b"{\"success\":false,\"error\":\"SD not ready\"}").await;
         return;
     };
-    let mut volume0 = match sd.volume_manager.open_volume(embedded_sdmmc::VolumeIdx(0)) {
+    let volume0 = match sd.volume_manager.open_volume(embedded_sdmmc::VolumeIdx(0)) {
         Ok(v) => v,
         Err(_) => { send_json(socket, b"{\"success\":false,\"error\":\"open volume failed\"}").await; return; }
     };
-    let mut root = match volume0.open_root_dir() {
+    let root = match volume0.open_root_dir() {
         Ok(r) => r,
         Err(_) => { send_json(socket, b"{\"success\":false,\"error\":\"open root failed\"}").await; return; }
     };
@@ -322,11 +322,11 @@ async fn handle_upload_image(socket: &mut TcpSocket<'_>, req: &httparse::Request
         }
     }
 
-    let mut volume0 = match sd.volume_manager.open_volume(embedded_sdmmc::VolumeIdx(0)) {
+    let volume0 = match sd.volume_manager.open_volume(embedded_sdmmc::VolumeIdx(0)) {
         Ok(v) => v,
         Err(_) => { send_json(socket, b"{\"success\":false,\"error\":\"open volume failed\"}").await; return; }
     };
-    let mut root = match volume0.open_root_dir() {
+    let root = match volume0.open_root_dir() {
         Ok(r) => r,
         Err(_) => { send_json(socket, b"{\"success\":false,\"error\":\"open root failed\"}").await; return; }
     };
@@ -335,7 +335,7 @@ async fn handle_upload_image(socket: &mut TcpSocket<'_>, req: &httparse::Request
         Err(_) => { send_json(socket, b"{\"success\":false,\"error\":\"open images dir failed\"}").await; return; }
     };
 
-    let mut file = if let Some(ref sn) = lfn_short_name {
+    let file = if let Some(ref sn) = lfn_short_name {
         match images_dir.open_file_in_dir(sn.clone(), mode) {
             Ok(f) => f,
             Err(e) => {
@@ -471,7 +471,7 @@ async fn handle_get_books(socket: &mut TcpSocket<'_>) {
         return;
     };
 
-    let mut volume0 = match sd.volume_manager.open_volume(embedded_sdmmc::VolumeIdx(0)) {
+    let volume0 = match sd.volume_manager.open_volume(embedded_sdmmc::VolumeIdx(0)) {
         Ok(v) => v,
         Err(e) => {
             println!("open_volume error: {:?}", e);
@@ -480,7 +480,7 @@ async fn handle_get_books(socket: &mut TcpSocket<'_>) {
         }
     };
 
-    let mut root = match volume0.open_root_dir() {
+    let root = match volume0.open_root_dir() {
         Ok(r) => r,
         Err(e) => {
             println!("open_root error: {:?}", e);
@@ -548,7 +548,7 @@ async fn handle_get_books(socket: &mut TcpSocket<'_>) {
     let _ = socket.write_all(b"]}").await;
 }
 
-async fn handle_delete(socket: &mut TcpSocket<'_>, req: &httparse::Request<'_, '_>, header_str: &str) {
+async fn handle_delete(socket: &mut TcpSocket<'_>, _req: &httparse::Request<'_, '_>, header_str: &str) {
 
     // Extract body
     let body = match header_str.split_once("\r\n\r\n") {
@@ -576,14 +576,14 @@ async fn handle_delete(socket: &mut TcpSocket<'_>, req: &httparse::Request<'_, '
         return;
     };
 
-    let mut volume0 = match sd.volume_manager.open_volume(embedded_sdmmc::VolumeIdx(0)) {
+    let volume0 = match sd.volume_manager.open_volume(embedded_sdmmc::VolumeIdx(0)) {
         Ok(v) => v,
         Err(_) => {
             send_json(socket, b"{\"success\":false,\"error\":\"open volume failed\"}").await;
             return;
         }
     };
-    let mut root = match volume0.open_root_dir() {
+    let root = match volume0.open_root_dir() {
         Ok(r) => r,
         Err(_) => {
             send_json(socket, b"{\"success\":false,\"error\":\"open root failed\"}").await;
@@ -695,14 +695,14 @@ async fn handle_upload(socket: &mut TcpSocket<'_>, req: &httparse::Request<'_, '
     }
 
     // Step 2: Open volume/root/books_dir and get file handle
-    let mut volume0 = match sd.volume_manager.open_volume(embedded_sdmmc::VolumeIdx(0)) {
+    let volume0 = match sd.volume_manager.open_volume(embedded_sdmmc::VolumeIdx(0)) {
         Ok(v) => v,
         Err(_) => {
             send_json(socket, b"{\"success\":false,\"error\":\"open volume failed\"}").await;
             return;
         }
     };
-    let mut root = match volume0.open_root_dir() {
+    let root = match volume0.open_root_dir() {
         Ok(r) => r,
         Err(_) => {
             send_json(socket, b"{\"success\":false,\"error\":\"open root failed\"}").await;
@@ -718,7 +718,7 @@ async fn handle_upload(socket: &mut TcpSocket<'_>, req: &httparse::Request<'_, '
     };
 
     // Open file — use short name directly if LFN was just created
-    let mut file = if let Some(ref sn) = lfn_short_name {
+    let file = if let Some(ref sn) = lfn_short_name {
         match books_dir.open_file_in_dir(sn.clone(), mode) {
             Ok(f) => f,
             Err(e) => {
@@ -791,7 +791,7 @@ async fn handle_configure_wifi(socket: &mut TcpSocket<'_>, req: &httparse::Reque
             }
         }
 
-        if let Some(mut wifi_info) = crate::storage::WIFI_INFO.lock().await.as_mut() {
+        if let Some(wifi_info) = crate::storage::WIFI_INFO.lock().await.as_mut() {
             println!("wifi_info:{:?}", wifi_info);
             wifi_info.wifi_ssid = String::from_str(ssid.unwrap()).unwrap();
             wifi_info.wifi_password = String::from_str(password.unwrap()).unwrap();

@@ -4,10 +4,9 @@ use embassy_time::{ Duration, Instant};
 use esp_hal::gpio::{Output, RtcPinWithResistors};
 use esp_hal::ram;
 use esp_hal::rtc_cntl::sleep::{RtcioWakeupSource, TimerWakeupSource, WakeSource, WakeupLevel};
-use esp_println::println;
 use heapless::Vec;
 
-use crate::wifi::{force_stop_wifi, STOP_WIFI_SIGNAL};
+use crate::wifi::force_stop_wifi;
 use crate::worldtime::save_time_to_rtc;
 
 pub static RTC_MANGE:Mutex<CriticalSectionRawMutex,Option<esp_hal::rtc_cntl::Rtc<'static>>> = Mutex::new(None);
@@ -38,7 +37,7 @@ pub async fn to_sleep_tips(sleep_time:Duration, idle_time:Duration, show_sleep:b
         let wakeup_pins = unsafe { core::ptr::addr_of_mut!(WAKEUP_PINS).as_mut().unwrap() };
         let rtcio = RtcioWakeupSource::new(wakeup_pins.as_mut_slice());
 
-        let mut wakeup_source = TimerWakeupSource::new(core::time::Duration::from_micros(sleep_time.as_micros()));
+        let wakeup_source = TimerWakeupSource::new(core::time::Duration::from_micros(sleep_time.as_micros()));
 
         let mut ws: Vec<& dyn WakeSource, 2> = Vec::new();
         ws.push(&rtcio);

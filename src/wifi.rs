@@ -500,17 +500,17 @@ async fn dhcp_service(){
                             println!("Received {} bytes from {}", n, src);
                             println!("Received:{:?} ", buf );
 
-                            let mut msg = Message::new(buf).unwrap();
+                            let msg = Message::new(buf).unwrap();
                             println!("msg op_type:{:?}",msg.op().unwrap()) ;
                             let options =  v4_options!(msg; MessageType required, ServerIdentifier, RequestedIpAddress);
                             match options {
-                                Ok((msg_type,si,ria)) => {
+                                Ok((msg_type,_si,_ria)) => {
                                     println!("msg type:{:?}",msg_type) ;
                                     if msg_type == dhcparse::dhcpv4::MessageType::DISCOVER {
                                         send_dhcp_offer(&udp_socket, src ,&msg).await;
                                     }
                                     else if msg_type ==  dhcparse::dhcpv4::MessageType::REQUEST {
-                                        let ip_addr = Ipv4Addr::new(192, 168, 2, 2);
+                                        let _ip_addr = Ipv4Addr::new(192, 168, 2, 2);
                                         send_dhcp_ack(&udp_socket, src, &msg).await;
                                     }
                                 }
@@ -531,7 +531,7 @@ async fn dhcp_service(){
     }
 }
 
-async fn send_dhcp_offer(udp_socket: &UdpSocket<'_>, src_addr: UdpMetadata, receive_msg: &Message<[u8; 512]>) {
+async fn send_dhcp_offer(udp_socket: &UdpSocket<'_>, _src_addr: UdpMetadata, receive_msg: &Message<[u8; 512]>) {
     println!("send_dhcp_offer") ;
     let router_ip:&Addr = (&[192u8,168,2,1][..]).try_into().unwrap();
     let submask:&Addr = (&[255u8,255,255,0][..]).try_into().unwrap();
@@ -570,7 +570,7 @@ async fn send_dhcp_offer(udp_socket: &UdpSocket<'_>, src_addr: UdpMetadata, rece
     let _ = udp_socket.send_to(&offer_message, broadcast).await;
 }
 
-async fn send_dhcp_ack(udp_socket: & UdpSocket<'_>, src_addr: UdpMetadata, receive_msg: &Message<[u8; 512]>) {
+async fn send_dhcp_ack(udp_socket: & UdpSocket<'_>, _src_addr: UdpMetadata, receive_msg: &Message<[u8; 512]>) {
     println!("send_dhcp_ack") ;
     let router_ip:&Addr = (&[192u8,168,2,1][..]).try_into().unwrap();
     let submask:&Addr = (&[255u8,255,255,0][..]).try_into().unwrap();

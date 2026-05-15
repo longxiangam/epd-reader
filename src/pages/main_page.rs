@@ -1,5 +1,4 @@
 use alloc::boxed::Box;
-use alloc::string::ToString;
 use heapless::String;
 use heapless::Vec;
 use core::str::FromStr;
@@ -9,13 +8,12 @@ use embassy_sync::mutex::Mutex;
 use embassy_time::{Duration,  Timer};
 use embedded_graphics::Drawable;
 use embedded_graphics::geometry::Dimensions;
-
-use embedded_graphics::prelude::{DrawTarget, Point, Size};
+use embedded_graphics::prelude::Point;
 use esp_println::println;
 use esp_hal::ram;
 use epd_waveshare::color::{Black, Color, White};
 
-use epd_waveshare::prelude::{Display, RefreshLut, WaveshareDisplay};
+use epd_waveshare::prelude::Display;
 use crate::{ event};
 use crate::display::{display_mut,  RENDER_CHANNEL, RenderInfo};
 use crate::event::EventType;
@@ -49,7 +47,7 @@ pub struct MainPage{
 
 impl MainPage {
 
-    pub async fn init(spawner: Spawner){
+    pub async fn init(_spawner: Spawner){
         let mut page_index = unsafe { *core::ptr::addr_of!(PAGE_INDEX) };
         
         
@@ -79,7 +77,7 @@ impl MainPage {
     pub async fn get_mut() -> Option<&'static mut MainPage> {
         unsafe {
             let ptr: *mut MainPage =  MAIN_PAGE.lock().await.as_mut().unwrap()  as *mut MainPage;
-            return Some(&mut *ptr);
+            Some(&mut *ptr)
         }
     }
 
@@ -127,7 +125,7 @@ impl Page for  MainPage{
     }
     async fn bind_event(&mut self){
         event::clear().await;
-        event::on(EventType::KeyShort(2),  move |info|  {
+        event::on(EventType::KeyShort(2),  move |_info|  {
             println!("current_page:" );
             return Box::pin(async {
                 Self::get_mut().await.unwrap().increase();
@@ -135,27 +133,27 @@ impl Page for  MainPage{
             });
         }).await;
 
-        event::on(EventType::KeyLongEnd(1),  |info|  {
+        event::on(EventType::KeyLongEnd(1),  |_info|  {
             println!("current_page:" );
             return Box::pin( async {
 
             });
         }).await;
 
-        event::on(EventType::KeyLongEnd(2),  |info|  {
+        event::on(EventType::KeyLongEnd(2),  |_info|  {
             println!("current_page:" );
             return Box::pin( async {
 
             });
         }).await;
-        event::on(EventType::KeyShort(1),  |info|  {
+        event::on(EventType::KeyShort(1),  |_info|  {
             println!("current_page:" );
             return Box::pin( async {
                 Self::get_mut().await.unwrap().decrease();
                 println!("current_page:{}",Self::get_mut().await.unwrap().choose_index );
             });
         }).await;
-        event::on(EventType::KeyShort(3),  |info|  {
+        event::on(EventType::KeyShort(3),  |_info|  {
             println!("current_page:" );
             return Box::pin( async {
                 let mut_ref = Self::get_mut().await.unwrap();

@@ -1,6 +1,5 @@
-use core::str::FromStr;
 use esp_println::println;
-use heapless::{String, Vec};
+use heapless::Vec;
 use mini_json::parse_json;
 
 #[derive(Debug, Default)]

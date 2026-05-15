@@ -1,23 +1,15 @@
-use core::convert::Infallible;
 use embassy_futures::select::{Either, select};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
-use embassy_time::{Duration, TimeoutError, Timer, with_timeout};
-use embedded_graphics::draw_target::DrawTarget;
+use embassy_time::{Duration, Timer};
 use embedded_graphics::geometry::Point;
-use embedded_graphics::mono_font::MonoTextStyleBuilder;
-use embedded_graphics::text::{Baseline, Text, TextStyleBuilder};
-use core::cell::RefCell;
 
 use esp_hal::gpio::{Input, Level, Output, Pull};
-use esp_hal::Blocking;
-use esp_hal::peripherals::SPI2;
 
-use epd_waveshare::color::{Black, Color, White};
+use epd_waveshare::color::{Black, Color};
 use epd_waveshare::epd2in9::{Display2in9, Epd2in9};
 use epd_waveshare::prelude::{Display, RefreshLut, WaveshareDisplay};
 
-use embedded_graphics::{Drawable };
 use embedded_graphics::prelude::Dimensions;
 use esp_println::println;
 use esp_hal::spi::master::Spi;
@@ -29,7 +21,6 @@ use u8g2_fonts::FontRenderer;
 use u8g2_fonts::types::{FontColor, HorizontalAlignment, VerticalPosition};
 use esp_hal::ram;
 
-use critical_section::Mutex as CsMutex;
 
 pub struct RenderInfo{
     pub time:i32,
@@ -105,7 +96,7 @@ pub async fn render(
                     is_sleep = false;
                 }
                 let buffer = unsafe { (*core::ptr::addr_of_mut!(DISPLAY)).as_mut().unwrap().buffer() };
-                let len = buffer.len();
+                let _len = buffer.len();
                 let mut need_force_full = false;
                 if get_render_times() % FORCE_FULL_REFRESH_TIMES == 0 && refresh_lut == RefreshLut::Quick{
                     need_force_full = true;
@@ -189,7 +180,7 @@ pub async fn show_error(error:&str, need_clear:bool) {
     embassy_time::Timer::after_secs(1).await;
     if let Some(display) = display_mut() {
         let font: FontRenderer = FontRenderer::new::<fonts::u8g2_font_wqy15_t_gb2312>();
-        let mut font = font.with_ignore_unknown_chars(true);
+        let font = font.with_ignore_unknown_chars(true);
 
         if need_clear {
             display.clear_buffer(Color::White);
@@ -221,7 +212,7 @@ pub async fn show_sleep() {
             let drawn = crate::flash_sleep::draw_sleep_image(display);
             if !drawn {
                 let font: FontRenderer = FontRenderer::new::<fonts::u8g2_font_wqy15_t_gb2312>();
-                let mut font = font.with_ignore_unknown_chars(true);
+                let font = font.with_ignore_unknown_chars(true);
                 let _ = font.render_aligned(
                     "睡眠中",
                     Point::new(

@@ -1,7 +1,5 @@
 use alloc::boxed::Box;
-use alloc::format;
-use alloc::string::{String, ToString};
-use core::future::Future;
+use alloc::string::ToString;
 use eg_seven_segment::SevenSegmentStyleBuilder;
 use embassy_executor::Spawner;
 use embassy_time::{Duration, Instant, Timer};
@@ -11,22 +9,21 @@ use embedded_graphics::pixelcolor::BinaryColor;
 use embedded_graphics::prelude::{Dimensions, DrawTarget, OriginDimensions, Primitive};
 use embedded_graphics::primitives::{Circle, Line, PrimitiveStyleBuilder, Rectangle};
 use embedded_graphics::text::{Alignment, Baseline, Text, TextStyleBuilder};
-use epd_waveshare::color::{Black, Color};
+use epd_waveshare::color::Black;
 use epd_waveshare::color::Color::White;
 use epd_waveshare::prelude::Display;
-use esp_println::println;
 use time::OffsetDateTime;
 use u8g2_fonts::U8g2TextStyle;
 use u8g2_fonts::FontRenderer;
 use u8g2_fonts::fonts;
 use u8g2_fonts::types::{FontColor, HorizontalAlignment, VerticalPosition};
-use crate::display::{display_mut, QUICKLY_LUT_CHANNEL, RENDER_CHANNEL, RenderInfo};
+use crate::display::{display_mut, RENDER_CHANNEL, RenderInfo};
 use crate::event;
 use crate::event::EventType;
 use crate::pages::Page;
 use crate::battery::BATTERY;
 use crate::widgets::battery::draw_battery;
-use crate::sleep::{refresh_active_time, to_sleep, to_sleep_tips};
+use crate::sleep::{refresh_active_time, to_sleep_tips};
 use crate::storage::NvsStorage;
 use crate::weather::{sync_holiday_success, sync_weather_success, HolidayInfo, Weather};
 use crate::widgets::calendar::Calendar;
@@ -289,7 +286,7 @@ impl Page for CalendarPage {
         }
     }
 
-    async fn run(&mut self, spawner: Spawner) {
+    async fn run(&mut self, _spawner: Spawner) {
         self.running = true;
         crate::display::set_sleep_renderer(Some(sleep_renderer));
         refresh_active_time().await;

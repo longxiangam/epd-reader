@@ -1,20 +1,16 @@
 use alloc::string::ToString;
 use alloc::format;
-use core::cell::RefCell;
 use core::str::FromStr;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::mutex::Mutex;
 use embedded_hal_bus::spi::CriticalSectionDevice;
-use embedded_sdmmc::{Block, BlockCount, BlockIdx, Directory, Error, File, LfnBuffer, Mode, SdCard, ShortFileName, Volume, VolumeManager};
+use embedded_sdmmc::{Block, Directory, File, LfnBuffer, Mode, SdCard, ShortFileName, Volume, VolumeManager};
 use embassy_time::Delay;
 use esp_hal::gpio::Output;
 use esp_hal::spi::master::Spi;
-use esp_hal::Blocking;
 use esp_println::println;
 use heapless::{String, Vec};
-use log::info;
-use critical_section::Mutex as CsMutex;
-use crate::sd_mount::SdError::{OpenBooksError, OpenRootError, OpenVolumeError, RootAlreadyOpen, FileNotFound};
+use crate::sd_mount::SdError::{OpenBooksError, OpenRootError, OpenVolumeError, FileNotFound};
 
 pub struct TimeSource;
 
@@ -133,7 +129,7 @@ impl SdMount{
                 directory.cluster,
                 directory.attributes,
             );
-            let mut name_buf: String<BOOK_NAME_MAX> = String::new();
+            let _name_buf: String<BOOK_NAME_MAX> = String::new();
             if let Some(lfn) = lfn {
                 // Use lfn directly (already valid UTF-8 from embedded-sdmmc)
                 // Skip hidden files (starting with '.')
@@ -323,23 +319,23 @@ impl SdMount{
         long_name: &str,
     ) -> Result<(ShortFileName, embedded_sdmmc::BlockIdx, u32), SdError> {
         let short_name = {
-            let mut vol = volume_mgr.open_volume(embedded_sdmmc::VolumeIdx(0)).map_err(|_| OpenVolumeError)?;
-            let mut root = vol.open_root_dir().map_err(|_| OpenRootError)?;
+            let vol = volume_mgr.open_volume(embedded_sdmmc::VolumeIdx(0)).map_err(|_| OpenVolumeError)?;
+            let root = vol.open_root_dir().map_err(|_| OpenRootError)?;
             let mut images_dir = root.open_dir("images").map_err(|_| OpenBooksError)?;
             Self::generate_unique_image_short_name(&mut images_dir)?
         };
         {
-            let mut vol = volume_mgr.open_volume(embedded_sdmmc::VolumeIdx(0)).map_err(|_| OpenVolumeError)?;
-            let mut root = vol.open_root_dir().map_err(|_| OpenRootError)?;
-            let mut images_dir = root.open_dir("images").map_err(|_| OpenBooksError)?;
+            let vol = volume_mgr.open_volume(embedded_sdmmc::VolumeIdx(0)).map_err(|_| OpenVolumeError)?;
+            let root = vol.open_root_dir().map_err(|_| OpenRootError)?;
+            let images_dir = root.open_dir("images").map_err(|_| OpenBooksError)?;
             let file = images_dir.open_file_in_dir(short_name.clone(), Mode::ReadWriteCreateOrTruncate)
                 .map_err(|_| FileNotFound)?;
             file.close();
         }
         let dir_entry = {
-            let mut vol = volume_mgr.open_volume(embedded_sdmmc::VolumeIdx(0)).map_err(|_| OpenVolumeError)?;
-            let mut root = vol.open_root_dir().map_err(|_| OpenRootError)?;
-            let mut images_dir = root.open_dir("images").map_err(|_| OpenBooksError)?;
+            let vol = volume_mgr.open_volume(embedded_sdmmc::VolumeIdx(0)).map_err(|_| OpenVolumeError)?;
+            let root = vol.open_root_dir().map_err(|_| OpenRootError)?;
+            let images_dir = root.open_dir("images").map_err(|_| OpenBooksError)?;
             images_dir.find_directory_entry(short_name.clone())
                 .map_err(|e| { println!("find_directory_entry error: {:?}", e); FileNotFound })?
         };
@@ -430,7 +426,7 @@ impl SdMount{
 
         // Characters 1-5: bytes 1-10
         for i in 0..5 {
-            let c = chars.get(i).copied().unwrap_or(if i < chars.len() + 1 { 0xFFFF } else { 0x0000 });
+            let _c = chars.get(i).copied().unwrap_or(if i < chars.len() + 1 { 0xFFFF } else { 0x0000 });
             // If within name length, use char; at name length, use 0x0000; beyond, use 0xFFFF
             let val = if i < chars.len() {
                 chars[i]
@@ -508,17 +504,17 @@ impl SdMount{
     ) -> Result<(ShortFileName, embedded_sdmmc::BlockIdx, u32), SdError> {
         // Phase 1: Generate unique short name
         let short_name = {
-            let mut vol = volume_mgr.open_volume(embedded_sdmmc::VolumeIdx(0)).map_err(|_| OpenVolumeError)?;
-            let mut root = vol.open_root_dir().map_err(|_| OpenRootError)?;
+            let vol = volume_mgr.open_volume(embedded_sdmmc::VolumeIdx(0)).map_err(|_| OpenVolumeError)?;
+            let root = vol.open_root_dir().map_err(|_| OpenRootError)?;
             let mut books_dir = root.open_dir("books").map_err(|_| OpenBooksError)?;
             Self::generate_unique_short_name(&mut books_dir)?
         };
 
         // Phase 2: Create file with short name
         {
-            let mut vol = volume_mgr.open_volume(embedded_sdmmc::VolumeIdx(0)).map_err(|_| OpenVolumeError)?;
-            let mut root = vol.open_root_dir().map_err(|_| OpenRootError)?;
-            let mut books_dir = root.open_dir("books").map_err(|_| OpenBooksError)?;
+            let vol = volume_mgr.open_volume(embedded_sdmmc::VolumeIdx(0)).map_err(|_| OpenVolumeError)?;
+            let root = vol.open_root_dir().map_err(|_| OpenRootError)?;
+            let books_dir = root.open_dir("books").map_err(|_| OpenBooksError)?;
             let file = books_dir.open_file_in_dir(short_name.clone(), Mode::ReadWriteCreateOrTruncate)
                 .map_err(|_| FileNotFound)?;
             file.close();
@@ -526,9 +522,9 @@ impl SdMount{
 
         // Phase 3: Get entry position
         let dir_entry = {
-            let mut vol = volume_mgr.open_volume(embedded_sdmmc::VolumeIdx(0)).map_err(|_| OpenVolumeError)?;
-            let mut root = vol.open_root_dir().map_err(|_| OpenRootError)?;
-            let mut books_dir = root.open_dir("books").map_err(|_| OpenBooksError)?;
+            let vol = volume_mgr.open_volume(embedded_sdmmc::VolumeIdx(0)).map_err(|_| OpenVolumeError)?;
+            let root = vol.open_root_dir().map_err(|_| OpenRootError)?;
+            let books_dir = root.open_dir("books").map_err(|_| OpenBooksError)?;
             books_dir.find_directory_entry(short_name.clone())
                 .map_err(|e| {
                     println!("find_directory_entry error: {:?}", e);

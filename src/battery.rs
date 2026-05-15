@@ -1,8 +1,7 @@
-use core::cmp::max;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::mutex::Mutex;
 use embassy_time::Timer;
-use esp_hal::analog::adc::{Adc, AdcCalBasic, AdcPin};
+use esp_hal::analog::adc::AdcPin;
 use esp_hal::ram;
 use esp_println::println;
 use crate::event::ADC_PER;

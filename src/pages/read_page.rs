@@ -4,16 +4,12 @@ use embassy_executor::Spawner;
 use embassy_time::{Duration, Instant, Timer};
 use embedded_graphics::Drawable;
 use embedded_graphics::prelude::{Dimensions, Point, Size};
-use embedded_graphics::primitives::{Line, PrimitiveStyleBuilder, Rectangle, StrokeAlignment};
+use embedded_graphics::primitives::{PrimitiveStyleBuilder, Rectangle, StrokeAlignment};
 use embedded_graphics::prelude::Primitive;
-use embedded_sdmmc::ShortFileName;
 use epd_waveshare::color::{Black, Color,White};
 use epd_waveshare::graphics::{Display, DisplayRotation};
 use esp_hal::ram;
-use esp_hal::system::reset_reason;
-use esp_hal::rtc_cntl::SocResetReason;
-use esp_println::{print, println};
-use futures::FutureExt;
+use esp_println::println;
 use heapless::{String, Vec};
 use u8g2_fonts::FontRenderer;
 use u8g2_fonts::fonts;
@@ -24,8 +20,8 @@ use crate::epd2in9_txt::{BookPages, TxtReader};
 use crate::event::EventType;
 use crate::pages::{ Page};
 use crate::sd_mount::{ActualDirectory, SD_MOUNT, SdMount, BOOK_NAME_MAX};
-use crate::sleep::{to_sleep, to_sleep_tips};
-use crate::storage::{NvsStorage, SleepStorage};
+use crate::sleep::to_sleep_tips;
+use crate::storage::NvsStorage;
 use crate::widgets::list_widget::ListWidget;
 
 const PAGES_VEC_MAX:usize = epd2in9_txt::PAGES_VEC_MAX;
@@ -49,7 +45,7 @@ fn sleep_renderer(display: &mut crate::display::EpdDisplay) {
 
     if !drawn {
         let font: FontRenderer = FontRenderer::new::<fonts::u8g2_font_wqy15_t_gb2312>();
-        let mut font = font.with_ignore_unknown_chars(true);
+        let font = font.with_ignore_unknown_chars(true);
         let center = Point::new(
             display.bounding_box().size.width as i32 / 2,
             display.bounding_box().size.height as i32 / 2,
@@ -149,17 +145,17 @@ impl ReadPage{
         };
 
         {
-            let mut my_file = books_dir.open_file_in_dir(book_short_name.clone(), embedded_sdmmc::Mode::ReadOnly).unwrap();
+            let my_file = books_dir.open_file_in_dir(book_short_name.clone(), embedded_sdmmc::Mode::ReadOnly).unwrap();
             file_len = my_file.length();
             my_file.close();
         }
 
         println!("file len:{}", file_len);
         {
-            let mut my_file_index = SdMount::open_idx_file(books_dir, &book_short_name, embedded_sdmmc::Mode::ReadOnly);
+            let my_file_index = SdMount::open_idx_file(books_dir, &book_short_name, embedded_sdmmc::Mode::ReadOnly);
             if let Ok(mut mfi) = my_file_index {
                 println!("idx len:{}", mfi.length());
-                if (mfi.length() == 0) {
+                if mfi.length() == 0  {
                     need_index = true;
                 } else {
                     println!("entry read pages");
@@ -221,7 +217,7 @@ impl ReadPage{
         };
         {
             //读日志
-            let mut my_file =  SdMount::open_log_file(books_dir, &book_short_name, embedded_sdmmc::Mode::ReadOnly);
+            let my_file =  SdMount::open_log_file(books_dir, &book_short_name, embedded_sdmmc::Mode::ReadOnly);
             if let Ok(mut f) = my_file {
                 self.log_vec = Some(TxtReader::read_log(&mut f));
                 if let Some(ref lv) = self.log_vec{
@@ -255,13 +251,13 @@ impl ReadPage{
             let mut begin =  0;
             let mut end =  0;
             {
-                let mut index_file = SdMount::open_idx_file(books_dir, &book_short_name, embedded_sdmmc::Mode::ReadOnly);
+                let index_file = SdMount::open_idx_file(books_dir, &book_short_name, embedded_sdmmc::Mode::ReadOnly);
                 if let Ok(mut index_file) = index_file {
                     (begin, end) = bp.get_page_content_position(&mut index_file);
                 }
             }
             {
-                let mut my_file = books_dir.open_file_in_dir(book_short_name.clone(), embedded_sdmmc::Mode::ReadOnly);
+                let my_file = books_dir.open_file_in_dir(book_short_name.clone(), embedded_sdmmc::Mode::ReadOnly);
                 if let Ok(mut my_file) = my_file {
                     self.page_content = TxtReader::get_page_content(&mut my_file, begin, end, self.visual_width());
                     my_file.close();
@@ -305,7 +301,7 @@ impl ReadPage{
                 };
                 let total_page: u32 = {
                     let idx_result = SdMount::open_idx_file(books_dir, &short_name, embedded_sdmmc::Mode::ReadOnly);
-                    if let Ok(mut f) = idx_result {
+                    if let Ok(f) = idx_result {
                         let len = f.length();
                         f.close();
                         len / 4
@@ -336,7 +332,7 @@ impl ReadPage{
 
     fn render_menu_overlay(&self, display: &mut crate::display::EpdDisplay) {
         let font: FontRenderer = FontRenderer::new::<fonts::u8g2_font_wqy15_t_gb2312>();
-        let mut font = font.with_ignore_unknown_chars(true);
+        let font = font.with_ignore_unknown_chars(true);
         let vw = self.visual_width();
         let vh = self.visual_height();
         let menu_width: u32 = 180;
@@ -691,7 +687,7 @@ impl Page for ReadPage{
 
                 if self.indexing {
                     let font: FontRenderer = FontRenderer::new::<fonts::u8g2_font_wqy15_t_gb2312>();
-                    let mut font = font.with_ignore_unknown_chars(true);
+                    let font = font.with_ignore_unknown_chars(true);
                     let _ = font.render_aligned(
                         format_args!("正在创建索引，\n 已创建索引进度：{:.2}%",self.indexing_process),
                         center,
@@ -720,7 +716,7 @@ impl Page for ReadPage{
                             // Draw book progress right-aligned
                             if self.book_progress.len() == menus.len() {
                                 let font: FontRenderer = FontRenderer::new::<fonts::u8g2_font_wqy16_t_gb2312>();
-                                let mut font = font.with_ignore_unknown_chars(true);
+                                let font = font.with_ignore_unknown_chars(true);
                                 let item_height: u32 = 20;
                                 let scroll_width: u32 = 10;
                                 let total_widget_items = self.book_progress.len() + 1;
@@ -750,7 +746,7 @@ impl Page for ReadPage{
                         }
                     } else if self.book_pages.is_some() {
                         let font: FontRenderer = FontRenderer::new::<fonts::u8g2_font_wqy15_t_gb2312>();
-                        let mut font = font.with_ignore_unknown_chars(true);
+                        let font = font.with_ignore_unknown_chars(true);
                         //显示选择书本对应页的内容
                         display.clear_buffer(Color::White);
                         {
@@ -790,7 +786,7 @@ impl Page for ReadPage{
     
     
 
-    async fn run(&mut self, spawner: Spawner) {
+    async fn run(&mut self, _spawner: Spawner) {
         display::set_sleep_renderer(Some(sleep_renderer));
         if let Some(display) = display_mut() {
            display.set_rotation(self.current_rotation());
@@ -801,12 +797,12 @@ impl Page for ReadPage{
         //读sd卡目录
         if let Some(ref mut sd) =  *SD_MOUNT.lock().await {
 
-            let mut volume0 = sd.volume_manager.open_volume(embedded_sdmmc::VolumeIdx(0));
+            let volume0 = sd.volume_manager.open_volume(embedded_sdmmc::VolumeIdx(0));
             match volume0 {
-                Ok(mut v) => {
+                Ok(v) => {
                     let root_result = v.open_root_dir();
                     match root_result {
-                        Ok(mut root) => {
+                        Ok(root) => {
                             let books_dir_res = root.open_dir("books");
                             if let Ok(mut books_dir) = books_dir_res {
                                 let books = match SdMount::get_books(&mut books_dir) {
@@ -909,8 +905,8 @@ impl Page for ReadPage{
                                                     let short_name = entry.name;
                                                     // Read page position from index file (own block to release borrow)
                                                     let page_pos = {
-                                                        let mut idx_file = SdMount::open_idx_file(&mut books_dir, &short_name, embedded_sdmmc::Mode::ReadOnly);
-                                                        if let Ok(mut idx_file) = idx_file {
+                                                        let idx_file = SdMount::open_idx_file(&mut books_dir, &short_name, embedded_sdmmc::Mode::ReadOnly);
+                                                        if let Ok(idx_file) = idx_file {
                                                             let begin_pos = if page == 0 { 0u32 } else {
                                                                 idx_file.seek_from_start((page - 1) * 4);
                                                                 let mut buf = [0u8; 4];
@@ -929,7 +925,7 @@ impl Page for ReadPage{
 
                                                     if let Some((begin_pos, end_pos)) = page_pos {
                                                         if end_pos > begin_pos {
-                                                            let mut my_file = books_dir.open_file_in_dir(short_name, embedded_sdmmc::Mode::ReadOnly);
+                                                            let my_file = books_dir.open_file_in_dir(short_name, embedded_sdmmc::Mode::ReadOnly);
                                                             if let Ok(mut my_file) = my_file {
                                                                 self.bookmark_preview = TxtReader::get_page_content(&mut my_file, begin_pos, end_pos, self.visual_width());
                                                                 my_file.close();

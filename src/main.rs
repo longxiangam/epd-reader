@@ -28,26 +28,23 @@ mod web_service;
 mod flash_sleep;
 
 extern crate alloc;
-use alloc::{format, vec};
 use core::cell::RefCell;
 
 use embassy_executor::Spawner;
-use embassy_time::{Duration, Instant, Timer};
+use embassy_time::{Duration, Timer};
 use embedded_graphics::Drawable;
 use embedded_graphics::mono_font::MonoTextStyleBuilder;
 use embedded_graphics::prelude::Point;
-use embedded_graphics::text::{Baseline, LineHeight, Text, TextStyleBuilder};
+use embedded_graphics::text::{Baseline, Text, TextStyleBuilder};
 use embedded_sdmmc::{sdcard::AcquireOpts, SdCard, VolumeManager};
 
 use esp_hal::{
     analog::adc::{Adc, AdcCalCurve, AdcConfig, Attenuation},
     clock::CpuClock,
-    gpio::{DriveStrength, Level, Output, OutputConfig, RtcPin},
+    gpio::{Level, Output, OutputConfig, RtcPin},
     interrupt::software::SoftwareInterruptControl,
-    main,
     rng::Rng,
     spi::master::{Config as SpiConfig, Spi},
-    spi::Mode as SpiMode,
     time::Rate,
     Config as HalConfig,
     init as hal_init,
@@ -56,45 +53,23 @@ use esp_hal::{
 use esp_hal::spi::Mode;
 use esp_hal::timer::timg::TimerGroup;
 
-use esp_println::{print, println};
+use esp_println::println;
 
 use embedded_hal_bus::spi::CriticalSectionDevice;
-use epd_waveshare::color::{Black, Color, White};
+use epd_waveshare::color::{Black, White};
 
-use epd_waveshare::prelude::{Display, RefreshLut, WaveshareDisplay};
-use heapless::{String, Vec};
-use log::{debug, error, trace};
-use core::str::FromStr;
-use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
-use embedded_layout::View;
-use crate::epd2in9_txt::TxtReader;
-use u8g2_fonts::types::VerticalPosition;
-use u8g2_fonts::{Content, FontRenderer};
-use u8g2_fonts::U8g2TextStyle;
+use epd_waveshare::prelude::Display;
+use log::trace;
+use u8g2_fonts::FontRenderer;
 use u8g2_fonts::fonts;
-use u8g2_fonts::types::FontColor;
-use u8g2_fonts::types::HorizontalAlignment;
 
-use embedded_graphics::primitives::Rectangle;
-use embedded_graphics::prelude::Size;
-use embedded_text::TextBox;
-use embedded_graphics::geometry::Dimensions;
-use embedded_graphics::draw_target::DrawTargetExt;
-use embedded_graphics::text::renderer::TextRenderer;
-use embedded_hal::delay::DelayNs;
 use epd_waveshare::graphics::DisplayRotation;
-use futures::SinkExt;
 use esp_hal::rtc_cntl::sleep::WakeupLevel;
-use esp_hal::analog::adc::AdcPin;
-use static_cell::StaticCell;
 use alloc::string::ToString;
 use crate::battery::Battery;
 use crate::sd_mount::{SdMount, SD_MOUNT};
-use crate::sleep::{add_rtcio, refresh_active_time, to_sleep, to_sleep_tips};
-use crate::storage::{ErrorLogStorage, NvsStorage};
-use crate::weather::{sync_weather_success, HolidayInfo, Weather};
-use crate::wifi::{wifi_is_idle, WifiModel, WIFI_MODEL};
-use crate::worldtime::sync_time_success;
+use crate::sleep::{add_rtcio, refresh_active_time, to_sleep_tips};
+use crate::wifi::{WifiModel, WIFI_MODEL};
 
 use critical_section::Mutex as CsMutex;
 
@@ -169,7 +144,7 @@ async fn main(spawner: Spawner) -> ! {
     let adc_pin = unsafe { peripherals.GPIO2.clone_unchecked() };
     let rtc_pin = unsafe { peripherals.GPIO2.clone_unchecked() };
     let key2 = peripherals.GPIO2;
-    let mut adc1_pin = adc1_config.enable_pin_with_cal::<_, AdcCalCurve<esp_hal::peripherals::ADC1>>(adc_pin, Attenuation::_11dB);
+    let adc1_pin = adc1_config.enable_pin_with_cal::<_, AdcCalCurve<esp_hal::peripherals::ADC1>>(adc_pin, Attenuation::_11dB);
     let bat_adc1_pin = adc1_config.enable_pin_with_cal::<_, AdcCalCurve<esp_hal::peripherals::ADC1>>(peripherals.GPIO4, Attenuation::_11dB);
 
     let adc1 = Adc::new(peripherals.ADC1, adc1_config);
@@ -193,19 +168,19 @@ async fn main(spawner: Spawner) -> ! {
     let spi_bus_epd = static_cell::make_static!(spi_bus_epd);
 
     let font: FontRenderer = FontRenderer::new::<fonts::u8g2_font_wqy15_t_gb2312>();
-    let mut font = font.with_ignore_unknown_chars(true);
+    let _font = font.with_ignore_unknown_chars(true);
 
     spawner.spawn(display::render(spi_bus_epd, epd_busy, epd_rst, epd_dc).unwrap());
 
     let mut display: display::EpdDisplay = display::EpdDisplay::default();
-    use embedded_graphics::draw_target::DrawTarget;
+    
 
     display.set_rotation(DisplayRotation::Rotate90);
-    use crate::sd_mount::ActualVolumeManager;
+    
 
     let sdcard = SdCard::new_with_options(spi_bus_sd, embassy_time::Delay, AcquireOpts { use_crc: false, acquire_retries: 50 });
-    let mut volume_mgr = VolumeManager::new(sdcard, crate::sd_mount::TimeSource);
-    let mut sd_mount = SdMount::new(volume_mgr);
+    let volume_mgr = VolumeManager::new(sdcard, crate::sd_mount::TimeSource);
+    let sd_mount = SdMount::new(volume_mgr);
     crate::sd_mount::SD_MOUNT.lock().await.replace(sd_mount);
     // SD上电后要通信一次，不然对显示通信有干扰
     if let Some(ref mut sd) = *SD_MOUNT.lock().await {
@@ -236,7 +211,7 @@ async fn main(spawner: Spawner) -> ! {
         println!("entry ap");
         WIFI_MODEL.lock().await.replace(WifiModel::AP);
         println!("wifi_model:{:?}", WIFI_MODEL.lock().await.as_ref());
-        let stack = crate::wifi::start_wifi_ap(
+        let _stack = crate::wifi::start_wifi_ap(
             &spawner,
             Rng::new(),
             peripherals.WIFI,
@@ -256,7 +231,7 @@ async fn main(spawner: Spawner) -> ! {
         spawner.spawn(pages::main_task(spawner.clone()).unwrap());
 
         WIFI_MODEL.lock().await.replace(WifiModel::STA);
-        let stack = crate::wifi::connect_wifi(
+        let _stack = crate::wifi::connect_wifi(
             &spawner,
             Rng::new(),
             peripherals.WIFI,

@@ -4,7 +4,6 @@ use heapless::Vec;
 use core::str::FromStr;
 use embedded_graphics::draw_target::DrawTarget;
 use embedded_graphics::Drawable;
-use embedded_graphics::geometry::Dimensions;
 use embedded_graphics::prelude::{PixelColor, Point, Primitive, Size};
 use embedded_graphics::primitives::{Circle, CornerRadii, Line, PrimitiveStyleBuilder, Rectangle, RoundedRectangle, StrokeAlignment};
 use u8g2_fonts::FontRenderer;
@@ -159,7 +158,7 @@ where
     where
         D: DrawTarget<Color = Self::Color>,
     {
-        let stroke = PrimitiveStyleBuilder::new()
+        let _stroke = PrimitiveStyleBuilder::new()
             .stroke_color(self.front_color)
             .stroke_alignment(StrokeAlignment::Inside)
             .stroke_width(1)

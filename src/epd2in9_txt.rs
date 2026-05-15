@@ -1,31 +1,16 @@
 use alloc::boxed::Box;
-use alloc::{format, vec};
 use core::future::Future;
-use core::iter::once;
 use core::pin::Pin;
-use embassy_time::{Instant, Timer};
-use embedded_graphics::prelude::Point;
-use core::cell::RefCell;
+use embassy_time::Instant;
 use embedded_hal_bus::spi::CriticalSectionDevice;
-use critical_section::Mutex as CsMutex;
-use embedded_sdmmc::{File, SdCard, ShortFileName};
+use embedded_sdmmc::ShortFileName;
 
-use embassy_time::Delay;
 use esp_hal::gpio::Output;
 use esp_hal::spi::master::Spi;
-use esp_hal::Blocking;
-use esp_println::{print, println};
+use esp_println::println;
 use heapless::{String, Vec};
-use log::debug;
-use u8g2_fonts::types::VerticalPosition;
-use u8g2_fonts::{Content, FontRenderer};
-use u8g2_fonts::U8g2TextStyle;
-use u8g2_fonts::fonts;
-use u8g2_fonts::types::FontColor;
-use u8g2_fonts::types::HorizontalAlignment;
 use crate::epd2in9_txt::CharType::{Ascii, Other, Tail, Zh};
-use crate::pages::read_page::PAGE_INDEX;
-use crate::sd_mount::{ActualDirectory, ActualFile, TimeSource};
+use crate::sd_mount::{ActualDirectory, ActualFile};
 
 #[cfg(feature = "epd2in9")]
 const LINES_NUM:u32 = 7;//行数
@@ -55,8 +40,8 @@ const LINE_OVERFLOW:u32 = 8;
 type SpiDevice<'a> = CriticalSectionDevice<'a, Spi<'a, esp_hal::Blocking>, Output<'a>, embedded_hal_bus::spi::NoDelay>;
 type FileObject<'a,'b> = ActualFile<'b>;
 impl TxtReader {
-     pub async fn generate_pages<F>(books_dir:&mut ActualDirectory<'_>,book_name:&str, book_short_name:&ShortFileName, display_width:u32, display_lines:u32, mut process: F) ->Option<BookPages>
-     where F:FnMut(f32) -> (Pin<Box<dyn Future<Output=()>>>)
+     pub async fn generate_pages<F>(books_dir:&mut ActualDirectory<'_>,_book_name:&str, book_short_name:&ShortFileName, display_width:u32, display_lines:u32, mut process: F) ->Option<BookPages>
+     where F:FnMut(f32) -> Pin<Box<dyn Future<Output=()>>> 
      {
          // Use short name for .txt file operations
          let file_short_name = book_short_name.clone();
@@ -77,11 +62,11 @@ impl TxtReader {
         let mut lines_num = 0;//当前行数 用于换屏
         let mut last_borrow_chars = 0;//上一次缓存结束时最后一个字符有字节未读取到时，算到上一个分页中，这里需要减去后再开始，
 
-        let last_boundary_index = 0;//最后一次字符边界
+        let _last_boundary_index = 0;//最后一次字符边界
 
          let mut file_length = 0;
          {
-             let mut my_file = books_dir.open_file_in_dir(file_short_name.clone(), embedded_sdmmc::Mode::ReadOnly).unwrap();
+             let my_file = books_dir.open_file_in_dir(file_short_name.clone(), embedded_sdmmc::Mode::ReadOnly).unwrap();
              file_length = my_file.length();
              my_file.close();
          }
@@ -97,7 +82,7 @@ impl TxtReader {
          }
          while end_position < file_length {
              println!("end_position:{}",end_position);
-             let mut my_file = books_dir.open_file_in_dir(file_short_name.clone(), embedded_sdmmc::Mode::ReadOnly).unwrap();
+             let my_file = books_dir.open_file_in_dir(file_short_name.clone(), embedded_sdmmc::Mode::ReadOnly).unwrap();
              if end_position > 0 {
                  my_file.seek_from_start(end_position);
                  last_borrow_chars = 0;
@@ -193,7 +178,7 @@ impl TxtReader {
 
 
              //写索引
-             let mut my_file_index = books_dir.open_file_in_dir(idx_short_name.clone(), embedded_sdmmc::Mode::ReadWriteCreateOrAppend);
+             let my_file_index = books_dir.open_file_in_dir(idx_short_name.clone(), embedded_sdmmc::Mode::ReadWriteCreateOrAppend);
              if let Ok(mut mfi) = my_file_index {
                  crate::epd2in9_txt::TxtReader::save_pages(&mut mfi, &all_page_position_vec);
                  mfi.close();
@@ -205,8 +190,8 @@ impl TxtReader {
          }
          //读索引长度
          let mut book_pages  = None;
-         let mut my_file_index = books_dir.open_file_in_dir(idx_short_name, embedded_sdmmc::Mode::ReadOnly);
-         if let Ok(mut mfi) = my_file_index {
+         let my_file_index = books_dir.open_file_in_dir(idx_short_name, embedded_sdmmc::Mode::ReadOnly);
+         if let Ok(mfi) = my_file_index {
              book_pages = Some(BookPages::new(mfi.length()));
              mfi.close();
          }
@@ -224,7 +209,7 @@ impl TxtReader {
         my_file.seek_from_start(start_position as u32);
 
         let mut buffer = [0u8; ONE_PAGE_CONTENT_LEN];
-        let num_read = my_file.read(&mut buffer).unwrap();
+        let _num_read = my_file.read(&mut buffer).unwrap();
         let mut txt:Vec<u8,ONE_PAGE_CONTENT_LEN> = Vec::new();
 
         let mut i:usize = 0;
@@ -328,7 +313,7 @@ impl TxtReader {
             // Only check bookmarks (index 1+), not last read position (index 0)
             let already_bookmarked = log_vec.iter().skip(1).any(|&p| p == page);
             if !already_bookmarked && log_vec.len() < LOG_VEC_MAX{
-                if(log_vec.len() == 0){
+                if log_vec.len() == 0 {
                     log_vec.push(page);
                 }
                 log_vec.push(page);
@@ -474,7 +459,7 @@ impl BookPages {
     pub fn get_end_page_position<'a,'b>(&mut self,my_file: &mut FileObject<'a,'b> )->u32{
         my_file.seek_from_end(4);
         let mut buffer = [0u8;4];
-        let num_read = my_file.read(&mut buffer).unwrap();
+        let _num_read = my_file.read(&mut buffer).unwrap();
         let value = ((buffer[0] as u32) << 24) | ((buffer[1] as u32) << 16) | ((buffer[2] as u32) << 8) | buffer[3] as u32;
         self.end_page_position = value;
         return value;
@@ -486,7 +471,7 @@ impl BookPages {
             if self.current_vec_num > 0 {
                 my_file.seek_from_start(self.vec_offset_begin - 4);
                 let mut buffer = [0u8;4];
-                let num_read = my_file.read(&mut buffer).unwrap();
+                let _num_read = my_file.read(&mut buffer).unwrap();
                 let value = ((buffer[0] as u32) << 24) | ((buffer[1] as u32) << 16) | ((buffer[2] as u32) << 8) | buffer[3] as u32;
                 self.prev_vec_last_page = value;
             }else{

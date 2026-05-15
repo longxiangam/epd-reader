@@ -4,11 +4,9 @@ use embedded_graphics::draw_target::DrawTarget;
 use embedded_graphics::Drawable;
 use embedded_graphics::geometry::Point;
 use embedded_graphics::prelude::{DrawTargetExt, PixelColor, Primitive, Size};
-use embedded_graphics::primitives::{Line, PrimitiveStyleBuilder, Rectangle, StrokeAlignment};
+use embedded_graphics::primitives::{PrimitiveStyleBuilder, Rectangle, StrokeAlignment};
 use embedded_graphics::text::{Alignment, Baseline, Text, TextStyleBuilder};
 use embedded_graphics::text::renderer::CharacterStyle;
-use embedded_layout::View;
-use esp_println::println;
 use time::{Date, Month};
 use u8g2_fonts::U8g2TextStyle;
 use u8g2_fonts::fonts;
@@ -202,7 +200,7 @@ impl<C> Drawable for Calendar<C>
                 let lunar_day = lunar_day.unwrap();
                 let lunar_day_name = lunar_day.get_day_name();
                 let lunar_day_month_name = lunar_day.get_month_name();
-                let lunar_day_year = lunar_day.get_year();
+                let _lunar_day_year = lunar_day.get_year();
                 
                 let mut temp_style = style.clone();
                             temp_style.set_text_color(Some(self.front_color));
@@ -224,7 +222,7 @@ impl<C> Drawable for Calendar<C>
             
             if crate::weather::sync_holiday_success(){
                 let holiday = HolidayInfo::get_holiday();
-                let mut holiday_response = embassy_futures::block_on(holiday);
+                let holiday_response = embassy_futures::block_on(holiday);
                 let holiday_response:Option<&HolidayResponse> =  holiday_response.as_ref(); 
                 if holiday_response.is_some() {
                    

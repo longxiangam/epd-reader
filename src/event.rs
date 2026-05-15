@@ -4,21 +4,16 @@ use heapless::Vec;
 
 use core::future::Future;
 use core::pin::Pin;
-use embassy_futures::select::{Either3, Either4, select3, select4, select};
+use embassy_futures::select::select;
 use embassy_futures::select::Either::{First, Second};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::mutex::Mutex;
 use embassy_time::{Duration, Instant, Timer};
 use embedded_hal::digital::InputPin;
-use embedded_hal_async::digital::Wait;
-use esp_hal::analog::adc::{Adc, AdcCalCurve, AdcConfig, AdcPin};
+use esp_hal::analog::adc::{Adc, AdcCalCurve, AdcPin};
 use esp_println::println;
-use futures::FutureExt;
 use esp_hal::gpio::{Input, Pull};
-use esp_hal::Blocking;
-use futures::future::Either;
 use crate::sleep::refresh_active_time;
-use crate::worldtime::SntpcError::NoAddr;
 
 #[derive(Eq, PartialEq,Debug)]
 pub enum EventType{
@@ -41,7 +36,7 @@ pub struct EventInfo{
 ///ptr 为处理对象的裸指针，因为定义的一个全局vec保存listener ，泛型不好处理，这里直接用usize
 ///所以要在对象drop 的同时clear 掉事件监听，不然会出现悬垂指针的问题
 struct Listener{
-    callback:Box< dyn FnMut(EventInfo) -> (Pin<Box< dyn Future<Output = ()>  + 'static>>)  + Send + Sync + 'static>,
+    callback:Box< dyn FnMut(EventInfo) -> Pin<Box< dyn Future<Output = ()>  + 'static>>   + Send + Sync + 'static>,
     event_type:EventType,
     ptr:Option<usize>,
     fixed:bool,
@@ -49,17 +44,17 @@ struct Listener{
 
 static LISTENER:Mutex<CriticalSectionRawMutex,Vec<Listener,20>>  = Mutex::new(Vec::new()) ;
 pub async fn on<F>(event_type: EventType, callback: F)
-where F: FnMut(EventInfo) -> (Pin<Box<dyn Future<Output=()>  + 'static>>) + Send + Sync + 'static,
+where F: FnMut(EventInfo) -> Pin<Box<dyn Future<Output=()>  + 'static>>  + Send + Sync + 'static,
 {
     LISTENER.lock().await.push(Listener{callback:Box::new(callback),event_type,ptr:None,fixed:false});
 }
 pub async fn on_target<F>(event_type: EventType,target_ptr:usize, callback: F)
-    where F: FnMut(EventInfo) -> (Pin<Box<dyn Future<Output=()>  + 'static>>) + Send + Sync + 'static
+    where F: FnMut(EventInfo) -> Pin<Box<dyn Future<Output=()>  + 'static>>  + Send + Sync + 'static
 {
     LISTENER.lock().await.push(Listener{callback:Box::new(callback),event_type,ptr:Some(target_ptr),fixed:false});
 }
 pub async fn on_fixed<F>(event_type: EventType,target_ptr:usize, callback: F)
-    where F: FnMut(EventInfo) -> (Pin<Box<dyn Future<Output=()> + 'static>>) + Send + Sync + 'static
+    where F: FnMut(EventInfo) -> Pin<Box<dyn Future<Output=()> + 'static>>  + Send + Sync + 'static
 {
     LISTENER.lock().await.push(Listener{callback:Box::new(callback),event_type,ptr:Some(target_ptr),fixed:true});
 }
@@ -85,10 +80,10 @@ pub async fn clear(){
 }
 
 
-pub async fn toggle_event(event_type: EventType,ms:u64){
+pub async fn toggle_event(event_type: EventType,_ms:u64){
     println!("event_type:{:?}",event_type);
     let mut vec = LISTENER.lock().await;
-    for mut listener in vec.iter_mut() {
+    for listener in vec.iter_mut() {
         if listener.event_type == event_type{
 
             (listener.callback)(EventInfo{ptr:listener.ptr }).await;
@@ -146,7 +141,7 @@ where P:InputPin
 
     loop {
         let mut is_low_times = 0;
-        for i in 0..100 {
+        for _i in 0..100 {
             if key.is_low().unwrap() {
                 is_low_times += 1;
             }
@@ -176,7 +171,7 @@ where P:InputPin
                 //短时按下，等几ms 看是否有下一次按下，如有则是双击
                 loop {
                     let current = Instant::now().as_millis();
-                    if(!*ENABLE_DOUBLE.lock().await){
+                    if !*ENABLE_DOUBLE.lock().await {
                         toggle_event(EventType::KeyShort(key_num as u32), current).await;
                         return;
                     }
@@ -185,7 +180,7 @@ where P:InputPin
                         return;
                     }
                     let mut is_low_times = 0;
-                    for i in 0..100 {
+                    for _i in 0..100 {
                         if key.is_low().unwrap() {
                             is_low_times += 1;
                         }
@@ -205,7 +200,7 @@ where P:InputPin
 }
 
 async fn judge_adc_num() -> usize{
-    let mut temp = 0;
+    let temp = 0;
     let mut effective_num = 20;
     let mut adc_valute_sum = 0;
     while  temp == 0 &&  effective_num > 0 {
@@ -217,7 +212,7 @@ async fn judge_adc_num() -> usize{
                         adc_valute_sum += adc_value;
                         effective_num -= 1;
                     }
-                    Err(e) => {
+                    Err(_e) => {
                         Timer::after_ticks(10).await;
                     }
                 }

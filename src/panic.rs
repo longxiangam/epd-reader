@@ -3,7 +3,6 @@
 use core::panic::PanicInfo;
 use core::fmt::Write;
 use esp_println::println;
-use heapless::String;
 use crate::storage::{ErrorLogStorage, NvsStorage};
 use esp_backtrace::Backtrace;
 

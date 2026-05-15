@@ -1,8 +1,6 @@
-use alloc::format;
 use alloc::string::String;
 
 use core::fmt::Write;
-use core::ops::Add;
 use embassy_futures::select::{Either, select};
 
 use embassy_net::{
@@ -17,11 +15,11 @@ use no_std_net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs};
 use esp_hal::ram;
 
 use sntpc::{async_impl::{get_time,NtpUdpSocket }, NtpContext, NtpTimestampGenerator };
-use static_cell::{make_static, StaticCell};
+use static_cell::StaticCell;
 use time::{Duration, OffsetDateTime, UtcOffset, Weekday};
 /*use crate::pages::init_page::InitPage;*/
 
-use crate::sleep::{get_rtc_ms, get_sleep_ms};
+use crate::sleep::get_sleep_ms;
 use crate::weather::{HolidayInfo, Weather};
 use crate::wifi::{finish_wifi, use_wifi};
 
@@ -348,7 +346,7 @@ pub async fn ntp_worker() {
                         Err(e) => {
                             finish_wifi().await;
                             println!("NTP error response:{:?}",e);
-                            if(err_times > 10){
+                            if err_times > 10 {
                                 err_times = 0;
                                 sleep_sec = 10;
                             }else{

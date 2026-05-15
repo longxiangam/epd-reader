@@ -1,32 +1,25 @@
-use alloc::{format, vec};
+use alloc::format;
 use alloc::boxed::Box;
 use embassy_executor::Spawner;
-use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
-use embassy_sync::mutex::MutexGuard;
 use embassy_time::{Duration, Instant, Timer};
 use embedded_graphics::Drawable;
-use embedded_graphics::geometry::{Dimensions, OriginDimensions, Point, Size};
-use embedded_graphics::prelude::{DrawTarget, DrawTargetExt, Primitive};
-use embedded_graphics::primitives::{Line, PrimitiveStyleBuilder, Rectangle, StrokeAlignment};
-use embedded_graphics::text::{Alignment, Baseline, Text, TextStyleBuilder};
-use embedded_text::TextBox;
+use embedded_graphics::geometry::{Dimensions, Point, Size};
+use embedded_graphics::text::Text;
 use esp_hal::system::software_reset;
 use heapless::{String, Vec};
-use u8g2_fonts::{FontRenderer, U8g2TextStyle};
+use u8g2_fonts::U8g2TextStyle;
 use u8g2_fonts::fonts;
-use u8g2_fonts::types::{FontColor, HorizontalAlignment, VerticalPosition};
-use epd_waveshare::color::{Black, Color};
+use epd_waveshare::color::Black;
 use epd_waveshare::color::Color::White;
 use epd_waveshare::prelude::Display;
 use crate::display::{display_mut, RENDER_CHANNEL, RenderInfo};
 use crate::event;
 use crate::event::EventType;
 use crate::pages::Page;
-use crate::storage::{init_storage_area, NvsStorage, WIFI_INFO};
-use crate::weather::Weather;
+use crate::storage::{init_storage_area, NvsStorage};
 use crate::widgets::qrcode_widget::QrcodeWidget;
 use crate::widgets::list_widget::ListWidget;
-use crate::wifi::{finish_wifi, IP_ADDRESS, use_wifi, WIFI_MODEL, WifiNetError, WifiModel};
+use crate::wifi::{IP_ADDRESS, WIFI_MODEL, WifiModel};
 use crate::web_service::{web_service,STOP_WEB_SERVICE};
 
 const SETTINGS_COUNT: usize = 3;
@@ -354,11 +347,11 @@ impl Page for SettingPage {
                     Timer::after(Duration::from_millis(200)).await;
                     return;
                 }
-                if (mut_ref.long_start_time == 0) {
+                if mut_ref.long_start_time == 0  {
                     mut_ref.long_start_time = Instant::now().as_secs();
                 }
                 mut_ref.need_render = true;
-                if (Instant::now().as_secs() - mut_ref.long_start_time > 10) {
+                if Instant::now().as_secs() - mut_ref.long_start_time > 10  {
                     mut_ref.reinit = true;
                 }
             });

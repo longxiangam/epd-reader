@@ -15,7 +15,7 @@ impl Page for ReadMenuPage{
         todo!()
     }
 
-    async fn run(&mut self, spawner: Spawner) {
+    async fn run(&mut self, _spawner: Spawner) {
         todo!()
     }
 

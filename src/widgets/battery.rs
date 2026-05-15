@@ -2,7 +2,7 @@ use embedded_graphics::Drawable;
 use embedded_graphics::draw_target::DrawTarget;
 use embedded_graphics::pixelcolor::PixelColor;
 use embedded_graphics::prelude::{Point, Primitive, Size};
-use embedded_graphics::primitives::{Rectangle, PrimitiveStyle, PrimitiveStyleBuilder};
+use embedded_graphics::primitives::{Rectangle, PrimitiveStyleBuilder};
 use u8g2_fonts::FontRenderer;
 use u8g2_fonts::types::{FontColor, HorizontalAlignment, VerticalPosition};
 

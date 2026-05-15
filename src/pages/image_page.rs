@@ -3,7 +3,7 @@ use alloc::format;
 use embassy_executor::Spawner;
 use embassy_time::{Duration, Timer};
 use embedded_graphics::Drawable;
-use embedded_graphics::prelude::{Dimensions, Point, Size};
+use embedded_graphics::prelude::{Point, Size};
 use embedded_graphics::primitives::{PrimitiveStyleBuilder, Rectangle, StrokeAlignment};
 use embedded_graphics::prelude::Primitive;
 use epd_waveshare::color::{Black, Color, White};
@@ -359,7 +359,7 @@ impl ImagePage {
     }
 }
 
-fn image_sleep_renderer(display: &mut crate::display::EpdDisplay) {
+fn image_sleep_renderer(_display: &mut crate::display::EpdDisplay) {
     //保持图片不绘制
 }
 
@@ -391,12 +391,12 @@ impl Page for ImagePage {
         self.need_render = true;
 
         if let Some(ref mut sd) = *SD_MOUNT.lock().await {
-            let mut volume0 = sd.volume_manager.open_volume(embedded_sdmmc::VolumeIdx(0));
+            let volume0 = sd.volume_manager.open_volume(embedded_sdmmc::VolumeIdx(0));
             match volume0 {
-                Ok(mut v) => {
+                Ok(v) => {
                     let root_result = v.open_root_dir();
                     match root_result {
-                        Ok(mut root) => {
+                        Ok(root) => {
                             let images_dir_res = root.open_dir("images");
                             match images_dir_res {
                                 Ok(mut images_dir) => {

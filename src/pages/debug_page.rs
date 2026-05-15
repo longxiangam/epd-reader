@@ -10,11 +10,9 @@ use embedded_text::TextBox;
 use epd_waveshare::color::Black;
 use epd_waveshare::color::Color::White;
 use epd_waveshare::prelude::Display;
-use heapless::String;
 use crate::pages::Page;
 use crate::storage::{ ErrorLogStorage};
 use esp_println::println;
-use esp_storage::FlashStorageError;
 use u8g2_fonts::{fonts, U8g2TextStyle};
 use crate::display::{display_mut, RenderInfo, RENDER_CHANNEL};
 use crate::event;
@@ -106,7 +104,7 @@ impl Page for DebugPage {
         event::on_target(EventType::KeyLongEnd(1),Self::mut_to_ptr(self),  move |info|  {
             return Box::pin(async move {
                 let mut_ref:&mut Self =  Self::mut_by_ptr(info.ptr.clone()).unwrap();
-                let mut error_log = ErrorLogStorage::read();
+                let error_log = ErrorLogStorage::read();
                 match error_log {
                     Ok( mut v) => {
                         v.error_count = 0;
