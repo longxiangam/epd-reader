@@ -26,6 +26,13 @@ pub const WIDTH: u32 = 300;
 #[cfg(feature = "epd4in2")]
 pub const HEIGHT: u32 = 400;
 
+#[cfg(feature = "epd2in7")]
+const LINES_NUM:u32 = 9;//行数
+#[cfg(feature = "epd2in7")]
+pub const WIDTH: u32 = 264;
+#[cfg(feature = "epd2in7")]
+pub const HEIGHT: u32 = 176;
+
 
 const BUFFER_LEN: usize = 200;
 pub(crate) const PAGES_VEC_MAX:usize = 1_000;

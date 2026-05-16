@@ -29,14 +29,27 @@ const LOG_VEC_MAX:usize = epd2in9_txt::LOG_VEC_MAX;
 const ONE_PAGE_CONTENT_LEN:usize = epd2in9_txt::ONE_PAGE_CONTENT_LEN;
 
 
-/// Physical display dimensions (epd4in2)
+/// Physical display dimensions
+#[cfg(feature = "epd4in2")]
 const DISPLAY_WIDTH: u32 = 400;
+#[cfg(feature = "epd4in2")]
 const DISPLAY_HEIGHT: u32 = 300;
+
+#[cfg(feature = "epd2in7")]
+const DISPLAY_WIDTH: u32 = 176;
+#[cfg(feature = "epd2in7")]
+const DISPLAY_HEIGHT: u32 = 264;
+
+#[cfg(feature = "epd2in9")]
+const DISPLAY_WIDTH: u32 = 296;
+#[cfg(feature = "epd2in9")]
+const DISPLAY_HEIGHT: u32 = 128;
+
 const FONT_SIZE: u32 = 16;
 const PROGRESS_AREA_HEIGHT: u32 = 20;
 
-const SLEEP_IMG_W: u32 = DISPLAY_HEIGHT; // 300 portrait width
-const SLEEP_IMG_H: u32 = DISPLAY_WIDTH;  // 400 portrait height
+const SLEEP_IMG_W: u32 = DISPLAY_HEIGHT; // portrait width
+const SLEEP_IMG_H: u32 = DISPLAY_WIDTH;  // portrait height
 
 fn sleep_renderer(display: &mut crate::display::EpdDisplay) {
     display.clear_buffer(Color::White);

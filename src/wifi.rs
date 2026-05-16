@@ -15,6 +15,7 @@ use esp_hal::rng::Rng;
 use heapless::{String, Vec};
 use static_cell::make_static;
 use esp_radio::wifi::{
+    AuthenticationMethod,
     Config as WifiConfig,
     ControllerConfig,
     Interface,
@@ -373,13 +374,16 @@ pub async fn start_wifi_ap(spawner: &Spawner,
     let ap_config = WifiConfig::AccessPoint(
         AccessPointConfig::default()
             .with_ssid("esp_wifi")
-            .with_password("123456789".into())
     );
 
-    let (controller, interfaces) = esp_radio::wifi::new(
-        wifi,
-        ControllerConfig::default().with_initial_config(ap_config),
-    ).unwrap();
+    let config = ControllerConfig::default().with_initial_config(ap_config);
+    let (controller, interfaces) = match esp_radio::wifi::new(wifi, config) {
+        Ok(result) => result,
+        Err(e) => {
+            println!("!! wifi::new1111() failed: {:?}", e);
+            panic!("wifi new failed");
+        }
+    };
 
     let wifi_ap_interface = interfaces.access_point;
 
@@ -443,7 +447,6 @@ async fn connection_wifi_ap(mut controller: WifiController<'static>) {
     let ap_config = WifiConfig::AccessPoint(
         AccessPointConfig::default()
             .with_ssid("esp_wifi")
-            .with_password("123456789".into())
     );
     match controller.set_config(&ap_config) {
         Ok(_) => {

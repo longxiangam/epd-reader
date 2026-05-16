@@ -3,7 +3,7 @@
 #![feature(impl_trait_in_assoc_type)]
 #![feature(type_alias_impl_trait)]
 #![feature(generic_const_exprs)]
-#![feature(round_char_boundary)]
+#![allow(unused_must_use)]
 
 
 mod epd2in9_txt;

@@ -17,13 +17,6 @@ const ROW_BYTES: usize = (SLEEP_IMG_W as usize + 7) / 8;
 const DEFAULT_SLEEP_PIXELS: &[u8; ROW_BYTES * SLEEP_IMG_H as usize] =
     include_bytes!("../files/sleep_default.bin");
 
-pub fn has_sleep_image() -> bool {
-    let mut buf = [0u8; 4];
-    if read_flash(STORAGE_OFFSET, &mut buf).is_err() {
-        return false;
-    }
-    u32::from_le_bytes(buf) == SLEEP_IMAGE_MAGIC
-}
 
 pub fn get_sleep_image_size() -> Option<u32> {
     let mut header = [0u8; 8];
@@ -115,81 +108,6 @@ pub fn bmp_to_pixels(raw_bmp: &[u8], target_w: u32, target_h: u32) -> Option<All
     Some(pixels)
 }
 
-/// Convert raw BMP data to packed 1-bit pixels, writing directly into a caller-provided buffer.
-/// No heap allocation. Returns false if BMP is invalid or buffer is wrong size.
-pub fn bmp_to_pixels_buf(raw_bmp: &[u8], target_w: u32, target_h: u32, out: &mut [u8]) -> bool {
-    let row_bytes = (target_w as usize + 7) / 8;
-    let total_size = row_bytes * target_h as usize;
-    if out.len() != total_size { return false; }
-
-    if raw_bmp.len() < 54 || raw_bmp[0] != b'B' || raw_bmp[1] != b'M' {
-        return false;
-    }
-
-    let pixel_offset = u32::from_le_bytes([raw_bmp[10], raw_bmp[11], raw_bmp[12], raw_bmp[13]]) as usize;
-    let bmp_w = u32::from_le_bytes([raw_bmp[18], raw_bmp[19], raw_bmp[20], raw_bmp[21]]);
-    let height_raw = i32::from_le_bytes([raw_bmp[22], raw_bmp[23], raw_bmp[24], raw_bmp[25]]);
-    let bpp = u16::from_le_bytes([raw_bmp[28], raw_bmp[29]]) as u32;
-    let top_down = height_raw < 0;
-    let bmp_h = height_raw.unsigned_abs();
-
-    if bmp_w == 0 || bmp_h == 0 || (bpp != 1 && bpp != 24 && bpp != 32) {
-        return false;
-    }
-
-    let src_row_bytes = match bpp {
-        1 => (bmp_w + 7) / 8,
-        24 => bmp_w * 3,
-        32 => bmp_w * 4,
-        _ => return false,
-    };
-    let src_row_stride = ((src_row_bytes + 3) & !3u32) as usize;
-
-    for b in out.iter_mut() { *b = 0; }
-
-    for dy in 0..target_h {
-        let src_y = dy as u32 * bmp_h / target_h;
-        let src_y = if top_down { src_y } else { bmp_h - 1 - src_y };
-        let row_start = pixel_offset + src_y as usize * src_row_stride;
-
-        for dx in 0..target_w {
-            let sx = dx as u32 * bmp_w / target_w;
-            let is_black = match bpp {
-                1 => {
-                    let byte_idx = row_start + sx as usize / 8;
-                    let bit_idx = 7 - (sx % 8);
-                    byte_idx < raw_bmp.len() && (raw_bmp[byte_idx] >> bit_idx) & 1 == 0
-                }
-                24 => {
-                    let px = row_start + sx as usize * 3;
-                    if px + 2 < raw_bmp.len() {
-                        let (b, g, r) = (raw_bmp[px] as u32, raw_bmp[px + 1] as u32, raw_bmp[px + 2] as u32);
-                        (r * 299 + g * 587 + b * 114) / 1000 < 128
-                    } else {
-                        false
-                    }
-                }
-                32 => {
-                    let px = row_start + sx as usize * 4;
-                    if px + 2 < raw_bmp.len() {
-                        let (b, g, r) = (raw_bmp[px] as u32, raw_bmp[px + 1] as u32, raw_bmp[px + 2] as u32);
-                        (r * 299 + g * 587 + b * 114) / 1000 < 128
-                    } else {
-                        false
-                    }
-                }
-                _ => false,
-            };
-            if is_black {
-                let row_offset = dy as usize * row_bytes;
-                let idx = dx as usize;
-                out[row_offset + idx / 8] |= 1 << (7 - (idx % 8));
-            }
-        }
-    }
-
-    true
-}
 
 /// Parsed BMP header info for streaming operations.
 pub struct BmpInfo {
@@ -223,41 +141,6 @@ impl BmpInfo {
         };
         let src_row_stride = ((src_row_bytes + 3) & !3u32) as usize;
         Some(Self { pixel_offset, bmp_w, bmp_h, bpp, top_down, src_row_stride })
-    }
-}
-
-/// Convert one BMP source row to packed 1-bit pixels for a target row.
-/// out must be at least (target_w + 7) / 8 bytes.
-pub fn convert_bmp_row(src_row: &[u8], bpp: u32, bmp_w: u32, target_w: u32, out: &mut [u8]) {
-    let row_bytes = (target_w as usize + 7) / 8;
-    for b in out[..row_bytes].iter_mut() { *b = 0; }
-    for dx in 0..target_w {
-        let sx = dx * bmp_w / target_w;
-        let is_black = match bpp {
-            1 => {
-                let byte_idx = sx as usize / 8;
-                let bit_idx = 7 - (sx % 8);
-                byte_idx < src_row.len() && (src_row[byte_idx] >> bit_idx) & 1 == 0
-            }
-            24 => {
-                let px = sx as usize * 3;
-                if px + 2 < src_row.len() {
-                    let (b, g, r) = (src_row[px] as u32, src_row[px+1] as u32, src_row[px+2] as u32);
-                    (r * 299 + g * 587 + b * 114) / 1000 < 128
-                } else { false }
-            }
-            32 => {
-                let px = sx as usize * 4;
-                if px + 2 < src_row.len() {
-                    let (b, g, r) = (src_row[px] as u32, src_row[px+1] as u32, src_row[px+2] as u32);
-                    (r * 299 + g * 587 + b * 114) / 1000 < 128
-                } else { false }
-            }
-            _ => false,
-        };
-        if is_black {
-            out[dx as usize / 8] |= 1 << (7 - (dx as usize % 8));
-        }
     }
 }
 
