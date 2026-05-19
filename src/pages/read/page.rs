@@ -6,7 +6,7 @@ use embedded_graphics::Drawable;
 use embedded_graphics::prelude::{Dimensions, Point, Size};
 use embedded_graphics::primitives::{PrimitiveStyleBuilder, Rectangle, StrokeAlignment};
 use embedded_graphics::prelude::Primitive;
-use epd_waveshare::color::{Black, Color,White};
+use epd_waveshare::color::{Black, Color, White};
 use epd_waveshare::graphics::{Display, DisplayRotation};
 use esp_hal::ram;
 use esp_println::println;
@@ -18,65 +18,17 @@ use crate::display::{display_mut, RENDER_CHANNEL, RenderInfo};
 use crate::{display, epd2in9_txt, event};
 use crate::epd2in9_txt::{BookPages, TxtReader};
 use crate::event::EventType;
-use crate::pages::{ Page};
+use crate::pages::Page;
 use crate::sd_mount::{ActualDirectory, SD_MOUNT, SdMount, BOOK_NAME_MAX};
 use crate::sleep::to_sleep_tips;
 use crate::storage::NvsStorage;
 use crate::widgets::list_widget::ListWidget;
 
-const PAGES_VEC_MAX:usize = epd2in9_txt::PAGES_VEC_MAX;
-const LOG_VEC_MAX:usize = epd2in9_txt::LOG_VEC_MAX;
-const ONE_PAGE_CONTENT_LEN:usize = epd2in9_txt::ONE_PAGE_CONTENT_LEN;
-
-
-/// Physical display dimensions
-#[cfg(feature = "epd4in2")]
-const DISPLAY_WIDTH: u32 = 400;
-#[cfg(feature = "epd4in2")]
-const DISPLAY_HEIGHT: u32 = 300;
-
-#[cfg(feature = "epd2in7")]
-const DISPLAY_WIDTH: u32 = 176;
-#[cfg(feature = "epd2in7")]
-const DISPLAY_HEIGHT: u32 = 264;
-
-#[cfg(feature = "epd2in9")]
-const DISPLAY_WIDTH: u32 = 296;
-#[cfg(feature = "epd2in9")]
-const DISPLAY_HEIGHT: u32 = 128;
-
-const FONT_SIZE: u32 = 16;
-const PROGRESS_AREA_HEIGHT: u32 = 20;
-
-const SLEEP_IMG_W: u32 = DISPLAY_HEIGHT; // portrait width
-const SLEEP_IMG_H: u32 = DISPLAY_WIDTH;  // portrait height
-
-fn sleep_renderer(display: &mut crate::display::EpdDisplay) {
-    display.clear_buffer(Color::White);
-
-    let drawn = crate::flash_sleep::draw_sleep_image(display);
-
-    if !drawn {
-        let font: FontRenderer = FontRenderer::new::<fonts::u8g2_font_wqy15_t_gb2312>();
-        let font = font.with_ignore_unknown_chars(true);
-        let center = Point::new(
-            display.bounding_box().size.width as i32 / 2,
-            display.bounding_box().size.height as i32 / 2,
-        );
-        let _ = font.render_aligned(
-            "睡眠中",
-            center,
-            VerticalPosition::Center,
-            HorizontalAlignment::Center,
-            FontColor::Transparent(Black),
-            display,
-        );
-    }
-}
-
+const PAGES_VEC_MAX: usize = epd2in9_txt::PAGES_VEC_MAX;
+const LOG_VEC_MAX: usize = epd2in9_txt::LOG_VEC_MAX;
+const ONE_PAGE_CONTENT_LEN: usize = epd2in9_txt::ONE_PAGE_CONTENT_LEN;
 
 /// Accelerating step size for page jump long press.
-/// 0-4 ticks: 1, 5-9: 5, 10-19: 10, 20-34: 50, 35+: 100
 fn accel_step(tick: u32) -> u32 {
     if tick < 3 { 1 }
     else if tick < 5 { 5 }
@@ -96,51 +48,40 @@ enum MenuState {
     BookmarkList { bm_index: u32, deleting: bool },
 }
 
-pub struct ReadPage{
-    running:bool,
-    reading:bool,
-    need_render:bool,
-    change_page:bool,
+pub struct ReadPage {
+    running: bool,
+    reading: bool,
+    need_render: bool,
+    change_page: bool,
 
-    force_indexing:bool,
-    indexing:bool,
-    indexing_process:f32,
+    force_indexing: bool,
+    indexing: bool,
+    indexing_process: f32,
 
-    choose_index:u32,
-    open_file_name:String<BOOK_NAME_MAX>,
-    menus:Option<Vec<String<BOOK_NAME_MAX>,40>>,
-    book_pages:Option<BookPages>,
-    log_vec:Option<Vec<u32,LOG_VEC_MAX>>,
-    page_index:u32,
-    page_content:String<ONE_PAGE_CONTENT_LEN>,
-    menu_state:MenuState,
-    save_bookmark_flag:bool,
-    delete_bookmark_flag:bool,
-    need_load_preview:bool,
-    bookmark_preview:String<ONE_PAGE_CONTENT_LEN>,
-    /// 0=Rotate90, 1=Rotate270 (upside-down portrait, same page indexing)
-    flipped:bool,
-    exit_selected:bool,
-    jump_accel:u32,
-    book_progress:Vec<String<16>,40>,
+    choose_index: u32,
+    open_file_name: String<BOOK_NAME_MAX>,
+    menus: Option<Vec<String<BOOK_NAME_MAX>, 40>>,
+    book_pages: Option<BookPages>,
+    log_vec: Option<Vec<u32, LOG_VEC_MAX>>,
+    page_index: u32,
+    page_content: String<ONE_PAGE_CONTENT_LEN>,
+    menu_state: MenuState,
+    save_bookmark_flag: bool,
+    delete_bookmark_flag: bool,
+    need_load_preview: bool,
+    bookmark_preview: String<ONE_PAGE_CONTENT_LEN>,
+    flipped: bool,
+    exit_selected: bool,
+    jump_accel: u32,
+    book_progress: Vec<String<16>, 40>,
 }
 
-impl ReadPage{
-    fn current_rotation(&self) -> DisplayRotation {
-        if self.flipped { DisplayRotation::Rotate270 } else { DisplayRotation::Rotate90 }
-    }
-
-    fn visual_width(&self) -> u32 { DISPLAY_HEIGHT } // 300, always portrait
-    fn visual_height(&self) -> u32 { DISPLAY_WIDTH } // 400, always portrait
-
-    fn page_lines(&self) -> u32 {
-        (self.visual_height() - PROGRESS_AREA_HEIGHT) / FONT_SIZE - 1
-    }
-
-    async fn back(&mut self){
+impl ReadPage {
+    async fn back(&mut self) {
         self.running = false;
     }
-    async fn get_page_vec<>(&mut self, books_dir:&mut ActualDirectory<'_>)  {
+
+    async fn get_page_vec(&mut self, books_dir: &mut ActualDirectory<'_>) {
         let book_name = self.menus.as_ref().unwrap()[self.choose_index as usize].clone();
 
         let file_name = format!("{}.txt", book_name);
@@ -148,7 +89,6 @@ impl ReadPage{
         let mut file_len = 0;
         let mut book_pages = None;
 
-        // Resolve book's short name via LFN lookup
         let book_short_name = match SdMount::find_entry_by_name(books_dir, &file_name) {
             Some(entry) => entry.name,
             None => {
@@ -168,22 +108,19 @@ impl ReadPage{
             let my_file_index = SdMount::open_idx_file(books_dir, &book_short_name, embedded_sdmmc::Mode::ReadOnly);
             if let Ok(mut mfi) = my_file_index {
                 println!("idx len:{}", mfi.length());
-                if mfi.length() == 0  {
+                if mfi.length() == 0 {
                     need_index = true;
                 } else {
                     println!("entry read pages");
-                    //读索引
                     book_pages = Some(BookPages::new(mfi.length()));
 
                     if let Some(ref mut b) = book_pages {
-
                         if b.total_page == 0 {
                             need_index = true;
-                        }else if b.get_end_page_position(&mut mfi)  != file_len{
+                        } else if b.get_end_page_position(&mut mfi) != file_len {
                             need_index = true;
                         }
-
-                        println!("book_pages:{:?}",*b);
+                        println!("book_pages:{:?}", *b);
                     }
                 }
                 mfi.close();
@@ -192,17 +129,14 @@ impl ReadPage{
             }
         }
         if need_index || self.force_indexing {
-
-
             self.indexing = true;
             let self_ptr = Self::mut_to_ptr(self);
             let short_name_clone = book_short_name.clone();
-            let dw = self.visual_width();
-            let dl = self.page_lines();
-            book_pages = TxtReader::generate_pages(books_dir, book_name.as_str(), &short_name_clone, dw, dl, |process|  {
-                return Box::pin(async  move {
-
-                    let mut_ref:&mut Self =  Self::mut_by_ptr(Some(self_ptr)).unwrap();
+            let dw = super::text_width();
+            let dl = super::page_lines();
+            book_pages = TxtReader::generate_pages(books_dir, book_name.as_str(), &short_name_clone, dw, dl, |process| {
+                return Box::pin(async move {
+                    let mut_ref: &mut Self = Self::mut_by_ptr(Some(self_ptr)).unwrap();
                     mut_ref.indexing_process = process;
                     mut_ref.need_render = true;
                     mut_ref.render().await;
@@ -213,56 +147,50 @@ impl ReadPage{
             self.need_render = true;
             self.force_indexing = false;
             self.indexing = false;
-
         }
 
         self.book_pages = book_pages;
-
     }
-    async fn get_log_vec(&mut self,books_dir:&mut ActualDirectory<'_>) {
+
+    async fn get_log_vec(&mut self, books_dir: &mut ActualDirectory<'_>) {
         let book_name = self.menus.as_ref().unwrap()[self.choose_index as usize].clone();
         let file_name = format!("{}.txt", book_name);
 
-        // Resolve book's short name
         let book_short_name = match SdMount::find_entry_by_name(books_dir, &file_name) {
             Some(entry) => entry.name,
             None => return,
         };
         {
-            //读日志
-            let my_file =  SdMount::open_log_file(books_dir, &book_short_name, embedded_sdmmc::Mode::ReadOnly);
+            let my_file = SdMount::open_log_file(books_dir, &book_short_name, embedded_sdmmc::Mode::ReadOnly);
             if let Ok(mut f) = my_file {
                 self.log_vec = Some(TxtReader::read_log(&mut f));
-                if let Some(ref lv) = self.log_vec{
+                if let Some(ref lv) = self.log_vec {
                     if lv.len() > 0 {
                         self.page_index = lv[0];
                     }
                 }
                 f.close();
             } else {
-                // No log file yet — initialize empty so bookmark save works
                 self.log_vec = Some(Vec::new());
             }
         }
-
     }
-    async fn get_page_content(&mut self,books_dir:&mut ActualDirectory<'_>){
 
+    async fn get_page_content(&mut self, books_dir: &mut ActualDirectory<'_>) {
         let book_name = self.menus.as_ref().unwrap()[self.choose_index as usize].clone();
         let begin_secs = Instant::now().as_secs();
         println!("begin_time:{}", begin_secs);
 
         let file_name = format!("{}.txt", book_name);
 
-        // Resolve book's short name
         let book_short_name = match SdMount::find_entry_by_name(books_dir, &file_name) {
             Some(entry) => entry.name,
             None => return,
         };
 
-        if let Some( bp) = self.book_pages.as_mut() {
-            let mut begin =  0;
-            let mut end =  0;
+        if let Some(bp) = self.book_pages.as_mut() {
+            let mut begin = 0;
+            let mut end = 0;
             {
                 let index_file = SdMount::open_idx_file(books_dir, &book_short_name, embedded_sdmmc::Mode::ReadOnly);
                 if let Ok(mut index_file) = index_file {
@@ -272,7 +200,7 @@ impl ReadPage{
             {
                 let my_file = books_dir.open_file_in_dir(book_short_name.clone(), embedded_sdmmc::Mode::ReadOnly);
                 if let Ok(mut my_file) = my_file {
-                    self.page_content = TxtReader::get_page_content(&mut my_file, begin, end, self.visual_width());
+                    self.page_content = TxtReader::get_page_content(&mut my_file, begin, end, super::text_width());
                     my_file.close();
                 }
             }
@@ -282,14 +210,13 @@ impl ReadPage{
                     if self.log_vec.is_none() {
                         self.log_vec = Some(Vec::new());
                     }
-                   epd2in9_txt::TxtReader::save_log(&mut f,self.log_vec.as_mut().unwrap(), self.page_index as u32, false);
+                    epd2in9_txt::TxtReader::save_log(&mut f, self.log_vec.as_mut().unwrap(), self.page_index as u32, false);
                     f.close();
-                }else{
-                    println!("log error:{:#?}",logfile.unwrap_err());
+                } else {
+                    println!("log error:{:#?}", logfile.unwrap_err());
                 }
             }
         }
-
     }
 
     fn load_book_progress(&mut self, books_dir: &mut ActualDirectory<'_>) {
@@ -330,25 +257,24 @@ impl ReadPage{
         }
     }
 
-    async fn do_change_page(&mut self,page_index:u32){
+    async fn do_change_page(&mut self, page_index: u32) {
         if self.book_pages.is_none() { return; }
 
         if page_index >= self.book_pages.as_ref().unwrap().total_page {
             self.page_index = self.book_pages.as_ref().unwrap().total_page;
-        }else{
+        } else {
             self.page_index = page_index;
         }
         self.change_page = true;
         self.need_render = true;
-
     }
 
     fn render_menu_overlay(&self, display: &mut crate::display::EpdDisplay) {
         let font: FontRenderer = FontRenderer::new::<fonts::u8g2_font_wqy15_t_gb2312>();
         let font = font.with_ignore_unknown_chars(true);
-        let vw = self.visual_width();
-        let vh = self.visual_height();
-        let menu_width: u32 = 180;
+        let vw = super::visual_width();
+        let vh = super::visual_height();
+        let menu_width: u32 = if vw < 200 { vw - 16 } else { 180 };
         let menu_item_height: u32 = 24;
         let menu_padding: u32 = 8;
 
@@ -397,7 +323,6 @@ impl ReadPage{
                     ).ok();
                 }
 
-                // Show page number inside menu, at bottom
                 if let Some(ref bp) = self.book_pages {
                     let total = bp.total_page;
                     if total > 0 {
@@ -466,7 +391,6 @@ impl ReadPage{
                     .unwrap_or_default();
 
                 let bm_count = bookmarks.len() as u32;
-                // Max 4 bookmark items + cancel
                 let max_visible = 4u32;
                 let visible_bm = if bm_count > max_visible { max_visible } else { bm_count };
                 let total_items = if visible_bm > 0 { visible_bm + 1 } else { 1 };
@@ -474,7 +398,6 @@ impl ReadPage{
                 let list_x = ((vw - menu_width) / 2) as i32;
                 let list_y = 20;
 
-                // List border
                 let rect = Rectangle::new(
                     Point::new(list_x, list_y),
                     Size::new(menu_width, list_height),
@@ -487,7 +410,6 @@ impl ReadPage{
                     .build();
                 rect.into_styled(style).draw(display).ok();
 
-                // Title
                 let title = if deleting { "删除书签" } else { "书签列表" };
                 font.render_aligned(
                     title,
@@ -508,7 +430,6 @@ impl ReadPage{
                         display,
                     ).ok();
                 } else {
-                    // Scroll offset
                     let scroll_offset = if bm_index >= max_visible { bm_index - max_visible + 1 } else { 0 };
                     for vi in 0..visible_bm {
                         let bi = vi + scroll_offset;
@@ -541,7 +462,6 @@ impl ReadPage{
                     }
                 }
 
-                // Cancel item
                 let cancel_y = list_y + menu_padding as i32 + (total_items as i32) * menu_item_height as i32;
                 let is_cancel_selected = bm_index >= bm_count;
                 if is_cancel_selected {
@@ -564,7 +484,6 @@ impl ReadPage{
                     display,
                 ).ok();
 
-                // Preview area below the list
                 if bm_count > 0 && bm_index < bm_count && !self.bookmark_preview.is_empty() {
                     let preview_y = list_y + list_height as i32 + 10;
                     let preview_height = vh as i32 - preview_y - 10;
@@ -602,21 +521,19 @@ impl ReadPage{
         }
     }
 
-    /// Draw progress bar only at very bottom of display
     fn render_progress(&self, display: &mut crate::display::EpdDisplay) {
         if let Some(ref bp) = self.book_pages {
             let total = bp.total_page;
             if total == 0 { return; }
             let current = if self.page_index > total { total } else { self.page_index };
-            let vw = self.visual_width();
-            let vh = self.visual_height();
+            let vw = super::visual_width();
+            let vh = super::visual_height();
             let bar_height: u32 = 3;
             let margin: i32 = 2;
             let bottom = vh as i32;
             let bar_y = bottom - bar_height as i32 - margin;
             let bar_full_width = vw as i32 - margin * 2;
 
-            // Background bar
             let bg = Rectangle::new(
                 Point::new(margin, bar_y),
                 Size::new(bar_full_width as u32, bar_height),
@@ -625,7 +542,6 @@ impl ReadPage{
                 PrimitiveStyleBuilder::new().fill_color(White).stroke_color(Black).stroke_width(1).build()
             ).draw(display).ok();
 
-            // Filled portion
             let filled_width = if total > 0 {
                 ((current as u64 * bar_full_width as u64) / total as u64) as u32
             } else {
@@ -640,21 +556,18 @@ impl ReadPage{
             }
         }
     }
-
-
 }
+
 #[ram(unstable(rtc_fast))]
-pub(crate) static mut PAGE_INDEX:Option<u32> = None;
+pub(crate) static mut PAGE_INDEX: Option<u32> = None;
 
-impl Page for ReadPage{
+impl Page for ReadPage {
     fn new() -> Self {
-        
-
-       let mut temp  = Self{
+        let mut temp = Self {
             running: false,
             reading: false,
             need_render: false,
-            change_page:false,
+            change_page: false,
             force_indexing: false,
             indexing: false,
             indexing_process: 0.0,
@@ -663,7 +576,7 @@ impl Page for ReadPage{
             menus: None,
             book_pages: None,
             log_vec: None,
-            page_index:0,
+            page_index: 0,
             page_content: Default::default(),
             menu_state: MenuState::Closed,
             save_bookmark_flag: false,
@@ -676,16 +589,16 @@ impl Page for ReadPage{
             book_progress: Vec::new(),
         };
 
-        unsafe{
-            if let Some(v) = unsafe { *core::ptr::addr_of!(PAGE_INDEX) } {
+        unsafe {
+            if let Some(v) = *core::ptr::addr_of!(PAGE_INDEX) {
                 temp.choose_index = v;
                 temp.change_page = true;
                 temp.reading = true;
                 temp.book_pages = None;
             }
-        } 
-       
-       temp
+        }
+
+        temp
     }
 
     async fn render(&mut self) {
@@ -694,24 +607,24 @@ impl Page for ReadPage{
 
             if let Some(display) = display_mut() {
                 let _ = display.clear_buffer(Color::White);
-                let vw = self.visual_width();
-                let vh = self.visual_height();
+                let vw = super::visual_width();
+                let vh = super::visual_height();
                 let center = Point::new(vw as i32 / 2, vh as i32 / 2);
 
                 if self.indexing {
                     let font: FontRenderer = FontRenderer::new::<fonts::u8g2_font_wqy15_t_gb2312>();
                     let font = font.with_ignore_unknown_chars(true);
                     let _ = font.render_aligned(
-                        format_args!("正在创建索引，\n 已创建索引进度：{:.2}%",self.indexing_process),
+                        format_args!("正在创建索引，\n 已创建索引进度：{:.2}%", self.indexing_process),
                         center,
                         VerticalPosition::Center,
                         HorizontalAlignment::Center,
                         FontColor::Transparent(Black),
                         display,
                     );
-                    println!("显示进度：{}",self.indexing_process);
+                    println!("显示进度：{}", self.indexing_process);
                     crate::sleep::refresh_active_time().await;
-                }else {
+                } else {
                     if !self.reading {
                         if let Some(ref menus) = self.menus {
                             let mut all_items: Vec<&str, 20> = Vec::new();
@@ -726,7 +639,6 @@ impl Page for ReadPage{
                             list_widget.choose(widget_index);
                             let _ = list_widget.draw(display);
 
-                            // Draw book progress right-aligned
                             if self.book_progress.len() == menus.len() {
                                 let font: FontRenderer = FontRenderer::new::<fonts::u8g2_font_wqy16_t_gb2312>();
                                 let font = font.with_ignore_unknown_chars(true);
@@ -760,7 +672,6 @@ impl Page for ReadPage{
                     } else if self.book_pages.is_some() {
                         let font: FontRenderer = FontRenderer::new::<fonts::u8g2_font_wqy15_t_gb2312>();
                         let font = font.with_ignore_unknown_chars(true);
-                        //显示选择书本对应页的内容
                         display.clear_buffer(Color::White);
                         {
                             if self.page_index == self.book_pages.as_ref().unwrap().total_page {
@@ -775,7 +686,7 @@ impl Page for ReadPage{
                             } else {
                                 let _ = font.render_aligned(
                                     self.page_content.as_str(),
-                                    Point::new(0, 2),
+                                    Point::new(super::text_left_margin(), 2),
                                     VerticalPosition::Top,
                                     HorizontalAlignment::Left,
                                     FontColor::Transparent(Black),
@@ -786,30 +697,24 @@ impl Page for ReadPage{
                         self.render_progress(display);
                     }
                 }
-                // Draw menu overlay on top of reading content
                 if self.reading && !matches!(self.menu_state, MenuState::Closed) {
                     self.render_menu_overlay(display);
                 }
             }
 
-
-            RENDER_CHANNEL.send(RenderInfo { time: 0,need_sleep:true }).await;
+            RENDER_CHANNEL.send(RenderInfo { time: 0, need_sleep: true }).await;
         }
     }
-    
-    
 
     async fn run(&mut self, _spawner: Spawner) {
-        display::set_sleep_renderer(Some(sleep_renderer));
+        display::set_sleep_renderer(Some(super::sleep_renderer));
         if let Some(display) = display_mut() {
-           display.set_rotation(self.current_rotation());
+            display.set_rotation(super::current_rotation(self.flipped));
         }
         self.running = true;
         self.need_render = true;
-        //*event::ENABLE_DOUBLE.lock().await = true;
-        //读sd卡目录
-        if let Some(ref mut sd) =  *SD_MOUNT.lock().await {
 
+        if let Some(ref mut sd) = *SD_MOUNT.lock().await {
             let volume0 = sd.volume_manager.open_volume(embedded_sdmmc::VolumeIdx(0));
             match volume0 {
                 Ok(v) => {
@@ -831,7 +736,7 @@ impl Page for ReadPage{
                                 loop {
                                     if !self.running { break; }
                                     if self.menus.as_ref().unwrap().len() > 0 {
-                                        if let None = self.book_pages {
+                                        if self.book_pages.is_none() {
                                             self.get_page_vec(&mut books_dir).await;
                                             self.get_log_vec(&mut books_dir).await;
                                         }
@@ -843,7 +748,6 @@ impl Page for ReadPage{
                                         }
                                     }
 
-                                    // Handle bookmark save (needs books_dir)
                                     if self.save_bookmark_flag {
                                         self.save_bookmark_flag = false;
                                         let book_name = self.menus.as_ref().unwrap()[self.choose_index as usize].clone();
@@ -863,7 +767,6 @@ impl Page for ReadPage{
                                         }
                                     }
 
-                                    // Handle bookmark delete (needs books_dir)
                                     if self.delete_bookmark_flag {
                                         self.delete_bookmark_flag = false;
                                         if let Some(ref mut lv) = self.log_vec {
@@ -871,11 +774,9 @@ impl Page for ReadPage{
                                                 MenuState::BookmarkList { bm_index, .. } => bm_index,
                                                 _ => 0,
                                             } as usize;
-                                            // bookmarks are at lv[1..], so delete at bm_idx + 1
                                             let del_idx = bm_idx + 1;
                                             if del_idx < lv.len() {
                                                 lv.remove(del_idx);
-                                                // Write updated log
                                                 let book_name = self.menus.as_ref().unwrap()[self.choose_index as usize].clone();
                                                 let file_name = format!("{}.txt", book_name);
                                                 if let Some(entry) = SdMount::find_entry_by_name(&mut books_dir, &file_name) {
@@ -886,7 +787,6 @@ impl Page for ReadPage{
                                                         f.close();
                                                     }
                                                 }
-                                                // Adjust bm_index if needed
                                                 let new_bm_count = if lv.len() > 1 { lv.len() - 1 } else { 0 };
                                                 if let MenuState::BookmarkList { ref mut bm_index, .. } = self.menu_state {
                                                     if *bm_index as usize >= new_bm_count && *bm_index > 0 {
@@ -899,7 +799,6 @@ impl Page for ReadPage{
                                         self.need_render = true;
                                     }
 
-                                    // Handle bookmark preview loading (needs books_dir)
                                     if self.need_load_preview {
                                         self.need_load_preview = false;
                                         self.bookmark_preview.clear();
@@ -916,7 +815,6 @@ impl Page for ReadPage{
                                                 let file_name = format!("{}.txt", book_name);
                                                 if let Some(entry) = SdMount::find_entry_by_name(&mut books_dir, &file_name) {
                                                     let short_name = entry.name;
-                                                    // Read page position from index file (own block to release borrow)
                                                     let page_pos = {
                                                         let idx_file = SdMount::open_idx_file(&mut books_dir, &short_name, embedded_sdmmc::Mode::ReadOnly);
                                                         if let Ok(idx_file) = idx_file {
@@ -940,7 +838,7 @@ impl Page for ReadPage{
                                                         if end_pos > begin_pos {
                                                             let my_file = books_dir.open_file_in_dir(short_name, embedded_sdmmc::Mode::ReadOnly);
                                                             if let Ok(mut my_file) = my_file {
-                                                                self.bookmark_preview = TxtReader::get_page_content(&mut my_file, begin_pos, end_pos, self.visual_width());
+                                                                self.bookmark_preview = TxtReader::get_page_content(&mut my_file, begin_pos, end_pos, super::text_width());
                                                                 my_file.close();
                                                             }
                                                         }
@@ -956,7 +854,6 @@ impl Page for ReadPage{
                                     }
                                     self.render().await;
 
-                                    // Skip sleep timer when menu is open
                                     if matches!(self.menu_state, MenuState::Closed) {
                                         let sleep_storage = crate::storage::SleepStorage::read().unwrap_or_default();
                                         let read_sleep_seconds = if sleep_storage.read_sleep_seconds > 0 {
@@ -964,7 +861,7 @@ impl Page for ReadPage{
                                         } else {
                                             120
                                         };
-                                        to_sleep_tips(Duration::from_secs(0), Duration::from_secs(read_sleep_seconds),true).await;
+                                        to_sleep_tips(Duration::from_secs(0), Duration::from_secs(read_sleep_seconds), true).await;
                                     }
 
                                     Timer::after_millis(50).await;
@@ -981,17 +878,16 @@ impl Page for ReadPage{
                         },
                         Err(er) => {
                             println!("open volume:{:?}", er);
-                            display::show_error("打开主目录失败",true).await;
+                            display::show_error("打开主目录失败", true).await;
                         },
                     }
                 },
                 Err(e) => {
                     println!("open volume:{:?}", e);
-                    display::show_error("读取分区失败",true).await;
+                    display::show_error("读取分区失败", true).await;
                 }
             }
         }
-        //*event::ENABLE_DOUBLE.lock().await = false;
         display::set_sleep_renderer(None);
         if let Some(display) = display_mut() {
             display.set_rotation(DisplayRotation::Rotate0);
@@ -1001,24 +897,21 @@ impl Page for ReadPage{
     async fn bind_event(&mut self) {
         event::clear().await;
 
-        // Key3 long: open/close menu (in reading mode) or exit ReadPage
-        event::on_target(EventType::KeyLongEnd(3),Self::mut_to_ptr(self),  move |info|  {
+        // Key3 long: open/close menu / exit
+        event::on_target(EventType::KeyLongEnd(3), Self::mut_to_ptr(self), move |info| {
             return Box::pin(async move {
-                let mut_ref:&mut Self =  Self::mut_by_ptr(info.ptr).unwrap();
+                let mut_ref: &mut Self = Self::mut_by_ptr(info.ptr).unwrap();
                 match mut_ref.menu_state {
                     MenuState::JumpInput { .. } => {
-                        // 取消跳转，返回菜单
                         mut_ref.menu_state = MenuState::Popup { menu_index: 0 };
                         mut_ref.need_render = true;
                     }
                     MenuState::BookmarkList { .. } => {
-                        // 取消书签列表，返回菜单
                         mut_ref.menu_state = MenuState::Popup { menu_index: 0 };
                         mut_ref.need_render = true;
                     }
                     _ => {
                         if mut_ref.reading {
-                            // 长按退出阅读，回到书单
                             mut_ref.reading = false;
                             unsafe { core::ptr::addr_of_mut!(PAGE_INDEX).write(None); }
                             mut_ref.menu_state = MenuState::Closed;
@@ -1031,57 +924,47 @@ impl Page for ReadPage{
             });
         }).await;
 
-        // Key3 short: open/close menu / select menu item / confirm jump / toggle reading mode
-        event::on_target(EventType::KeyShort(3),Self::mut_to_ptr(self),  move |info|  {
+        // Key3 short: open/close menu / select / confirm jump / toggle reading
+        event::on_target(EventType::KeyShort(3), Self::mut_to_ptr(self), move |info| {
             return Box::pin(async move {
-                let mut_ref:&mut Self =  Self::mut_by_ptr(info.ptr).unwrap();
+                let mut_ref: &mut Self = Self::mut_by_ptr(info.ptr).unwrap();
                 match mut_ref.menu_state {
                     MenuState::Popup { menu_index } => {
                         match menu_index {
                             0 => {
-                                // 返回书单
                                 mut_ref.reading = false;
                                 unsafe { core::ptr::addr_of_mut!(PAGE_INDEX).write(None); }
                             }
-                            1 => {
-                                // 收藏书签
-                                mut_ref.save_bookmark_flag = true;
-                            }
+                            1 => { mut_ref.save_bookmark_flag = true; }
                             2 => {
-                                // 打开书签 — 正常模式
                                 mut_ref.menu_state = MenuState::BookmarkList { bm_index: 0, deleting: false };
                                 mut_ref.need_load_preview = true;
                                 mut_ref.need_render = true;
                                 return;
                             }
                             3 => {
-                                // 删除书签 — 删除模式
                                 mut_ref.menu_state = MenuState::BookmarkList { bm_index: 0, deleting: true };
                                 mut_ref.bookmark_preview.clear();
                                 mut_ref.need_render = true;
                                 return;
                             }
                             4 => {
-                                // 跳转页码 — 进入数字输入
                                 mut_ref.menu_state = MenuState::JumpInput { input_num: mut_ref.page_index };
                                 mut_ref.jump_accel = 0;
                                 mut_ref.need_render = true;
                                 return;
                             }
                             5 => {
-                                // 旋转屏幕 — flip upside down (Rotate90 ↔ Rotate270)
                                 mut_ref.flipped = !mut_ref.flipped;
                                 if let Some(display) = display_mut() {
-                                    display.set_rotation(mut_ref.current_rotation());
+                                    display.set_rotation(super::current_rotation(mut_ref.flipped));
                                 }
                             }
                             6 => {
-                                // 重建索引
                                 mut_ref.force_indexing = true;
                                 mut_ref.book_pages = None;
                             }
                             7 => {
-                                // 睡眠
                                 crate::sleep::refresh_active_time().await;
                                 crate::sleep::to_sleep_tips(Duration::from_secs(0), Duration::from_secs(0), true).await;
                                 return;
@@ -1092,7 +975,6 @@ impl Page for ReadPage{
                         mut_ref.need_render = true;
                     }
                     MenuState::JumpInput { input_num } => {
-                        // 确认跳转
                         mut_ref.do_change_page(input_num).await;
                         mut_ref.menu_state = MenuState::Closed;
                         mut_ref.need_render = true;
@@ -1100,12 +982,10 @@ impl Page for ReadPage{
                     MenuState::BookmarkList { bm_index, deleting } => {
                         let bm_count = mut_ref.log_vec.as_ref().map(|lv| if lv.len() > 0 { lv.len() - 1 } else { 0 }).unwrap_or(0) as u32;
                         if bm_index >= bm_count {
-                            // 取消 — 返回菜单
                             mut_ref.menu_state = MenuState::Popup { menu_index: 0 };
                             mut_ref.bookmark_preview.clear();
                             mut_ref.need_render = true;
                         } else if deleting {
-                            // 删除选中书签
                             mut_ref.delete_bookmark_flag = true;
                             mut_ref.need_render = true;
                         } else if let Some(ref lv) = mut_ref.log_vec {
@@ -1136,10 +1016,10 @@ impl Page for ReadPage{
             });
         }).await;
 
-        // Key1 long hold: continuous scroll down (book list or menu) / accelerating page jump
-        event::on_target(EventType::KeyLongIng(1),Self::mut_to_ptr(self),  move |info|  {
+        // Key1 long hold: scroll down / accelerating jump
+        event::on_target(EventType::KeyLongIng(1), Self::mut_to_ptr(self), move |info| {
             return Box::pin(async move {
-                let mut_ref:&mut Self =  Self::mut_by_ptr(info.ptr).unwrap();
+                let mut_ref: &mut Self = Self::mut_by_ptr(info.ptr).unwrap();
                 match mut_ref.menu_state {
                     MenuState::Popup { ref mut menu_index } => {
                         if *menu_index < (MENU_ITEMS.len() - 1) as u32 {
@@ -1194,10 +1074,10 @@ impl Page for ReadPage{
             });
         }).await;
 
-        // Key2 long hold: continuous scroll up (book list or menu) / accelerating page jump
-        event::on_target(EventType::KeyLongIng(2),Self::mut_to_ptr(self),  move |info|  {
+        // Key2 long hold: scroll up / accelerating jump
+        event::on_target(EventType::KeyLongIng(2), Self::mut_to_ptr(self), move |info| {
             return Box::pin(async move {
-                let mut_ref:&mut Self =  Self::mut_by_ptr(info.ptr).unwrap();
+                let mut_ref: &mut Self = Self::mut_by_ptr(info.ptr).unwrap();
                 match mut_ref.menu_state {
                     MenuState::Popup { ref mut menu_index } => {
                         if *menu_index > 0 {
@@ -1257,9 +1137,9 @@ impl Page for ReadPage{
         }).await;
 
         // Key1 short: menu down / jump +1 / next page / next book
-        event::on_target(EventType::KeyShort(1),Self::mut_to_ptr(self),  move |info|  {
+        event::on_target(EventType::KeyShort(1), Self::mut_to_ptr(self), move |info| {
             return Box::pin(async move {
-                let mut_ref:&mut Self =  Self::mut_by_ptr(info.ptr).unwrap();
+                let mut_ref: &mut Self = Self::mut_by_ptr(info.ptr).unwrap();
                 match mut_ref.menu_state {
                     MenuState::Popup { ref mut menu_index } => {
                         if *menu_index < (MENU_ITEMS.len() - 1) as u32 {
@@ -1309,9 +1189,9 @@ impl Page for ReadPage{
         }).await;
 
         // Key2 short: menu up / jump -1 / prev page / prev book
-        event::on_target(EventType::KeyShort(2),Self::mut_to_ptr(self),  move |info|  {
+        event::on_target(EventType::KeyShort(2), Self::mut_to_ptr(self), move |info| {
             return Box::pin(async move {
-                let mut_ref:&mut Self =  Self::mut_by_ptr(info.ptr).unwrap();
+                let mut_ref: &mut Self = Self::mut_by_ptr(info.ptr).unwrap();
                 match mut_ref.menu_state {
                     MenuState::Popup { ref mut menu_index } => {
                         if *menu_index > 0 {

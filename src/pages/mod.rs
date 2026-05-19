@@ -7,7 +7,7 @@ pub mod main_page;
 
 mod image_page;
 mod calendar;
-pub(crate) mod read_page;
+mod read;
 mod read_menu_page;
 mod weather;
 pub mod setting_page;

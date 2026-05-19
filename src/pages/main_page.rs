@@ -23,7 +23,7 @@ use crate::pages::PageEnum::{ECalendarPage,  EClockPage, EDebugPage, EReadPage, 
 use crate::pages::IconType;
 use crate::widgets::icon_grid_widget::IconGridWidget;
 use crate::pages::debug_page::DebugPage;
-use crate::pages::read_page::ReadPage;
+use crate::pages::read::ReadPage;
 use crate::pages::image_page::ImagePage;
 use crate::pages::setting_page::SettingPage;
 use crate::pages::weather::WeatherPage;
