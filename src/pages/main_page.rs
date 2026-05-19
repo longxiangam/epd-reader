@@ -18,7 +18,7 @@ use crate::{ event};
 use crate::display::{display_mut,  RENDER_CHANNEL, RenderInfo};
 use crate::event::EventType;
 use crate::pages::{MenuItem, Page, PageEnum};
-use crate::pages::calendar_page::CalendarPage;
+use crate::pages::calendar::CalendarPage;
 use crate::pages::PageEnum::{ECalendarPage,  EClockPage, EDebugPage, EReadPage, ESettingPage, ETimerPage, EWeatherPage, EImageListPage};
 use crate::pages::IconType;
 use crate::widgets::icon_grid_widget::IconGridWidget;
@@ -26,7 +26,7 @@ use crate::pages::debug_page::DebugPage;
 use crate::pages::read_page::ReadPage;
 use crate::pages::image_page::ImagePage;
 use crate::pages::setting_page::SettingPage;
-use crate::pages::weather_page::WeatherPage;
+use crate::pages::weather::WeatherPage;
 use crate::sleep::to_sleep_tips;
 use crate::storage::NvsStorage;
 

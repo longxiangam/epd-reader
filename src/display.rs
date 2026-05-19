@@ -275,6 +275,7 @@ pub async fn show_sleep() {
         if let Some(r) = renderer {
             r(display);
         } else {
+            #[cfg(not(feature = "epd2in7"))]
             display.set_rotation(DisplayRotation::Rotate90);
             display.clear_buffer(Color::White);
             let drawn = crate::flash_sleep::draw_sleep_image(display);

@@ -6,10 +6,10 @@ use crate::pages::main_page::MainPage;
 pub mod main_page;
 
 mod image_page;
-mod calendar_page;
+mod calendar;
 pub(crate) mod read_page;
 mod read_menu_page;
-mod weather_page;
+mod weather;
 pub mod setting_page;
 pub mod debug_page;
 

@@ -175,6 +175,7 @@ async fn main(spawner: Spawner) -> ! {
     let mut display: display::EpdDisplay = display::EpdDisplay::default();
     
 
+    #[cfg(not(feature = "epd2in7"))]
     display.set_rotation(DisplayRotation::Rotate90);
     
 
