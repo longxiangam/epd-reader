@@ -51,6 +51,8 @@ pub struct RequestClient{
     tx_buffer: Vec<u8>,
     tls_rx_buffer: Vec<u8>,
     tls_tx_buffer: Vec<u8>,
+    headers_buf: Vec<u8>,
+    response_buf: Vec<u8>,
 }
 
 pub struct ResponseData {
@@ -69,6 +71,8 @@ impl RequestClient{
             tx_buffer: vec![0u8;BUFFER_SIZE],
             tls_rx_buffer: vec![0u8;TLS_BUFFER_SIZE],
             tls_tx_buffer: vec![0u8;TLS_BUFFER_SIZE],
+            headers_buf: vec![0u8; 1024],
+            response_buf: vec![0u8; BUFFER_SIZE],
         }
     }
     pub async fn send_request(&mut self, url: &str) -> Result<ResponseData, RequestError> {
@@ -128,20 +132,20 @@ impl RequestClient{
         request.write_header(&mut socket).await?;
         let _ = socket.flush().await;
 
-
-        let mut headers_buf = vec![0u8; 1024];
-        let mut buf = vec![0u8; BUFFER_SIZE];
-        let response = Response::read(&mut socket, Method::GET, &mut headers_buf).await?;
+        self.headers_buf.fill(0);
+        self.response_buf.fill(0);
+        let response = Response::read(&mut socket, Method::GET, &mut self.headers_buf).await?;
 
         println!("Response status: {:?}", response.status);
 
-        let total_length = response.body().reader().read_to_end(&mut buf).await?;
+        let total_length = response.body().reader().read_to_end(&mut self.response_buf).await?;
 
         println!("Close TCP socket");
         socket.close();
 
         println!("Read {} bytes", total_length);
-        return Ok(crate::request::ResponseData{ data: buf, length: total_length });
+        let data = self.response_buf[..total_length].to_vec();
+        return Ok(crate::request::ResponseData{ data, length: total_length });
     }
 
     /// Send an HTTPS request
@@ -183,13 +187,13 @@ impl RequestClient{
         request.write_header(&mut tls).await?;
         let _ = tls.flush().await;
 
-        let mut headers_buf = vec![0u8; 1024];
-        let mut buf = vec![0u8; BUFFER_SIZE];
-        let response = Response::read(&mut tls, Method::GET, &mut headers_buf).await?;
+        self.headers_buf.fill(0);
+        self.response_buf.fill(0);
+        let response = Response::read(&mut tls, Method::GET, &mut self.headers_buf).await?;
 
         println!("Response status: {:?}", response.status);
 
-        let total_length = response.body().reader().read_to_end(&mut buf).await?;
+        let total_length = response.body().reader().read_to_end(&mut self.response_buf).await?;
 
         println!("Close TLS wrapper");
         let mut socket = match tls.close().await {
@@ -205,7 +209,8 @@ impl RequestClient{
 
         println!("Read {} bytes", total_length);
 
-        return Ok(crate::request::ResponseData{ data: buf, length: total_length });
+        let data = self.response_buf[..total_length].to_vec();
+        return Ok(crate::request::ResponseData{ data, length: total_length });
     }
 
     /// Resolve a hostname to an IP address through DNS

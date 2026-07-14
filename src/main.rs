@@ -77,7 +77,7 @@ esp_bootloader_esp_idf::esp_app_desc!();
 
 #[esp_rtos::main]
 async fn main(spawner: Spawner) -> ! {
-    esp_alloc::heap_allocator!(size: 80 * 1024);
+    esp_alloc::heap_allocator!(size: 90 * 1024);
 
     println!("entry");
     let config = HalConfig::default().with_cpu_clock(CpuClock::max());

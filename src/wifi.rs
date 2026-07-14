@@ -58,6 +58,9 @@ const PASSWORD: &str = match option_env!("PASSWORD") {
 };
 
 const HOW_LONG_SECS_CLOSE:u64 = 30;
+const MAX_CONNECT_RETRIES: u32 = 5;
+const CONNECT_RETRY_INTERVAL_MS: u64 = 5000;
+const INIT_WAIT_TIMEOUT_SECS: u64 = 35;
 
 pub(crate) static mut IP_ADDRESS: String<20> = String::new();
 pub static STOP_WIFI_SIGNAL: Signal<CriticalSectionRawMutex, ()> = Signal::new();
@@ -127,10 +130,19 @@ pub async fn connect_wifi(spawner: &Spawner,
     spawner.spawn(connection_wifi(controller).unwrap());
     spawner.spawn(do_stop().unwrap());
     let _ = spawner;
+    let init_start_secs = Instant::now().as_secs();
     loop {
         println!("Waiting is_link_up...");
         if stack.is_link_up() {
             break;
+        }
+        if matches!(*WIFI_STATE.lock().await, Some(WifiNetState::WifiStopped)) {
+            println!("wifi gave up during init");
+            return Err(WifiNetError::TimeOut);
+        }
+        if Instant::now().as_secs() - init_start_secs > INIT_WAIT_TIMEOUT_SECS {
+            println!("wifi init timeout (link)");
+            return Err(WifiNetError::TimeOut);
         }
         Timer::after(Duration::from_millis(1000)).await;
     }
@@ -143,6 +155,10 @@ pub async fn connect_wifi(spawner: &Spawner,
                 *core::ptr::addr_of_mut!(IP_ADDRESS) = config.address.address().to_string().parse().unwrap();
             }
             break;
+        }
+        if Instant::now().as_secs() - init_start_secs > INIT_WAIT_TIMEOUT_SECS + 10 {
+            println!("wifi init timeout (dhcp)");
+            return Err(WifiNetError::TimeOut);
         }
         Timer::after(Duration::from_millis(500)).await;
     }
@@ -160,9 +176,11 @@ async fn net_task(mut runner: embassy_net::Runner<'static, Interface<'static>>) 
 #[embassy_executor::task]
 async fn connection_wifi(mut controller: WifiController<'static>) {
     println!("start connection task1");
+    let mut consecutive_failures: u32 = 0;
     loop {
         println!("loop");
         if controller.is_connected() {
+            consecutive_failures = 0;
             WIFI_STATE.lock().await.replace(WifiNetState::WifiConnected);
 
             // Wait for either disconnect or stop signal
@@ -221,11 +239,27 @@ async fn connection_wifi(mut controller: WifiController<'static>) {
         match controller.connect_async().await {
             Ok(_) => {
                 println!("Wifi connected!");
+                consecutive_failures = 0;
                 WIFI_STATE.lock().await.replace(WifiNetState::WifiConnected);
             },
             Err(e) => {
                 println!("Failed to connect to wifi: {e:?}");
-                Timer::after(Duration::from_millis(5000)).await
+                consecutive_failures += 1;
+                if consecutive_failures >= MAX_CONNECT_RETRIES {
+                    println!(
+                        "wifi give up after {} attempts, will sleep",
+                        consecutive_failures
+                    );
+                    consecutive_failures = 0;
+                    let _ = controller.disconnect_async().await;
+                    WIFI_STATE.lock().await.replace(WifiNetState::WifiStopped);
+                    RECONNECT_WIFI_SIGNAL.wait().await;
+                    RECONNECT_WIFI_SIGNAL.reset();
+                    println!("restart connect after give-up...");
+                    WIFI_STATE.lock().await.replace(WifiNetState::WifiDisconnected);
+                } else {
+                    Timer::after(Duration::from_millis(CONNECT_RETRY_INTERVAL_MS)).await;
+                }
             }
         }
     }

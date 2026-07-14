@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(winget install *)",
+      "WebSearch",
+      "Bash(cargo check *)"
+    ]
+  }
+}

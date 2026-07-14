@@ -49,11 +49,12 @@ httparse = { version = "1.9.3", default-features = false }
 embedded-sdmmc = "0.9.0"
 tinybmp = "0.6"
 
-epd-waveshare = { git = "https://github.com/longxiangam/epd-waveshare-modify" }
+epd-waveshare = { path = "D:/mywork/rtos/lcd_drivers/epd-waveshare-modify" }
 mini-json = { git = "https://github.com/longxiangam/mini-json" }
 
 [features]
 epd2in9 = []
+epd2in7 = []
 epd4in2 = []
 enable_debug = []
 weather-openmeteo = []
