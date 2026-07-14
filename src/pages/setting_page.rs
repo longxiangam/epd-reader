@@ -412,7 +412,7 @@ impl Page for SettingPage {
             if !self.running {
                 break;
             }
-            crate::wifi::refresh_last_time().await;
+            crate::sleep::refresh_active_time().await;
 
             // web_service 只在二维码(web配置)界面运行
             let need_web = matches!(self.mode, SettingMode::QrCode);

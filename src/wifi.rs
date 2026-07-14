@@ -266,8 +266,12 @@ async fn connection_wifi(mut controller: WifiController<'static>) {
 }
 
 pub async fn refresh_last_time(){
+    // 仅刷新“网络使用时间”（供 do_stop 在 30s 空闲后自动关 WiFi）。
+    // 注意：这里不再调用 refresh_active_time()。后台任务（ntp_worker 等）调用
+    // use_wifi 时若复位 LAST_ACTIVE_TIME，断网场景下 NTP 会无限重试，每 ~11s
+    // 复位一次用户空闲计时，导致 to_sleep_tips 的 180s 空闲判断永远不成立、
+    // 设备永远无法睡眠。用户活动时间只应由真实的用户操作（按键/页面）来刷新。
     LAST_USE_TIME_SECS.lock().await.replace(Instant::now().as_secs());
-    crate::sleep::refresh_active_time().await;
 }
 
 
@@ -282,7 +286,9 @@ pub async fn use_wifi() ->Result<&'static Stack<'static>, WifiNetError>{
         if Instant::now().as_secs() - secs > TIME_OUT_SECS  {
             return Err(WifiNetError::TimeOut);
         }
-        refresh_last_time().await;
+        // 等待他人释放锁期间不刷新网络使用时间：锁持有者自己会刷。
+        // 否则 force_stop_wifi（睡眠前关 WiFi）会因 LAST_USE_TIME_SECS 一直被
+        // 等锁者刷新，误判“仍有请求进行中”而永久卡在等待循环里，导致睡不下去。
         Timer::after(Duration::from_millis(500)).await;
     }
     *WIFI_LOCK.lock().await = true;
