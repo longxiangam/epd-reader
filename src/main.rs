@@ -26,6 +26,7 @@ mod storage;
 mod panic;
 mod web_service;
 mod flash_sleep;
+mod location;
 
 extern crate alloc;
 use core::cell::RefCell;

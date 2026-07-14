@@ -79,11 +79,16 @@ impl Weather {
 
     #[cfg(feature = "weather-openmeteo")]
     async fn request_open_meteo(storage: &WeatherStorage)->Result<(),()> {
-        // city 字段存储 "纬度,经度" 格式，如 "30.5928,114.3055"
+        // city 字段存储坐标，兼容 "纬度:经度"（自动定位）与 "纬度,经度" 两种格式
         let (lat, lon) = if storage.city.is_empty() {
             ("30.5928", "114.3055")
         } else {
-            match storage.city.as_str().split_once(',') {
+            match storage
+                .city
+                .as_str()
+                .split_once(':')
+                .or_else(|| storage.city.as_str().split_once(','))
+            {
                 Some((la, lo)) => (la, lo),
                 None => ("30.5928", "114.3055"),
             }
@@ -151,7 +156,7 @@ impl Weather {
             *addr_of_mut!(WEATHER_SYNC_SECOND) = get_clock().unwrap().now().await.unix_timestamp() as u64;
         }
 
-        let mut weather_storage = WeatherStorage::default();
+        let mut weather_storage = WeatherStorage::read().unwrap_or_default();
         weather_storage.weather_data =  Some(daily_result);
         weather_storage.sync_time_second =  unsafe{ *addr_of!(WEATHER_SYNC_SECOND) };
         weather_storage.write().unwrap();

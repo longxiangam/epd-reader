@@ -3,7 +3,7 @@ use eg_seven_segment::SevenSegmentStyleBuilder;
 use embedded_graphics::Drawable;
 use embedded_graphics::geometry::{Point, Size};
 use embedded_graphics::pixelcolor::BinaryColor;
-use embedded_graphics::prelude::{Dimensions, DrawTarget, Primitive};
+use embedded_graphics::prelude::{Dimensions, DrawTarget, Primitive, Transform};
 use embedded_graphics::primitives::{Line, PrimitiveStyleBuilder};
 use embedded_graphics::text::{Alignment, Baseline, Text, TextStyleBuilder};
 use epd_waveshare::color::Black;
@@ -14,7 +14,7 @@ use u8g2_fonts::types::{FontColor, HorizontalAlignment, VerticalPosition};
 use super::draw_utils::{draw_loading_icon, draw_moon_icon, draw_wifi_status, weekday_name};
 use super::render_data::WeatherRenderData;
 use crate::display::EpdDisplay;
-use crate::model::lunar::Lunar;
+use crate::model::lunar::{Lunar, get_solar_term, get_zodiac};
 use crate::widgets::battery::draw_battery;
 use crate::widgets::temp_chart::{TempPoint, draw_temp_chart, draw_temp_labels};
 use crate::widgets::weather_icon::{WeatherKind, draw_weather_icon};
@@ -68,10 +68,31 @@ where
     let left_w = w / 3;
     let chart_margin_y: i32 = 12;
 
-    // 顶栏：时钟 + 状态图标 + 电量
-    if let Some(clock) = data.current_date {
-        let time_str = format_args!("{:02}:{:02}", clock.hour(), clock.minute()).to_string();
-        let _ = draw_clock(display, time_str.as_str(), Point::new(4, 3));
+    // 顶栏左上角：当前城市（大） + 天气最后更新时间（小）
+    let _ = font_medium.render_aligned(
+        weather.location.name.as_str(),
+        Point::new(4, 1),
+        VerticalPosition::Top,
+        HorizontalAlignment::Left,
+        FontColor::Transparent(Black),
+        display,
+    );
+    {
+        // last_update 形如 "2026-07-14T10:00:00+08:00"，取 T 之后的 HH:MM
+        let hhmm = weather
+            .last_update
+            .as_str()
+            .split_once('T')
+            .and_then(|(_, t)| t.get(..5))
+            .unwrap_or("");
+        let _ = font_small.render_aligned(
+            format_args!("更新 {}", hhmm),
+            Point::new(4, 20),
+            VerticalPosition::Top,
+            HorizontalAlignment::Left,
+            FontColor::Transparent(Black),
+            display,
+        );
     }
 
     let bat_y: i32 = 10;
@@ -97,19 +118,6 @@ where
     {
         let left_cx = left_w / 2;
         let mut y = header_h + 4;
-
-        if let Some(clock) = data.current_date {
-            let weekday = weekday_name(clock.weekday());
-            let _ = font_medium.render_aligned(
-                format_args!("{}.{} {}", clock.month() as u8, clock.day(), weekday),
-                Point::new(left_cx, y),
-                VerticalPosition::Top,
-                HorizontalAlignment::Center,
-                FontColor::Transparent(Black),
-                display,
-            );
-        }
-        y += 20;
 
         let kind = WeatherKind::from_code(today.code_day.as_str());
         let _ = draw_weather_icon(kind, Point::new(left_cx, y + 16), 32, Black, display);
@@ -176,9 +184,25 @@ where
         y += 4;
 
         if let Some(clock) = data.current_date {
+            // 时间（放大）
+            let time_str = format_args!("{:02}:{:02}", clock.hour(), clock.minute()).to_string();
+            let _ = draw_clock(display, time_str.as_str(), left_cx, y);
+            y += 56;
+            // 年月日 星期
+            let weekday = weekday_name(clock.weekday());
+            let _ = font_small.render_aligned(
+                format_args!("{}.{}.{} {}", clock.year(), clock.month() as u8, clock.day(), weekday),
+                Point::new(left_cx, y),
+                VerticalPosition::Top,
+                HorizontalAlignment::Center,
+                FontColor::Transparent(Black),
+                display,
+            );
+            y += 16;
+            // 农历
             let lunar = Lunar::new(clock.year() as u16, clock.month() as u8);
             if let Some(lunar_day) = lunar.get_lunar_day(clock.day()) {
-                let _ = font_medium.render_aligned(
+                let _ = font_small.render_aligned(
                     format_args!("{}{}", lunar_day.get_month_name(), lunar_day.get_day_name()),
                     Point::new(left_cx, y),
                     VerticalPosition::Top,
@@ -187,6 +211,18 @@ where
                     display,
                 );
             }
+            y += 16;
+            // 星座 节气
+            let zodiac = get_zodiac(clock.month() as u8, clock.day());
+            let term = get_solar_term(clock.year(), clock.month() as u8, clock.day());
+            let _ = font_small.render_aligned(
+                format_args!("{} {}", zodiac, term),
+                Point::new(left_cx, y),
+                VerticalPosition::Top,
+                HorizontalAlignment::Center,
+                FontColor::Transparent(Black),
+                display,
+            );
         }
     }
 
@@ -282,16 +318,13 @@ where
     Ok(())
 }
 
-fn draw_clock<D>(display: &mut D, time: &str, position: Point) -> Result<(), D::Error>
+fn draw_clock<D>(display: &mut D, time: &str, center_x: i32, y: i32) -> Result<(), D::Error>
 where
     D: DrawTarget<Color = BinaryColor>,
 {
-    let dw: u32 = 14;
-    let dh: u32 = 30;
-    let sw: u32 = 3;
     let character_style = SevenSegmentStyleBuilder::new()
-        .digit_size(Size::new(dw, dh))
-        .segment_width(sw)
+        .digit_size(Size::new(22, 52))
+        .segment_width(4)
         .segment_color(Black)
         .build();
 
@@ -300,7 +333,9 @@ where
         .baseline(Baseline::Top)
         .build();
 
-    Text::with_text_style(time, position, character_style, text_style)
+    let text = Text::with_text_style(time, Point::new(0, y), character_style, text_style);
+    let width = text.bounding_box().size.width as i32;
+    text.translate(Point::new(center_x - width / 2, 0))
         .draw(display)?;
 
     Ok(())

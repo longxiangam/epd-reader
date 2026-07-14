@@ -1,4 +1,6 @@
 
+use micromath::F32Ext;
+
 const LUNAR_DATA:[u32; 201 ] = [
 
     0x04bd8, 0x04ae0, 0x0a570, 0x054d5, 0x0d260, 0x0d950, 0x16554, 0x056a0, 0x09ad0, 0x055d2, //1900-1909
@@ -335,6 +337,68 @@ impl Lunar {
     pub fn get_all_lunar_days(&self) -> &[Option<LunarDay>; 31] {
         &self.days
     }
+}
+
+/// 根据阳历月、日返回星座
+pub fn get_zodiac(month: u8, day: u8) -> &'static str {
+    match (month, day) {
+        (1, 1..=19) | (12, 22..=31) => "摩羯座",
+        (1, 20..=31) | (2, 1..=18) => "水瓶座",
+        (2, 19..=29) | (3, 1..=20) => "双鱼座",
+        (3, 21..=31) | (4, 1..=19) => "白羊座",
+        (4, 20..=30) | (5, 1..=20) => "金牛座",
+        (5, 21..=31) | (6, 1..=21) => "双子座",
+        (6, 22..=30) | (7, 1..=22) => "巨蟹座",
+        (7, 23..=31) | (8, 1..=22) => "狮子座",
+        (8, 23..=31) | (9, 1..=22) => "处女座",
+        (9, 23..=30) | (10, 1..=23) => "天秤座",
+        (10, 24..=31) | (11, 1..=22) => "天蝎座",
+        (11, 23..=30) | (12, 1..=21) => "射手座",
+        _ => "",
+    }
+}
+
+/// 根据阳历年月日返回当前所处的二十四节气（基于太阳视黄经精确计算）
+pub fn get_solar_term(year: i32, month: u8, day: u8) -> &'static str {
+    let lambda = solar_longitude(days_from_civil(year, month as i32, day as i32));
+    // 二十四节气对应的太阳视黄经（度）与名称，按角度升序
+    const TERMS: [(i32, &str); 24] = [
+        (0, "春分"), (15, "清明"), (30, "谷雨"), (45, "立夏"),
+        (60, "小满"), (75, "芒种"), (90, "夏至"), (105, "小暑"),
+        (120, "大暑"), (135, "立秋"), (150, "处暑"), (165, "白露"),
+        (180, "秋分"), (195, "寒露"), (210, "霜降"), (225, "立冬"),
+        (240, "小雪"), (255, "大雪"), (270, "冬至"), (285, "小寒"),
+        (300, "大寒"), (315, "立春"), (330, "雨水"), (345, "惊蛰"),
+    ];
+    let lambda_i = (lambda as i32).rem_euclid(360);
+    let mut current = "惊蛰";
+    for &(lon, name) in TERMS.iter() {
+        if lon <= lambda_i {
+            current = name;
+        }
+    }
+    current
+}
+
+/// 公历年月日（00:00 UT）距 1970-01-01 的天数（Howard Hinnant 算法）
+fn days_from_civil(y: i32, m: i32, d: i32) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = (y - era * 400) as i64;
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy as i64;
+    era as i64 * 146097 + doe - 719468
+}
+
+/// 由「距 1970-01-01 的天数」计算太阳视黄经（度，[0,360)），精度约 0.5°
+fn solar_longitude(days_since_epoch: i64) -> f32 {
+    const J2000: f32 = 10957.5; // 2000-01-01 12:00 UT 距 1970-01-01 的天数
+    let n = days_since_epoch as f32 - J2000;
+    let l = (280.460 + 0.9856474 * n).rem_euclid(360.0); // 平黄经
+    let g = (357.528 + 0.9856003 * n).rem_euclid(360.0); // 平近点角（度）
+    let g_rad = g.to_radians();
+    // 视黄经 = 平黄经 + 中心差
+    (l + 1.915 * F32Ext::sin(g_rad) + 0.020 * F32Ext::sin(2.0 * g_rad)).rem_euclid(360.0)
 }
 
 #[cfg(test)]
