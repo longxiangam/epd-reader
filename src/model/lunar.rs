@@ -360,7 +360,8 @@ pub fn get_zodiac(month: u8, day: u8) -> &'static str {
 
 /// 根据阳历年月日返回当前所处的二十四节气（基于太阳视黄经精确计算）
 pub fn get_solar_term(year: i32, month: u8, day: u8) -> &'static str {
-    let lambda = solar_longitude(days_from_civil(year, month as i32, day as i32));
+    // 取当日正午评估：节气发生在当日即应归属于该日
+    let lambda = solar_longitude(days_from_civil(year, month as i32, day as i32) as f32 + 0.5);
     // 二十四节气对应的太阳视黄经（度）与名称，按角度升序
     const TERMS: [(i32, &str); 24] = [
         (0, "春分"), (15, "清明"), (30, "谷雨"), (45, "立夏"),
@@ -380,6 +381,31 @@ pub fn get_solar_term(year: i32, month: u8, day: u8) -> &'static str {
     current
 }
 
+/// 太阳视黄经所属的节气序号（0..23，每 15° 一格；0° = 春分）。跨越 0°/360° 时正确回绕。
+fn solar_term_index(lambda: f32) -> i32 {
+    let lambda_i = (lambda as i32).rem_euclid(360);
+    (lambda_i / 15) % 24
+}
+
+/// 当前日期处于其所在节气中的第几天（1 = 当日即为该节气开始日）。
+/// 逐日回溯太阳视黄经的节气序号，直到序号发生变化即为节气起始边界。
+/// 受太阳视黄经公式精度（约 0.5°）影响，起始日可能有 ±1 天误差。
+pub fn solar_term_day(year: i32, month: u8, day: u8) -> u32 {
+    // 取当日正午（+0.5 天）评估太阳黄经：节气若发生在当日，应归属于该日，
+    // 而非次日（按 00:00 评估会把当日发生的节气错算到下一天，例如小暑错显到 7/8）。
+    let today = days_from_civil(year, month as i32, day as i32) as f32 + 0.5;
+    let today_idx = solar_term_index(solar_longitude(today));
+    let mut offset = 1u32;
+    while offset < 20 {
+        let prev_idx = solar_term_index(solar_longitude(today - offset as f32));
+        if prev_idx != today_idx {
+            break;
+        }
+        offset += 1;
+    }
+    offset
+}
+
 /// 公历年月日（00:00 UT）距 1970-01-01 的天数（Howard Hinnant 算法）
 fn days_from_civil(y: i32, m: i32, d: i32) -> i64 {
     let y = if m <= 2 { y - 1 } else { y };
@@ -390,10 +416,10 @@ fn days_from_civil(y: i32, m: i32, d: i32) -> i64 {
     era as i64 * 146097 + doe - 719468
 }
 
-/// 由「距 1970-01-01 的天数」计算太阳视黄经（度，[0,360)），精度约 0.5°
-fn solar_longitude(days_since_epoch: i64) -> f32 {
+/// 由「距 1970-01-01 的天数（可含小数，调用方应传当日正午 +0.5）」计算太阳视黄经（度，[0,360)）
+fn solar_longitude(days_since_epoch: f32) -> f32 {
     const J2000: f32 = 10957.5; // 2000-01-01 12:00 UT 距 1970-01-01 的天数
-    let n = days_since_epoch as f32 - J2000;
+    let n = days_since_epoch - J2000;
     let l = (280.460 + 0.9856474 * n).rem_euclid(360.0); // 平黄经
     let g = (357.528 + 0.9856003 * n).rem_euclid(360.0); // 平近点角（度）
     let g_rad = g.to_radians();

@@ -13,4 +13,6 @@ pub struct WeatherRenderData<'a> {
     pub weather_synced: bool,
     pub holiday_synced: bool,
     pub time_synced: bool,
+    /// 设备最后一次成功请求天气接口的 unix 时间戳（用于显示“更新 HH:MM”）
+    pub weather_sync_second: u64,
 }

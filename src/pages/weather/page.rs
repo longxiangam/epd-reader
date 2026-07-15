@@ -16,7 +16,7 @@ use crate::sleep::{refresh_active_time, to_sleep_tips};
 use crate::storage::NvsStorage;
 use crate::weather::{sync_holiday_success, sync_weather_success, HolidayInfo, Weather};
 use crate::wifi::WIFI_STATE;
-use crate::worldtime::{get_clock, sync_time_success};
+use crate::worldtime::{clock_restored, get_clock, sync_time_success};
 
 pub struct WeatherPage {
     pub(crate) running: bool,
@@ -84,6 +84,7 @@ impl Page for WeatherPage {
                     weather_synced,
                     holiday_synced,
                     time_synced,
+                    weather_sync_second: unsafe { crate::weather::WEATHER_SYNC_SECOND },
                 };
 
                 let _ = super::draw(display, &data);
@@ -111,7 +112,7 @@ impl Page for WeatherPage {
                 break;
             }
 
-            if sync_time_success() {
+            if clock_restored() {
                 if Instant::now().duration_since(last_refresh_time).as_secs() > 60 || wait_sync_time {
                     if let Some(clock) = get_clock() {
                         self.current_date = Some(clock.local().await);

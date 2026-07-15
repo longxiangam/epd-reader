@@ -1,4 +1,5 @@
 use alloc::string::ToString;
+use core::fmt::Write;
 use eg_seven_segment::SevenSegmentStyleBuilder;
 use embedded_graphics::Drawable;
 use embedded_graphics::geometry::{Point, Size};
@@ -14,7 +15,7 @@ use u8g2_fonts::types::{FontColor, HorizontalAlignment, VerticalPosition};
 use super::draw_utils::{draw_loading_icon, draw_moon_icon, draw_wifi_status, weekday_name};
 use super::render_data::WeatherRenderData;
 use crate::display::EpdDisplay;
-use crate::model::lunar::{Lunar, get_solar_term, get_zodiac};
+use crate::model::lunar::{Lunar, get_solar_term, get_zodiac, solar_term_day};
 use crate::widgets::battery::draw_battery;
 use crate::widgets::temp_chart::{TempPoint, draw_temp_chart, draw_temp_labels};
 use crate::widgets::weather_icon::{WeatherKind, draw_weather_icon};
@@ -78,13 +79,18 @@ where
         display,
     );
     {
-        // last_update 形如 "2026-07-14T10:00:00+08:00"，取 T 之后的 HH:MM
-        let hhmm = weather
-            .last_update
-            .as_str()
-            .split_once('T')
-            .and_then(|(_, t)| t.get(..5))
-            .unwrap_or("");
+        // 显示“设备最后一次请求天气接口的时间”（WEATHER_SYNC_SECOND，UTC+8 本地时间）。
+        // 不使用接口返回的 last_update：心知天气 daily 预报固定每天 08:00 生成，
+        // 会一直显示 08:00，无法反映设备真实抓取时刻。
+        let sync_sec = data.weather_sync_second;
+        let mut hhmm: heapless::String<5> = heapless::String::new();
+        if sync_sec > 1577836800 {
+            // 大于 2020-01-01 视为有效；设备时区固定 UTC+8
+            let local = sync_sec + 8 * 3600;
+            let _ = write!(hhmm, "{:02}:{:02}", (local / 3600) % 24, (local / 60) % 60);
+        } else {
+            let _ = hhmm.push_str("--:--");
+        }
         let _ = font_small.render_aligned(
             format_args!("更新 {}", hhmm),
             Point::new(4, 20),
@@ -181,9 +187,11 @@ where
         Line::new(Point::new(4, y), Point::new(left_w - 4, y))
             .into_styled(separator_style.clone())
             .draw(display);
-        y += 4;
 
         if let Some(clock) = data.current_date {
+            // 时间区域底部对齐：把时钟 + 三行文字整块下移到面板底部，消除下方空白。
+            // 块高 = 时钟段(56) + 年月日(16) + 农历(16) + 星座节气(16)
+            y = h - (56 + 16 + 16 + 16) - 4;
             // 时间（放大）
             let time_str = format_args!("{:02}:{:02}", clock.hour(), clock.minute()).to_string();
             let _ = draw_clock(display, time_str.as_str(), left_cx, y);
@@ -212,11 +220,18 @@ where
                 );
             }
             y += 16;
-            // 星座 节气
+            // 星座 节气：节气当日显示“今日XX”，否则显示“XX第N天”
             let zodiac = get_zodiac(clock.month() as u8, clock.day());
             let term = get_solar_term(clock.year(), clock.month() as u8, clock.day());
+            let term_day = solar_term_day(clock.year(), clock.month() as u8, clock.day());
+            let mut term_str: heapless::String<16> = heapless::String::new();
+            if term_day == 1 {
+                let _ = write!(term_str, "今日{}", term);
+            } else {
+                let _ = write!(term_str, "{}第{}天", term, term_day);
+            }
             let _ = font_small.render_aligned(
-                format_args!("{} {}", zodiac, term),
+                format_args!("{} {}", zodiac, term_str),
                 Point::new(left_cx, y),
                 VerticalPosition::Top,
                 HorizontalAlignment::Center,

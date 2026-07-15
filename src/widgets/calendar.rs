@@ -10,7 +10,7 @@ use embedded_graphics::text::renderer::CharacterStyle;
 use time::{Date, Month};
 use u8g2_fonts::U8g2TextStyle;
 use u8g2_fonts::fonts;
-use crate::model::lunar::Lunar;
+use crate::model::lunar::{Lunar, get_solar_term, solar_term_day};
 use crate::model::holiday::HolidayResponse;
 use crate::weather::HolidayInfo;
 
@@ -207,13 +207,17 @@ impl<C> Drawable for Calendar<C>
                             if same_month && day == today_day {
                                 temp_style.set_text_color(Some(self.back_color));
                             } 
-                if lunar_day_name.eq("初一") {
-                    Text::with_text_style(lunar_day_month_name, rect.top_left + Point::new( 30 , (grid_height / 2 + 7) as i32), temp_style, text_style)
+                // 单元格下方小字：节气第一天显示节气名（如"小暑"），优先于农历；
+                // 否则初一显示农历月名，其余显示农历日
+                let sub_text: &str = if solar_term_day(year, month as u8, day) == 1 {
+                    get_solar_term(year, month as u8, day)
+                } else if lunar_day_name.eq("初一") {
+                    lunar_day_month_name
+                } else {
+                    lunar_day_name
+                };
+                Text::with_text_style(sub_text, rect.top_left + Point::new( 30 , (grid_height / 2 + 7) as i32), temp_style, text_style)
                     .draw(&mut clipped_display)?;
-                }else{
-                    Text::with_text_style(lunar_day_name, rect.top_left + Point::new( 30 , (grid_height / 2 +7) as i32), temp_style, text_style)
-                    .draw(&mut clipped_display)?;
-                }
  
                 
                 

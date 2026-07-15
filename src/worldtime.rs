@@ -73,6 +73,11 @@ impl Clock {
         *sys_start = now
             .checked_sub(Duration::milliseconds(elapsed as i64))
             .expect("sys_start greater as current_ts");
+        // 标记本次开机时钟已恢复（rtc 恢复或 NTP 同步），供界面判断是否可显示，
+        // 避免唤醒瞬间 Clock 实例仍是 UNIX_EPOCH 就被读出，显示成 1970/08:00。
+        unsafe {
+            core::ptr::addr_of_mut!(CLOCK_RESTORED_THIS_BOOT).write(true);
+        }
     }
 
     pub(crate) async fn now(&self) -> OffsetDateTime {
@@ -301,6 +306,16 @@ pub fn sync_time_success() -> bool {
     unsafe { *core::ptr::addr_of!(CLOCK_SYNC_TIME_SECOND) > 0 }
 }
 
+/// 本次开机后 Clock 实例是否已被设置过（rtc 恢复或 NTP 同步）。
+/// 与 sync_time_success() 的区别：后者基于 rtc_fast，深睡唤醒后即为 true，
+/// 但此时 Clock 实例（普通内存）可能尚未恢复（仍是 UNIX_EPOCH），直接显示
+/// 会得到 1970/08:00。本标志在普通内存，每次开机复位为 false，
+/// 界面显示时间应基于它判断。
+static mut CLOCK_RESTORED_THIS_BOOT: bool = false;
+pub fn clock_restored() -> bool {
+    unsafe { *core::ptr::addr_of!(CLOCK_RESTORED_THIS_BOOT) }
+}
+
 pub async fn save_time_to_rtc() {
     unsafe {
         core::ptr::addr_of_mut!(WHEN_SLEEP_TIME_TIMESTAMP)
@@ -319,9 +334,13 @@ pub async fn ntp_worker() {
         // Sanity check: valid unix timestamps are between year 2020 and 2100
         if ts > 1577836800 && ts < 4102444800 {
             let current_second = ts + get_sleep_ms().await / 1000;
-            if let Ok(now) = OffsetDateTime::from_unix_timestamp(current_second as i64) {
-                clock.set_time(now).await;
-                Timer::after_secs(5).await;
+            // 再次校验恢复后的时间落在合理区间：get_sleep_ms 若因 RTC 计时不连续而异常，
+            // current_second 会越界，此时跳过恢复，等待 NTP 重新对时（避免设置成错误时间）。
+            if current_second > 1577836800 && current_second < 4102444800 {
+                if let Ok(now) = OffsetDateTime::from_unix_timestamp(current_second as i64) {
+                    clock.set_time(now).await;
+                    Timer::after_secs(5).await;
+                }
             }
         }
     }

@@ -166,7 +166,7 @@ impl Weather {
 
 
 #[ram(unstable(rtc_fast))]
-static mut WEATHER_SYNC_SECOND:u64 = 0;
+pub(crate) static mut WEATHER_SYNC_SECOND:u64 = 0;
 static mut WEATHER_SYNC_SECOND_ERROR_SECOND:u64 = 0;
 
 pub fn sync_weather_success()->bool{

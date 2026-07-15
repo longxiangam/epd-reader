@@ -389,132 +389,187 @@ impl ReadPage {
                 let bookmarks: Vec<u32, LOG_VEC_MAX> = self.log_vec.as_ref()
                     .map(|lv| lv.iter().skip(1).copied().collect())
                     .unwrap_or_default();
-
                 let bm_count = bookmarks.len() as u32;
-                let max_visible = 4u32;
-                let visible_bm = if bm_count > max_visible { max_visible } else { bm_count };
-                let total_items = if visible_bm > 0 { visible_bm + 1 } else { 1 };
-                let list_height = total_items * menu_item_height + menu_padding * 2;
-                let list_x = ((vw - menu_width) / 2) as i32;
-                let list_y = 20;
 
-                let rect = Rectangle::new(
-                    Point::new(list_x, list_y),
-                    Size::new(menu_width, list_height),
-                );
-                let style = PrimitiveStyleBuilder::new()
-                    .fill_color(White)
-                    .stroke_color(Black)
-                    .stroke_alignment(StrokeAlignment::Outside)
-                    .stroke_width(2)
-                    .build();
-                rect.into_styled(style).draw(display).ok();
+                // 布局：上方书签列表占 1/3 高度，下方预览占 2/3 高度（预览与屏幕同宽）
+                let margin: i32 = 8;
+                let gap: i32 = 6;
+                let total_h = vh as i32 - margin * 2;
+                let list_h = total_h / 3;
+                let preview_h = total_h - list_h - gap;
+                let list_x = ((vw as i32 - menu_width as i32) / 2) as i32;
+                let list_y = margin;
+                let list_right = list_x + menu_width as i32;
+                let preview_x: i32 = 0;
+                let preview_y = margin + list_h + gap;
 
+                // 书签列表框（描边内置，避免溢出框外）
+                Rectangle::new(Point::new(list_x, list_y), Size::new(menu_width, list_h as u32))
+                    .into_styled(
+                        PrimitiveStyleBuilder::new()
+                            .fill_color(White)
+                            .stroke_color(Black)
+                            .stroke_alignment(StrokeAlignment::Inside)
+                            .stroke_width(2)
+                            .build(),
+                    )
+                    .draw(display).ok();
+
+                // 标题 + 分隔线
+                let title_h: i32 = 18;
                 let title = if deleting { "删除书签" } else { "书签列表" };
                 font.render_aligned(
                     title,
-                    Point::new(list_x + menu_width as i32 / 2, list_y + 10),
+                    Point::new(list_x + menu_width as i32 / 2, list_y + 4 + title_h / 2),
                     VerticalPosition::Center,
                     HorizontalAlignment::Center,
                     FontColor::Transparent(Black),
                     display,
                 ).ok();
+                let sep_y = list_y + 4 + title_h;
+                Rectangle::new(Point::new(list_x + 4, sep_y), Size::new(menu_width - 8, 1))
+                    .into_styled(PrimitiveStyleBuilder::new().fill_color(Black).build())
+                    .draw(display).ok();
 
-                if bm_count == 0 {
-                    font.render_aligned(
-                        "暂无书签",
-                        Point::new(list_x + menu_width as i32 / 2, list_y + menu_padding as i32 + menu_item_height as i32 + menu_item_height as i32 / 2),
-                        VerticalPosition::Center,
-                        HorizontalAlignment::Center,
-                        FontColor::Transparent(Black),
-                        display,
-                    ).ok();
-                } else {
-                    let scroll_offset = if bm_index >= max_visible { bm_index - max_visible + 1 } else { 0 };
-                    for vi in 0..visible_bm {
-                        let bi = vi + scroll_offset;
-                        if bi >= bm_count { break; }
-                        let page = bookmarks[bi as usize];
-                        let item_y = list_y + menu_padding as i32 + ((vi + 1) as u32 * menu_item_height) as i32;
-                        let is_selected = bi == bm_index;
-
-                        if is_selected {
-                            let highlight = Rectangle::new(
-                                Point::new(list_x + 4, item_y),
-                                Size::new(menu_width - 8, menu_item_height),
-                            );
-                            highlight.into_styled(
-                                PrimitiveStyleBuilder::new().fill_color(Black).build()
-                            ).draw(display).ok();
-                        }
-
-                        let text_color = if is_selected { FontColor::Transparent(White) } else { FontColor::Transparent(Black) };
-                        let prefix = if is_selected { "> " } else { "  " };
-                        let delete_mark = if deleting && is_selected { " ×" } else { "" };
-                        font.render_aligned(
-                            format_args!("{}第{}页{}", prefix, page, delete_mark),
-                            Point::new(list_x + menu_padding as i32, item_y + menu_item_height as i32 / 2),
-                            VerticalPosition::Center,
-                            HorizontalAlignment::Left,
-                            text_color,
-                            display,
-                        ).ok();
-                    }
-                }
-
-                let cancel_y = list_y + menu_padding as i32 + (total_items as i32) * menu_item_height as i32;
+                // 取消行（固定在列表底部，确保位于框内）
+                let cancel_h: i32 = menu_item_height as i32;
+                let cancel_y = list_y + list_h - 4 - cancel_h;
                 let is_cancel_selected = bm_index >= bm_count;
                 if is_cancel_selected {
-                    let highlight = Rectangle::new(
-                        Point::new(list_x + 4, cancel_y),
-                        Size::new(menu_width - 8, menu_item_height),
-                    );
-                    highlight.into_styled(
-                        PrimitiveStyleBuilder::new().fill_color(Black).build()
-                    ).draw(display).ok();
+                    Rectangle::new(
+                        Point::new(list_x + 3, cancel_y),
+                        Size::new(menu_width - 6, menu_item_height),
+                    )
+                    .into_styled(PrimitiveStyleBuilder::new().fill_color(Black).build())
+                    .draw(display).ok();
                 }
                 let cancel_color = if is_cancel_selected { FontColor::Transparent(White) } else { FontColor::Transparent(Black) };
                 let cancel_prefix = if is_cancel_selected { "> " } else { "  " };
                 font.render_aligned(
                     format_args!("{}取消", cancel_prefix),
-                    Point::new(list_x + menu_padding as i32, cancel_y + menu_item_height as i32 / 2),
+                    Point::new(list_x + menu_padding as i32, cancel_y + cancel_h / 2),
                     VerticalPosition::Center,
                     HorizontalAlignment::Left,
                     cancel_color,
                     display,
                 ).ok();
 
-                if bm_count > 0 && bm_index < bm_count && !self.bookmark_preview.is_empty() {
-                    let preview_y = list_y + list_height as i32 + 10;
-                    let preview_height = vh as i32 - preview_y - 10;
-                    if preview_height > 30 {
-                        let preview_rect = Rectangle::new(
-                            Point::new(list_x, preview_y),
-                            Size::new(menu_width, preview_height as u32),
-                        );
-                        let preview_style = PrimitiveStyleBuilder::new()
+                // 书签滚动区域：标题下方 → 取消行上方
+                let scroll_top = sep_y + 2;
+                let scroll_bottom = cancel_y - 2;
+                let scroll_h = (scroll_bottom - scroll_top).max(0);
+                let item_h_i = menu_item_height as i32;
+                let sb_w: i32 = 3;          // 滚动条宽度
+                let sb_x = list_right - sb_w - 4;
+                let text_left = list_x + menu_padding as i32;
+                let text_right = sb_x - 4;
+                let max_visible = if item_h_i > 0 { (scroll_h / item_h_i) as u32 } else { 1 };
+                let max_visible = max_visible.max(1);
+
+                // 滚动偏移：保证选中项可见
+                let scroll_offset: u32 = if bm_count <= max_visible {
+                    0
+                } else if is_cancel_selected {
+                    bm_count - max_visible
+                } else {
+                    let max_off = bm_count - max_visible;
+                    if bm_index > max_off {
+                        max_off
+                    } else if bm_index >= max_visible {
+                        bm_index - max_visible + 1
+                    } else {
+                        0
+                    }
+                };
+
+                // 可见书签
+                for vi in 0..max_visible {
+                    let bi = scroll_offset + vi;
+                    if bi >= bm_count {
+                        break;
+                    }
+                    let page = bookmarks[bi as usize];
+                    let item_y = scroll_top + (vi as i32) * item_h_i;
+                    let is_selected = bi == bm_index;
+
+                    if is_selected {
+                        Rectangle::new(
+                            Point::new(list_x + 3, item_y),
+                            Size::new((text_right - list_x - 3) as u32, menu_item_height),
+                        )
+                        .into_styled(PrimitiveStyleBuilder::new().fill_color(Black).build())
+                        .draw(display).ok();
+                    }
+                    let text_color = if is_selected { FontColor::Transparent(White) } else { FontColor::Transparent(Black) };
+                    let prefix = if is_selected { "> " } else { "  " };
+                    let delete_mark = if deleting && is_selected { " ×" } else { "" };
+                    font.render_aligned(
+                        format_args!("{}第{}页{}", prefix, page, delete_mark),
+                        Point::new(text_left, item_y + item_h_i / 2),
+                        VerticalPosition::Center,
+                        HorizontalAlignment::Left,
+                        text_color,
+                        display,
+                    ).ok();
+                }
+
+                // 滚动条（书签数超过可见区时显示）
+                if bm_count > max_visible && scroll_h > 0 {
+                    Rectangle::new(Point::new(sb_x, scroll_top), Size::new(sb_w as u32, scroll_h as u32))
+                        .into_styled(
+                            PrimitiveStyleBuilder::new()
+                                .fill_color(White)
+                                .stroke_color(Black)
+                                .stroke_width(1)
+                                .build(),
+                        )
+                        .draw(display).ok();
+                    let thumb_h = ((scroll_h as u32 * max_visible) / bm_count).max(6).min(scroll_h as u32);
+                    let thumb_y = scroll_top + ((scroll_h as u32 * scroll_offset) / bm_count) as i32;
+                    Rectangle::new(Point::new(sb_x, thumb_y), Size::new(sb_w as u32, thumb_h))
+                        .into_styled(PrimitiveStyleBuilder::new().fill_color(Black).build())
+                        .draw(display).ok();
+                }
+
+                // 暂无书签
+                if bm_count == 0 {
+                    font.render_aligned(
+                        "暂无书签",
+                        Point::new(list_x + menu_width as i32 / 2, (scroll_top + scroll_bottom) / 2),
+                        VerticalPosition::Center,
+                        HorizontalAlignment::Center,
+                        FontColor::Transparent(Black),
+                        display,
+                    ).ok();
+                }
+
+                // 预览区域（全屏宽，2/3 高度）
+                Rectangle::new(Point::new(preview_x, preview_y), Size::new(vw, preview_h as u32))
+                    .into_styled(
+                        PrimitiveStyleBuilder::new()
                             .fill_color(White)
                             .stroke_color(Black)
-                            .stroke_alignment(StrokeAlignment::Outside)
+                            .stroke_alignment(StrokeAlignment::Inside)
                             .stroke_width(1)
-                            .build();
-                        preview_rect.into_styled(preview_style).draw(display).ok();
+                            .build(),
+                    )
+                    .draw(display).ok();
 
-                        use embedded_graphics::draw_target::DrawTargetExt;
-                        let clipped = Rectangle::new(
-                            Point::new(list_x + 4, preview_y + 4),
-                            Size::new(menu_width - 8, (preview_height - 8) as u32),
-                        );
-                        let mut clipped_display = display.clipped(&clipped);
-                        font.render_aligned(
-                            self.bookmark_preview.as_str(),
-                            Point::new(list_x + 6, preview_y + 14),
-                            VerticalPosition::Top,
-                            HorizontalAlignment::Left,
-                            FontColor::Transparent(Black),
-                            &mut clipped_display,
-                        ).ok();
-                    }
+                if bm_count > 0 && bm_index < bm_count && !self.bookmark_preview.is_empty() && preview_h > 12 {
+                    use embedded_graphics::draw_target::DrawTargetExt;
+                    let clip = Rectangle::new(
+                        Point::new(preview_x + 4, preview_y + 4),
+                        Size::new(vw - 8, (preview_h - 8) as u32),
+                    );
+                    let mut clipped_display = display.clipped(&clip);
+                    font.render_aligned(
+                        self.bookmark_preview.as_str(),
+                        Point::new(preview_x + 6, preview_y + 14),
+                        VerticalPosition::Top,
+                        HorizontalAlignment::Left,
+                        FontColor::Transparent(Black),
+                        &mut clipped_display,
+                    ).ok();
                 }
             }
             MenuState::Closed => {}
