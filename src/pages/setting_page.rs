@@ -22,7 +22,7 @@ use crate::widgets::list_widget::ListWidget;
 use crate::wifi::{IP_ADDRESS, WIFI_MODEL, WifiModel};
 use crate::web_service::{web_service,STOP_WEB_SERVICE};
 
-const SETTINGS_COUNT: usize = 6;
+const SETTINGS_COUNT: usize = 7;
 const READ_SLEEP_MIN: u64 = 10;
 const WEATHER_SLEEP_MIN: u64 = 5;
 const SLEEP_STEP: u64 = 5;
@@ -56,6 +56,7 @@ pub struct SettingPage {
     read_sleep_seconds: u64,
     weather_sleep_seconds: u64,
     stock_edit_selected: u8,
+    home_edit: i32,
 }
 
 impl SettingPage {
@@ -90,6 +91,10 @@ impl SettingPage {
                         self.stock_edit_selected = (self.stock_edit_selected + c - 1) % c;
                     }
                 }
+                5 => {
+                    // 默认主页：上一个（天->股->日->天）
+                    self.home_edit = match self.home_edit { 1 => 3, 3 => 2, 2 => 1, _ => 1 };
+                }
                 _ => {}
             }
         } else if select > 0 {
@@ -114,6 +119,10 @@ impl SettingPage {
                         let c = ss.count;
                         self.stock_edit_selected = (self.stock_edit_selected + 1) % c;
                     }
+                }
+                5 => {
+                    // 默认主页：下一个（天->日->股->天）
+                    self.home_edit = match self.home_edit { 1 => 2, 2 => 3, 3 => 1, _ => 2 };
                 }
                 _ => {}
             }
@@ -144,6 +153,10 @@ impl SettingPage {
                         let _ = ss.write();
                     }
                 }
+                5 => {
+                    // 保存默认主页
+                    crate::pages::main_page::write_default_page(self.home_edit);
+                }
                 _ => {}
             }
             self.mode = SettingMode::Settings { select, editing: false };
@@ -165,6 +178,11 @@ impl SettingPage {
                     }
                 }
                 5 => {
+                    // 默认主页：进入编辑态，从当前值开始
+                    self.home_edit = crate::pages::main_page::read_default_page();
+                    self.mode = SettingMode::Settings { select, editing: true };
+                }
+                6 => {
                     // 返回：STA 退出设置页回到主菜单；AP（首次配网）返回二维码根界面
                     match self.wifi_model {
                         Some(WifiModel::STA) => { self.running = false; }
@@ -215,12 +233,27 @@ impl SettingPage {
             }
         };
 
+        let home_str = {
+            let cur = if editing && select == 5 {
+                self.home_edit
+            } else {
+                crate::pages::main_page::read_default_page()
+            };
+            let name = match cur { 1 => "天气", 2 => "日历", 3 => "股票", _ => "天气" };
+            if editing && select == 5 {
+                format!("默认主页: >>{}<<", name)
+            } else {
+                format!("默认主页: {}", name)
+            }
+        };
+
         let mut items: Vec<&str, 20> = Vec::new();
         let _ = items.push(read_str.as_str());
         let _ = items.push(weather_str.as_str());
         let _ = items.push("自动定位");
         let _ = items.push("web配置");
         let _ = items.push(stock_str.as_str());
+        let _ = items.push(home_str.as_str());
         let _ = items.push("返回");
 
         let mut list_widget = ListWidget::new(
@@ -352,6 +385,7 @@ impl Page for SettingPage {
             read_sleep_seconds: if sleep_storage.read_sleep_seconds > 0 { sleep_storage.read_sleep_seconds } else { 120 },
             weather_sleep_seconds: if sleep_storage.weather_sleep_seconds > 0 { sleep_storage.weather_sleep_seconds } else { 60 },
             stock_edit_selected: 0,
+            home_edit: 1,
         }
     }
 

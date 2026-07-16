@@ -47,6 +47,11 @@ pub type EpdControl<SPI, BUSY, DC, RST, DELAY> = Epd2in7<SPI, BUSY, DC, RST, DEL
 #[ram(unstable(rtc_fast))]
 static mut RENDER_TIMES:u32 = 0;
 
+/// 冷启动清屏标记：冷启动为 true（rtc_fast 初值），首帧强制全刷清残影；
+/// 唤醒为 false（已清过，保留值）。
+#[ram(unstable(rtc_fast))]
+static mut NEED_CLEAR: bool = true;
+
 /// Stores the last displayed frame for epd2in7 partial refresh.
 /// After wake-up from deep sleep, RAM2 is lost, so we use this buffer
 /// as the "old frame" reference in set_base_map_quiet to avoid a full flash.
@@ -164,7 +169,8 @@ pub async fn render(
 
                 #[cfg(not(feature = "epd2in7"))]
                 {
-                    let need_force_full = get_render_times() % FORCE_FULL_REFRESH_TIMES == 0 && refresh_lut == RefreshLut::Quick;
+                    let need_clear = take_need_clear();
+                    let need_force_full = (get_render_times() % FORCE_FULL_REFRESH_TIMES == 0 || need_clear) && refresh_lut == RefreshLut::Quick;
                     if need_force_full {
                         spi_device = set_refresh_mode(RefreshLut::Full, &mut epd, spi_device);
                     }
@@ -214,6 +220,15 @@ pub fn get_render_times()->u32{
 pub fn reset_render_times(){
     unsafe {
         core::ptr::addr_of_mut!(RENDER_TIMES).write(0);
+    }
+}
+
+/// 读取并复位冷启动清屏标记（仅冷启动首帧返回 true）
+pub fn take_need_clear() -> bool {
+    unsafe {
+        let v = core::ptr::addr_of!(NEED_CLEAR).read();
+        core::ptr::addr_of_mut!(NEED_CLEAR).write(false);
+        v
     }
 }
 

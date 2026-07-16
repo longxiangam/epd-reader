@@ -8,7 +8,7 @@ use epd_waveshare::color::Black;
 use crate::model::stock::KLine;
 
 /// 价格 -> 屏幕 Y。屏幕坐标向下递增，故高价在上。
-fn map_y(price: f32, lo: f32, hi: f32, top: i32, h: i32) -> i32 {
+pub fn map_y(price: f32, lo: f32, hi: f32, top: i32, h: i32) -> i32 {
     let range = hi - lo;
     let r = if range > 0.0 { range } else { 1.0 };
     let frac = (hi - price) / r;
@@ -16,10 +16,19 @@ fn map_y(price: f32, lo: f32, hi: f32, top: i32, h: i32) -> i32 {
 }
 
 /// 计算价格区间并预留 5% 边距，返回 (lo, hi)
-fn padded_range(lo: f32, hi: f32) -> (f32, f32) {
+pub fn padded_range(lo: f32, hi: f32) -> (f32, f32) {
     let hi = if hi > lo { hi } else { lo + 1.0 };
     let pad = (hi - lo) * 0.05;
     (lo - pad, hi + pad)
+}
+
+/// 蜡烛最小宽度（含间隔）。低于此宽度则只显示最近的若干根，保证空心格可见。
+pub const MIN_CANDLE_W: i32 = 7;
+
+/// 给定图表宽度和总数，返回应显示的（最近的）蜡烛数，使每根至少 MIN_CANDLE_W 像素宽。
+pub fn visible_count(width: i32, total: usize) -> usize {
+    let max_v = (width / MIN_CANDLE_W) as usize;
+    if max_v == 0 { total.min(1) } else { total.min(max_v) }
 }
 
 /// 蜡烛图。二值屏：涨(收>=开)=空心，跌=实心，影线 1px。
@@ -38,17 +47,20 @@ where
         return Ok(());
     }
 
+    let total = klines.len();
+    let n = visible_count(w, total);
+    let view = &klines[total - n..];
+
     let mut lo = f32::MAX;
     let mut hi = f32::MIN;
-    for k in klines {
+    for k in view {
         if k.low < lo { lo = k.low; }
         if k.high > hi { hi = k.high; }
     }
     let (lo, hi) = padded_range(lo, hi);
 
-    let n = klines.len() as i32;
     let slot = w as f32 / n as f32;
-    let body_w = ((slot * 0.7) as i32).max(2);
+    let body_w = ((slot * 0.8) as i32).max(4);
 
     let wick = PrimitiveStyleBuilder::new().stroke_color(Black).stroke_width(1).build();
     let hollow = PrimitiveStyleBuilder::new()
@@ -63,7 +75,7 @@ where
         .stroke_alignment(StrokeAlignment::Inside)
         .build();
 
-    for (i, k) in klines.iter().enumerate() {
+    for (i, k) in view.iter().enumerate() {
         let cx = left + (slot * (i as f32 + 0.5)) as i32;
         let y_high = map_y(k.high, lo, hi, top, h);
         let y_low = map_y(k.low, lo, hi, top, h);

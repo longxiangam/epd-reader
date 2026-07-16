@@ -36,6 +36,34 @@ static MAIN_PAGE:Mutex<CriticalSectionRawMutex,Option<MainPage> > = Mutex::new(N
 #[ram(unstable(rtc_fast))]
 static mut PAGE_INDEX:i32 = 1;
 
+/// 冷启动标记（rtc_fast）：false=冷启动，true=深睡唤醒。
+/// 用于区分"开机进默认主页" vs "唤醒回上次所在页"。
+#[ram(unstable(rtc_fast))]
+static mut BOOTED: bool = false;
+
+/// 读取默认主页（1=天气 2=日历 3=股票，存于 OtherStorage.data，避免改 storage 结构）
+pub fn read_default_page() -> i32 {
+    if let Ok(o) = crate::storage::OtherStorage::read() {
+        if let Some(c) = o.data.chars().next() {
+            if let Some(d) = c.to_digit(10) {
+                let d = d as i32;
+                if (1..=3).contains(&d) {
+                    return d;
+                }
+            }
+        }
+    }
+    1 // 默认天气
+}
+
+pub fn write_default_page(page: i32) {
+    use core::fmt::Write;
+    let mut o = crate::storage::OtherStorage::read().unwrap_or_default();
+    o.data.clear();
+    let _ = write!(o.data, "{}", page);
+    let _ = o.write();
+}
+
 ///每个page 包含状态与绘制与逻辑处理
 ///状态通过事件改变，并触发绘制
 pub struct MainPage{
@@ -50,8 +78,15 @@ impl MainPage {
 
     pub async fn init(_spawner: Spawner){
         let mut page_index = unsafe { *core::ptr::addr_of!(PAGE_INDEX) };
-        
-        
+
+        // 冷启动：进入配置的默认主页；深睡唤醒：回到上次所在页（PAGE_INDEX）
+        let booted = unsafe { *core::ptr::addr_of!(BOOTED) };
+        if !booted {
+            unsafe { *core::ptr::addr_of_mut!(BOOTED) = true; }
+            page_index = read_default_page();
+            unsafe { *core::ptr::addr_of_mut!(PAGE_INDEX) = page_index; }
+        }
+
         // 检查是否有错误日志，如果有则进入debug_page
         #[cfg(feature = "enable_debug")]
         if let Ok(error_log) = crate::storage::ErrorLogStorage::read() {

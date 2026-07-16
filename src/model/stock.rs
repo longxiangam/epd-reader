@@ -26,6 +26,7 @@ pub enum ChartMode {
     Week,
     Month,
     Line,
+    Quote,
 }
 
 impl ChartMode {
@@ -35,16 +36,18 @@ impl ChartMode {
             ChartMode::Day => ChartMode::Week,
             ChartMode::Week => ChartMode::Month,
             ChartMode::Month => ChartMode::Line,
-            ChartMode::Line => ChartMode::Minute,
+            ChartMode::Line => ChartMode::Quote,
+            ChartMode::Quote => ChartMode::Minute,
         }
     }
     pub fn prev(self) -> Self {
         match self {
-            ChartMode::Minute => ChartMode::Line,
-            ChartMode::Day => ChartMode::Minute,
-            ChartMode::Week => ChartMode::Day,
-            ChartMode::Month => ChartMode::Week,
+            ChartMode::Minute => ChartMode::Quote,
+            ChartMode::Quote => ChartMode::Line,
             ChartMode::Line => ChartMode::Month,
+            ChartMode::Month => ChartMode::Week,
+            ChartMode::Week => ChartMode::Day,
+            ChartMode::Day => ChartMode::Minute,
         }
     }
     pub fn label(self) -> &'static str {
@@ -54,10 +57,15 @@ impl ChartMode {
             ChartMode::Week => "周K",
             ChartMode::Month => "月K",
             ChartMode::Line => "折线",
+            ChartMode::Quote => "行情",
         }
     }
     pub fn is_minute(self) -> bool {
         matches!(self, ChartMode::Minute)
+    }
+    /// 实时模式（分时/行情）：每 2 分钟唤醒刷新
+    pub fn is_realtime(self) -> bool {
+        matches!(self, ChartMode::Minute | ChartMode::Quote)
     }
     pub fn is_line_render(self) -> bool {
         matches!(self, ChartMode::Minute | ChartMode::Line)
@@ -69,6 +77,7 @@ impl ChartMode {
             ChartMode::Day | ChartMode::Line => ChartSource::Day,
             ChartMode::Week => ChartSource::Week,
             ChartMode::Month => ChartSource::Month,
+            ChartMode::Quote => ChartSource::Quote,
         }
     }
     /// 编码为 u8 用于存 rtc_fast（跨深睡重启保留模式）
@@ -79,6 +88,7 @@ impl ChartMode {
             ChartMode::Month => 2,
             ChartMode::Line => 3,
             ChartMode::Minute => 4,
+            ChartMode::Quote => 5,
         }
     }
     pub fn decode(v: u8) -> Self {
@@ -87,6 +97,7 @@ impl ChartMode {
             2 => ChartMode::Month,
             3 => ChartMode::Line,
             4 => ChartMode::Minute,
+            5 => ChartMode::Quote,
             _ => ChartMode::Day,
         }
     }
@@ -98,6 +109,33 @@ pub enum ChartSource {
     Day,
     Week,
     Month,
+    Quote,
+}
+
+#[derive(Clone, Copy, Default, Debug)]
+pub struct QuoteLevel {
+    pub price: f32,
+    pub vol: u32,
+}
+
+#[derive(Default, Debug)]
+pub struct RealtimeQuote {
+    pub open: f32,
+    pub preclose: f32,
+    pub price: f32,
+    pub high: f32,
+    pub low: f32,
+    pub volume: f32,      // 成交量(手)
+    pub amount: f32,      // 成交额(万元)
+    pub turnover: f32,    // 换手率%
+    pub amplitude: f32,   // 振幅%
+    pub pe: f32,          // 市盈率
+    pub pb: f32,          // 市净率
+    pub total_mkt: f32,   // 总市值(亿)
+    pub circ_mkt: f32,    // 流通市值(亿)
+    pub buys: [QuoteLevel; 5],
+    pub sells: [QuoteLevel; 5],
+    pub datetime: String<15>, // "20260717113859"
 }
 
 pub struct StockData {
@@ -109,6 +147,7 @@ pub struct StockData {
     pub change_pct: f32,
     pub code: String<10>,
     pub name: String<32>,
+    pub quote: Option<Box<RealtimeQuote>>,
 }
 
 /// 新浪 K 线接口：明文 HTTP，返回扁平 JSON 数组
@@ -120,6 +159,7 @@ pub fn build_url(code: &str, mode: ChartMode, count: usize) -> heapless::String<
         ChartMode::Day | ChartMode::Line => 240,
         ChartMode::Week => 1200,
         ChartMode::Month => 7200,
+        ChartMode::Quote => 0,
     };
     let mut s: heapless::String<160> = heapless::String::new();
     let _ = s.push_str("http://money.finance.sina.com.cn/quotes_service/api/json_v2.php/CN_MarketData.getKLineData?symbol=");
@@ -137,7 +177,16 @@ pub fn bar_count(mode: ChartMode) -> usize {
         ChartMode::Day | ChartMode::Line => 60,
         ChartMode::Week => 52,          // 约 1 年
         ChartMode::Month => 24,         // 约 2 年
+        ChartMode::Quote => 0,          // 行情模式不取 K 线
     }
+}
+
+/// 腾讯实时行情接口（明文 HTTP，无需 Referer，含换手率/振幅/总市值等全部字段）
+pub fn build_quote_url(code: &str) -> heapless::String<64> {
+    let mut s: heapless::String<64> = heapless::String::new();
+    let _ = s.push_str("http://qt.gtimg.cn/q=");
+    let _ = s.push_str(code);
+    s
 }
 
 /// no_std 下 f32 不能用 parse / FromStr，手写定点解析（整数 + 小数）
@@ -206,6 +255,7 @@ pub fn parse_kline(data: &[u8], code: &str, name: &str, mode: ChartMode) -> Opti
         change_pct: 0.0,
         code: code_s,
         name: name_s,
+        quote: None,
     });
 
     let mut i = 0usize;
@@ -269,6 +319,18 @@ pub fn parse_kline(data: &[u8], code: &str, name: &str, mode: ChartMode) -> Opti
         }
     }
 
+    // 按日期升序排序，确保时间顺序正确（避免接口返回顺序导致首尾颠倒）
+    {
+        let m = out.klines.len();
+        for a in 1..m {
+            let mut bidx = a;
+            while bidx > 0 && out.klines[bidx - 1].date > out.klines[bidx].date {
+                out.klines.swap(bidx - 1, bidx);
+                bidx -= 1;
+            }
+        }
+    }
+
     // 现价 / 昨收：从最后两根推。分时用首根 open 作今日开盘。
     let kn = out.klines.len();
     let (last_price, preclose) = if kn >= 2 {
@@ -289,6 +351,109 @@ pub fn parse_kline(data: &[u8], code: &str, name: &str, mode: ChartMode) -> Opti
 
     println!("stock parsed: mode={:?} rows={} price={}", mode, out.klines.len(), last_price);
     Some(out)
+}
+
+fn parse_u32(s: &str) -> u32 {
+    let mut n: u32 = 0;
+    for c in s.bytes() {
+        if c.is_ascii_digit() {
+            n = n * 10 + (c - b'0') as u32;
+        } else {
+            break;
+        }
+    }
+    n
+}
+
+fn fld_bytes<'a>(fields: &[&'a [u8]], i: usize) -> &'a str {
+    core::str::from_utf8(fields.get(i).copied().unwrap_or(b"0")).unwrap_or("0")
+}
+
+/// GBK 安全的 ~ 分割：lead byte(0x81-0xFE) 跳过下一字节，
+/// 避免把 GBK 尾字节 0x7E(~) 误判为分隔符
+fn split_gbk_tilde(data: &[u8]) -> heapless::Vec<&[u8], 80> {
+    let mut result: heapless::Vec<&[u8], 80> = heapless::Vec::new();
+    let mut start = 0;
+    let mut i = 0;
+    while i < data.len() {
+        let b = data[i];
+        if (0x81..=0xFE).contains(&b) && i + 1 < data.len() {
+            i += 2;
+            continue;
+        }
+        if b == b'~' {
+            let _ = result.push(&data[start..i]);
+            start = i + 1;
+        }
+        i += 1;
+    }
+    let _ = result.push(&data[start..]);
+    result
+}
+
+/// 解析腾讯实时行情 qt.gtimg.cn
+pub fn parse_quote(data: &[u8], code: &str, name: &str) -> Option<Box<StockData>> {
+    let start = data.iter().position(|&b| b == b'"')? + 1;
+    let end = start + data[start..].iter().position(|&b| b == b'"')?;
+    let body = &data[start..end];
+    let fields = split_gbk_tilde(body);
+    if fields.len() < 47 {
+        return None;
+    }
+
+    let mut buys = [QuoteLevel::default(); 5];
+    let mut sells = [QuoteLevel::default(); 5];
+    for i in 0..5usize {
+        buys[i] = QuoteLevel {
+            price: parse_f32(fld_bytes(&fields, 9 + 2 * i)),
+            vol: parse_u32(fld_bytes(&fields, 10 + 2 * i)),
+        };
+        sells[i] = QuoteLevel {
+            price: parse_f32(fld_bytes(&fields, 19 + 2 * i)),
+            vol: parse_u32(fld_bytes(&fields, 20 + 2 * i)),
+        };
+    }
+
+    let mut datetime: String<15> = String::new();
+    let _ = datetime.push_str(fld_bytes(&fields, 30));
+
+    let price = parse_f32(fld_bytes(&fields, 3));
+    let preclose = parse_f32(fld_bytes(&fields, 4));
+    let rq = RealtimeQuote {
+        open: parse_f32(fld_bytes(&fields, 5)),
+        preclose,
+        price,
+        high: parse_f32(fld_bytes(&fields, 33)),
+        low: parse_f32(fld_bytes(&fields, 34)),
+        volume: parse_f32(fld_bytes(&fields, 6)),
+        amount: parse_f32(fld_bytes(&fields, 37)),
+        turnover: parse_f32(fld_bytes(&fields, 38)),
+        amplitude: parse_f32(fld_bytes(&fields, 43)),
+        pe: parse_f32(fld_bytes(&fields, 39)),
+        pb: parse_f32(fld_bytes(&fields, 46)),
+        total_mkt: parse_f32(fld_bytes(&fields, 45)),
+        circ_mkt: parse_f32(fld_bytes(&fields, 44)),
+        buys,
+        sells,
+        datetime,
+    };
+    println!("stock quote parsed: price={} high={} low={} turnover={}", price, rq.high, rq.low, rq.turnover);
+
+    let mut code_s: String<10> = String::new();
+    let _ = code_s.push_str(code);
+    let mut name_s: String<32> = String::new();
+    let _ = name_s.push_str(name);
+    Some(Box::new(StockData {
+        mode: ChartMode::Quote,
+        klines: heapless::Vec::new(),
+        last_price: price,
+        preclose,
+        change: price - preclose,
+        change_pct: if preclose > 0.0 { (price - preclose) / preclose * 100.0 } else { 0.0 },
+        code: code_s,
+        name: name_s,
+        quote: Some(Box::new(rq)),
+    }))
 }
 
 fn push_u32<const N: usize>(s: &mut String<N>, mut n: u32) {

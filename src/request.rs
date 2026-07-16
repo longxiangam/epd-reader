@@ -79,7 +79,7 @@ impl RequestClient{
     }
 
     /// 解析 URL 并把响应读入静态 RESPONSE_BUF，返回读到的字节数（不拷贝）。
-    async fn read_to_buf(&mut self, url: &str) -> Result<usize, RequestError> {
+    async fn read_to_buf(&mut self, url: &str, headers: &[(&str, &str)]) -> Result<usize, RequestError> {
         if let Some(rest) = url.strip_prefix("https://") {
             println!("Rest: {rest}");
             let (host_and_port, path) = rest.split_once('/').unwrap_or((rest, ""));
@@ -91,7 +91,7 @@ impl RequestClient{
                 .unwrap_or((host_and_port, "443"));
             println!("Host: {host}, port: {port}, path: {path}");
             let port = port.parse::<u16>().map_err(|e|{ RequestError::PortParse(e)})?;
-            self.send_https_request(host, port, path).await
+            self.send_https_request(host, port, path, headers).await
         } else if let Some(rest) = url.strip_prefix("http://") {
             println!("Rest: {rest}");
             let (host_and_port, path) = rest.split_once('/').unwrap_or((rest, ""));
@@ -103,7 +103,7 @@ impl RequestClient{
                 .unwrap_or((host_and_port, "80"));
             println!("Host: {host}, port: {port}, path: {path}");
             let port = port.parse::<u16>().map_err(|e|{ RequestError::PortParse(e)})?;
-            self.send_plain_http_request(host, port, path).await
+            self.send_plain_http_request(host, port, path, headers).await
         } else {
             Err(RequestError::UnsupportedScheme)
         }
@@ -112,7 +112,7 @@ impl RequestClient{
     /// 拷贝版：返回拥有所有权的 ResponseData（供响应小、不常请求的调用方使用）。
     #[allow(static_mut_refs)]
     pub async fn send_request(&mut self, url: &str) -> Result<ResponseData, RequestError> {
-        let len = self.read_to_buf(url).await?;
+        let len = self.read_to_buf(url, &[]).await?;
         // SAFETY: WIFI_LOCK 串行化，此处独占 RESPONSE_BUF
         let data = unsafe { RESPONSE_BUF_[..len].to_vec() };
         Ok(crate::request::ResponseData { data, length: len })
@@ -123,8 +123,18 @@ impl RequestClient{
     /// 会在下一次请求前解析完（解析只读取、把数据搬进自己的结构）。
     #[allow(static_mut_refs)]
     pub async fn send_request_slice(&mut self, url: &str) -> Result<&'static [u8], RequestError> {
-        let len = self.read_to_buf(url).await?;
+        let len = self.read_to_buf(url, &[]).await?;
         // SAFETY: 见上；WIFI_LOCK 保证独占
+        Ok(unsafe { &RESPONSE_BUF_[..len] })
+    }
+
+
+    /// 就地带自定义 header（用于需要 Referer 等的请求，如新浪行情）。
+    /// SAFETY/契约：同 send_request_slice，返回切片在下次请求前有效。
+    #[allow(static_mut_refs)]
+    pub async fn send_request_slice_with(&mut self, url: &str, headers: &[(&str, &str)]) -> Result<&'static [u8], RequestError> {
+        let len = self.read_to_buf(url, headers).await?;
+        // SAFETY: WIFI_LOCK 串行化
         Ok(unsafe { &RESPONSE_BUF_[..len] })
     }
 
@@ -136,6 +146,7 @@ impl RequestClient{
         host: &str,
         port: u16,
         path: &str,
+        headers: &[(&str, &str)],
     ) -> Result<usize, RequestError> {
         println!("Send plain HTTP request to path {path} at host {host}:{port}");
 
@@ -143,7 +154,7 @@ impl RequestClient{
         let remote_endpoint = (ip_address, port);
 
         // SAFETY: WIFI_LOCK 串行化
-        let (rx, tx, headers, resp_buf) = unsafe {
+        let (rx, tx, resp_hdrs, resp_buf) = unsafe {
             (
                 &mut RX_BUF[..],
                 &mut TX_BUF[..],
@@ -160,14 +171,14 @@ impl RequestClient{
         socket.connect(remote_endpoint).await?;
         println!("Connected to HTTP server");
 
-        let request = Request::get(path).host(host).build();
+        let request = Request::get(path).host(host).headers(headers).build();
 
         request.write_header(&mut socket).await?;
         let _ = socket.flush().await;
 
-        headers.fill(0);
+        resp_hdrs.fill(0);
         resp_buf.fill(0);
-        let response = Response::read(&mut socket, Method::GET, headers).await?;
+        let response = Response::read(&mut socket, Method::GET, resp_hdrs).await?;
 
         println!("Response status: {:?}", response.status);
 
@@ -187,6 +198,7 @@ impl RequestClient{
         host: &str,
         port: u16,
         path: &str,
+        headers: &[(&str, &str)],
     ) -> Result<usize, RequestError>  {
         println!("Send HTTPs request to path {path} at host {host}:{port}");
 
@@ -194,7 +206,7 @@ impl RequestClient{
         let remote_endpoint = (ip_address, port);
 
         // SAFETY: WIFI_LOCK 串行化
-        let (rx, tx, tls_rx, tls_tx, headers, resp_buf) = unsafe {
+        let (rx, tx, tls_rx, tls_tx, resp_hdrs, resp_buf) = unsafe {
             (
                 &mut RX_BUF[..],
                 &mut TX_BUF[..],
@@ -226,13 +238,13 @@ impl RequestClient{
             .await?;
         println!("TLS handshake succeeded");
 
-        let request = Request::get(path).host(host).build();
+        let request = Request::get(path).host(host).headers(headers).build();
         request.write_header(&mut tls).await?;
         let _ = tls.flush().await;
 
-        headers.fill(0);
+        resp_hdrs.fill(0);
         resp_buf.fill(0);
-        let response = Response::read(&mut tls, Method::GET, headers).await?;
+        let response = Response::read(&mut tls, Method::GET, resp_hdrs).await?;
 
         println!("Response status: {:?}", response.status);
 
