@@ -395,6 +395,21 @@ where
             Line::new(Point::new(left + 14, prompt_y), Point::new(left + 18, prompt_y))
                 .into_styled(style.clone()).draw(target)?;
         }
+        IconType::Stock => {
+            // 上升折线 + 箭头
+            let left = center.x - half + 2;
+            let right = center.x + half - 2;
+            let base_y = center.y + half - 3;
+            let p1 = Point::new(left, base_y);
+            let p2 = Point::new(center.x - q, center.y + q);
+            let p3 = Point::new(center.x + q, center.y - q);
+            let p4 = Point::new(right, center.y - half + 2);
+            Line::new(p1, p2).into_styled(style.clone()).draw(target)?;
+            Line::new(p2, p3).into_styled(style.clone()).draw(target)?;
+            Line::new(p3, p4).into_styled(style.clone()).draw(target)?;
+            Line::new(p4, Point::new(p4.x - 4, p4.y)).into_styled(style.clone()).draw(target)?;
+            Line::new(p4, Point::new(p4.x, p4.y + 4)).into_styled(style.clone()).draw(target)?;
+        }
     }
     Ok(())
 }

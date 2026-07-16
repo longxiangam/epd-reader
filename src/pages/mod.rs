@@ -10,6 +10,7 @@ mod calendar;
 mod read;
 mod read_menu_page;
 mod weather;
+mod stock;
 pub mod setting_page;
 pub mod debug_page;
 
@@ -21,6 +22,7 @@ pub enum IconType {
     Calendar,
     Settings,
     Debug,
+    Stock,
 }
 
 enum PageEnum {
@@ -34,6 +36,7 @@ enum PageEnum {
     EReadPage,
     EImageListPage,
     EDebugPage,
+    EStockPage,
 }
 struct  MenuItem{
     page_enum:PageEnum,

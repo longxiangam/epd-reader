@@ -78,7 +78,9 @@ esp_bootloader_esp_idf::esp_app_desc!();
 
 #[esp_rtos::main]
 async fn main(spawner: Spawner) -> ! {
-    esp_alloc::heap_allocator!(size: 90 * 1024);
+    // 请求缓冲已移至 .bss（request.rs 的静态数组），堆无需再容纳那 25KB，
+    // 故从 90KB 降到 64KB，把静态内存让给 .bss/栈，避免 SRAM 溢出挤占主栈。
+    esp_alloc::heap_allocator!(size: 64 * 1024);
 
     println!("entry");
     let config = HalConfig::default().with_cpu_clock(CpuClock::max());

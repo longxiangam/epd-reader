@@ -19,7 +19,7 @@ use crate::display::{display_mut,  RENDER_CHANNEL, RenderInfo};
 use crate::event::EventType;
 use crate::pages::{MenuItem, Page, PageEnum};
 use crate::pages::calendar::CalendarPage;
-use crate::pages::PageEnum::{ECalendarPage,  EClockPage, EDebugPage, EReadPage, ESettingPage, ETimerPage, EWeatherPage, EImageListPage};
+use crate::pages::PageEnum::{ECalendarPage,  EClockPage, EDebugPage, EReadPage, ESettingPage, EStockPage, ETimerPage, EWeatherPage, EImageListPage};
 use crate::pages::IconType;
 use crate::widgets::icon_grid_widget::IconGridWidget;
 use crate::pages::debug_page::DebugPage;
@@ -27,6 +27,7 @@ use crate::pages::read::ReadPage;
 use crate::pages::image_page::ImagePage;
 use crate::pages::setting_page::SettingPage;
 use crate::pages::weather::WeatherPage;
+use crate::pages::stock::StockPage;
 use crate::sleep::to_sleep_tips;
 use crate::storage::NvsStorage;
 
@@ -111,6 +112,7 @@ impl Page for  MainPage{
         menus.push(MenuItem::new(String::<20>::from_str("电子书").unwrap(), EReadPage, IconType::Book));
         menus.push(MenuItem::new(String::<20>::from_str("天气").unwrap(), EWeatherPage, IconType::Weather));
         menus.push(MenuItem::new(String::<20>::from_str("日历").unwrap(), ECalendarPage, IconType::Calendar));
+        menus.push(MenuItem::new(String::<20>::from_str("股票").unwrap(), EStockPage, IconType::Stock));
         menus.push(MenuItem::new(String::<20>::from_str("图片").unwrap(), EImageListPage, IconType::Image));
         menus.push(MenuItem::new(String::<20>::from_str("设置").unwrap(), ESettingPage, IconType::Settings));
         menus.push(MenuItem::new(String::<20>::from_str("调试").unwrap(), EDebugPage, IconType::Debug));
@@ -255,6 +257,12 @@ impl Page for  MainPage{
                     let mut calendar_page = CalendarPage::new();
                     calendar_page.bind_event().await;
                     calendar_page.run(spawner).await;
+                    self.back().await;
+                }
+                EStockPage => {
+                    let mut stock_page = StockPage::new();
+                    stock_page.bind_event().await;
+                    stock_page.run(spawner).await;
                     self.back().await;
                 }
                 ESettingPage =>{

@@ -1,4 +1,3 @@
-use alloc::vec;
 use alloc::vec::Vec;
 use core::num::ParseIntError;
 use embassy_net::{IpAddress, Stack};
@@ -11,8 +10,23 @@ use reqwless::request::{Method, Request, RequestBuilder};
 use reqwless::response::Response;
 use crate::random::RngWrapper;
 
-const BUFFER_SIZE:usize = 4096;
-const TLS_BUFFER_SIZE:usize = 4096;
+// 缓冲区各段尺寸
+const TCP_BUF: usize = 4096;
+const TLS_BUF: usize = 4096;
+const HEADERS_BUF: usize = 1024;
+/// 响应体缓冲。新浪 K 线日K(60根)≈6.4KB、分时≈5.8KB；天气/节假日<4KB。
+const RESPONSE_BUF: usize = 8 * 1024;
+
+// 请求缓冲放静态 .bss 区（而非每次在堆上 alloc 25KB）。
+// SAFETY: WIFI_LOCK（use_wifi/finish_wifi）串行化所有请求，同一时刻只有一个 RequestClient
+// 使用这些缓冲；ESP32-C3 单核。因此这里取可变引用不会与其它请求竞争。
+static mut RX_BUF: [u8; TCP_BUF] = [0; TCP_BUF];
+static mut TX_BUF: [u8; TCP_BUF] = [0; TCP_BUF];
+static mut TLS_RX_BUF: [u8; TLS_BUF] = [0; TLS_BUF];
+static mut TLS_TX_BUF: [u8; TLS_BUF] = [0; TLS_BUF];
+static mut HEADERS_BUF_: [u8; HEADERS_BUF] = [0; HEADERS_BUF];
+static mut RESPONSE_BUF_: [u8; RESPONSE_BUF] = [0; RESPONSE_BUF];
+
 #[derive(Debug)]
 pub enum RequestError{
     TimeOut,
@@ -47,12 +61,6 @@ impl From<TlsError> for RequestError {
 pub struct RequestClient{
     stack: &'static Stack<'static>,
     rng: RngWrapper,
-    rx_buffer: Vec<u8>,
-    tx_buffer: Vec<u8>,
-    tls_rx_buffer: Vec<u8>,
-    tls_tx_buffer: Vec<u8>,
-    headers_buf: Vec<u8>,
-    response_buf: Vec<u8>,
 }
 
 pub struct ResponseData {
@@ -67,15 +75,11 @@ impl RequestClient{
         RequestClient{
             stack,
             rng:RngWrapper::from(rng),
-            rx_buffer: vec![0u8;BUFFER_SIZE],
-            tx_buffer: vec![0u8;BUFFER_SIZE],
-            tls_rx_buffer: vec![0u8;TLS_BUFFER_SIZE],
-            tls_tx_buffer: vec![0u8;TLS_BUFFER_SIZE],
-            headers_buf: vec![0u8; 1024],
-            response_buf: vec![0u8; BUFFER_SIZE],
         }
     }
-    pub async fn send_request(&mut self, url: &str) -> Result<ResponseData, RequestError> {
+
+    /// 解析 URL 并把响应读入静态 RESPONSE_BUF，返回读到的字节数（不拷贝）。
+    async fn read_to_buf(&mut self, url: &str) -> Result<usize, RequestError> {
         if let Some(rest) = url.strip_prefix("https://") {
             println!("Rest: {rest}");
             let (host_and_port, path) = rest.split_once('/').unwrap_or((rest, ""));
@@ -87,7 +91,7 @@ impl RequestClient{
                 .unwrap_or((host_and_port, "443"));
             println!("Host: {host}, port: {port}, path: {path}");
             let port = port.parse::<u16>().map_err(|e|{ RequestError::PortParse(e)})?;
-            self.send_https_request(url, host, port, path).await
+            self.send_https_request(host, port, path).await
         } else if let Some(rest) = url.strip_prefix("http://") {
             println!("Rest: {rest}");
             let (host_and_port, path) = rest.split_once('/').unwrap_or((rest, ""));
@@ -99,28 +103,57 @@ impl RequestClient{
                 .unwrap_or((host_and_port, "80"));
             println!("Host: {host}, port: {port}, path: {path}");
             let port = port.parse::<u16>().map_err(|e|{ RequestError::PortParse(e)})?;
-            self.send_plain_http_request(url, host, port, path).await
+            self.send_plain_http_request(host, port, path).await
         } else {
             Err(RequestError::UnsupportedScheme)
         }
     }
 
+    /// 拷贝版：返回拥有所有权的 ResponseData（供响应小、不常请求的调用方使用）。
+    #[allow(static_mut_refs)]
+    pub async fn send_request(&mut self, url: &str) -> Result<ResponseData, RequestError> {
+        let len = self.read_to_buf(url).await?;
+        // SAFETY: WIFI_LOCK 串行化，此处独占 RESPONSE_BUF
+        let data = unsafe { RESPONSE_BUF_[..len].to_vec() };
+        Ok(crate::request::ResponseData { data, length: len })
+    }
 
-    /// Send a plain HTTP request
+    /// 就地版：返回静态 RESPONSE_BUF 的切片，零拷贝。
+    /// SAFETY/契约：返回的切片在下次 send_request* 调用前有效；WIFI_LOCK 串行化保证调用方
+    /// 会在下一次请求前解析完（解析只读取、把数据搬进自己的结构）。
+    #[allow(static_mut_refs)]
+    pub async fn send_request_slice(&mut self, url: &str) -> Result<&'static [u8], RequestError> {
+        let len = self.read_to_buf(url).await?;
+        // SAFETY: 见上；WIFI_LOCK 保证独占
+        Ok(unsafe { &RESPONSE_BUF_[..len] })
+    }
+
+
+    /// Send a plain HTTP request, 读入 RESPONSE_BUF，返回字节数
+    #[allow(static_mut_refs)]
     async fn send_plain_http_request(
         &mut self,
-        _url: &str,
         host: &str,
         port: u16,
         path: &str,
-    ) -> Result<ResponseData, RequestError> {
+    ) -> Result<usize, RequestError> {
         println!("Send plain HTTP request to path {path} at host {host}:{port}");
 
         let ip_address = self.resolve(host).await?;
         let remote_endpoint = (ip_address, port);
 
+        // SAFETY: WIFI_LOCK 串行化
+        let (rx, tx, headers, resp_buf) = unsafe {
+            (
+                &mut RX_BUF[..],
+                &mut TX_BUF[..],
+                &mut HEADERS_BUF_[..],
+                &mut RESPONSE_BUF_[..],
+            )
+        };
+
         println!("Create TCP socket");
-        let mut socket = TcpSocket::new(*self.stack, &mut self.rx_buffer, &mut self.tx_buffer);
+        let mut socket = TcpSocket::new(*self.stack, rx, tx);
         socket.set_timeout(Some(embassy_time::Duration::from_secs(10)));
 
         println!("Connect to HTTP server");
@@ -132,36 +165,47 @@ impl RequestClient{
         request.write_header(&mut socket).await?;
         let _ = socket.flush().await;
 
-        self.headers_buf.fill(0);
-        self.response_buf.fill(0);
-        let response = Response::read(&mut socket, Method::GET, &mut self.headers_buf).await?;
+        headers.fill(0);
+        resp_buf.fill(0);
+        let response = Response::read(&mut socket, Method::GET, headers).await?;
 
         println!("Response status: {:?}", response.status);
 
-        let total_length = response.body().reader().read_to_end(&mut self.response_buf).await?;
+        let total_length = response.body().reader().read_to_end(resp_buf).await?;
 
         println!("Close TCP socket");
         socket.close();
 
         println!("Read {} bytes", total_length);
-        let data = self.response_buf[..total_length].to_vec();
-        return Ok(crate::request::ResponseData{ data, length: total_length });
+        Ok(total_length)
     }
 
-    /// Send an HTTPS request
+    /// Send an HTTPS request, 读入 RESPONSE_BUF，返回字节数
+    #[allow(static_mut_refs)]
     async fn send_https_request(
         &mut self,
-        _url: &str,
         host: &str,
         port: u16,
         path: &str,
-    ) -> Result<ResponseData, RequestError>  {
+    ) -> Result<usize, RequestError>  {
         println!("Send HTTPs request to path {path} at host {host}:{port}");
 
         let ip_address = self.resolve(host).await?;
         let remote_endpoint = (ip_address, port);
 
-        let mut socket = TcpSocket::new(*self.stack, &mut self.rx_buffer, &mut self.tx_buffer);
+        // SAFETY: WIFI_LOCK 串行化
+        let (rx, tx, tls_rx, tls_tx, headers, resp_buf) = unsafe {
+            (
+                &mut RX_BUF[..],
+                &mut TX_BUF[..],
+                &mut TLS_RX_BUF[..],
+                &mut TLS_TX_BUF[..],
+                &mut HEADERS_BUF_[..],
+                &mut RESPONSE_BUF_[..],
+            )
+        };
+
+        let mut socket = TcpSocket::new(*self.stack, rx, tx);
         socket.set_timeout(Some(embassy_time::Duration::from_secs(10)));
 
         println!("Connect to HTTP server");
@@ -173,9 +217,8 @@ impl RequestClient{
             .enable_rsa_signatures();
         let mut tls = TlsConnection::new(
             socket,
-            &mut self.tls_rx_buffer,
-            &mut self.tls_tx_buffer
-            ,
+            tls_rx,
+            tls_tx,
         );
 
         println!("Perform TLS handshake");
@@ -187,13 +230,13 @@ impl RequestClient{
         request.write_header(&mut tls).await?;
         let _ = tls.flush().await;
 
-        self.headers_buf.fill(0);
-        self.response_buf.fill(0);
-        let response = Response::read(&mut tls, Method::GET, &mut self.headers_buf).await?;
+        headers.fill(0);
+        resp_buf.fill(0);
+        let response = Response::read(&mut tls, Method::GET, headers).await?;
 
         println!("Response status: {:?}", response.status);
 
-        let total_length = response.body().reader().read_to_end(&mut self.response_buf).await?;
+        let total_length = response.body().reader().read_to_end(resp_buf).await?;
 
         println!("Close TLS wrapper");
         let mut socket = match tls.close().await {
@@ -208,9 +251,7 @@ impl RequestClient{
         socket.close();
 
         println!("Read {} bytes", total_length);
-
-        let data = self.response_buf[..total_length].to_vec();
-        return Ok(crate::request::ResponseData{ data, length: total_length });
+        Ok(total_length)
     }
 
     /// Resolve a hostname to an IP address through DNS

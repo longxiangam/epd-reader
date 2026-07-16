@@ -6,3 +6,4 @@ mod scroll_bar;
 pub mod calendar;
 pub mod qrcode_widget;
 pub mod battery;
+pub mod kline;
