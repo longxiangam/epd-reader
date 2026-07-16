@@ -104,7 +104,7 @@ macro_rules! impl_storage {
 const NVS_OFFSET:usize = 0x9000;
 
 const VERSION_STORAGE_OFFSET:usize = NVS_OFFSET + 0x00;
-const INIT_TAG:u32 = 0x1234abcb;//每次修改storage结构体后需要修改
+const INIT_TAG:u32 = 0x1234abce;//每次修改storage结构体后需要修改
 
 #[derive(Debug,Default)]
 pub struct VersionStorage{
@@ -174,6 +174,33 @@ pub struct ErrorLogStorage{
 
 const TIMER_LOG_END_OFFSET:usize = ERROR_LOG_OFFSET + size_of::<ErrorLogStorage>();
 
+//股票配置：最多 5 支（代码 + 名称），selected 为当前选用索引
+#[derive(Clone, Default, Debug)]
+pub struct StockEntry{
+    pub code:heapless::String<16>,
+    pub name:heapless::String<32>,
+}
+
+#[derive(Clone, Debug)]
+pub struct StockStorage{
+    pub entries:[StockEntry;5],
+    pub count:u8,       // 实际配置数量 0..=5
+    pub selected:u8,    // 当前选用索引 0..count
+}
+impl Default for StockStorage{
+    fn default()->Self{
+        Self{
+            entries:[
+                StockEntry::default(),StockEntry::default(),StockEntry::default(),
+                StockEntry::default(),StockEntry::default(),
+            ],
+            count:0,
+            selected:0,
+        }
+    }
+}
+const STOCK_STORAGE_OFFSET:usize = TIMER_LOG_END_OFFSET;
+
 
 // 为各个存储结构体实现 NvsStorage trait
 impl_storage!(VersionStorage, VERSION_STORAGE_OFFSET);
@@ -183,6 +210,7 @@ impl_storage!(SleepStorage, SLEEP_STORAGE_OFFSET);
 impl_storage!(OtherStorage, OTHER_STORAGE_OFFSET);
 // HolidayStorage 使用手动实现，避免栈溢出
 impl_storage!(ErrorLogStorage, ERROR_LOG_OFFSET);
+impl_storage!(StockStorage, STOCK_STORAGE_OFFSET);
 
 // 为 HolidayStorage 手动实现 NvsStorage，使用分块写入避免栈溢出
 impl NvsStorage for HolidayStorage {
@@ -242,4 +270,5 @@ pub fn init_storage_area(){
     OtherStorage::default().write();
     HolidayStorage::default().write();
     ErrorLogStorage::default().write();
+    StockStorage::default().write();
 }

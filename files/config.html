@@ -169,6 +169,7 @@
         <button class="tab-link" data-tab="sleep">睡眠</button>
         <button class="tab-link" data-tab="books">书籍</button>
         <button class="tab-link" data-tab="images">图片</button>
+        <button class="tab-link" data-tab="stock">股票</button>
        <!-- <button class="tab-link" data-tab="timer">定时功能</button>-->
 
     </div>
@@ -229,6 +230,33 @@
         <button id="imageUploadBtn" disabled style="background-color:#28a745;color:white;padding:8px 16px;border:none;border-radius:4px;cursor:pointer;font-size:14px;margin-top:8px;width:100%;">上传图片</button>
         <div id="imageUploadProgress" style="margin-top:8px;font-size:14px;color:#555;"></div>
         <div id="imageMessage" class="message"></div>
+    </div>
+    <div id="stock" class="tab-content">
+        <form id="stockForm">
+            <p style="margin:0 0 10px;font-weight:normal;">最多配置 5 支，保存后在设备「设置」中切换。代码留空的行会被忽略。</p>
+            <label for="code0">① 代码:</label>
+            <input type="text" id="code0" name="code0" placeholder="sh600519" required />
+            <label for="name0">① 名称:</label>
+            <input type="text" id="name0" name="name0" placeholder="贵州茅台" />
+            <label for="code1">② 代码:</label>
+            <input type="text" id="code1" name="code1" placeholder="sz000001" />
+            <label for="name1">② 名称:</label>
+            <input type="text" id="name1" name="name1" placeholder="平安银行" />
+            <label for="code2">③ 代码:</label>
+            <input type="text" id="code2" name="code2" />
+            <label for="name2">③ 名称:</label>
+            <input type="text" id="name2" name="name2" />
+            <label for="code3">④ 代码:</label>
+            <input type="text" id="code3" name="code3" />
+            <label for="name3">④ 名称:</label>
+            <input type="text" id="name3" name="name3" />
+            <label for="code4">⑤ 代码:</label>
+            <input type="text" id="code4" name="code4" />
+            <label for="name4">⑤ 名称:</label>
+            <input type="text" id="name4" name="name4" />
+            <input type="submit" value="保存配置" />
+            <div id="stockMessage" class="message"></div>
+        </form>
     </div>
 <!--    <div id="timer" class="tab-content">
         <form action="/configure_timer" method="POST">
@@ -350,6 +378,36 @@
                 sleepMessage.textContent = '发生错误: ' + error.message;
                 sleepMessage.className = 'message error';
                 sleepMessage.style.display = 'block';
+            });
+    });
+
+    // Stock form submission with AJAX
+    const stockForm = document.getElementById('stockForm');
+    const stockMessage = document.getElementById('stockMessage');
+
+    stockForm.addEventListener('submit', function(event) {
+        event.preventDefault();
+
+        const formData = new FormData(stockForm);
+        fetch('/configure_stock', {
+            method: 'POST',
+            body: formData
+        })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    stockMessage.textContent = '股票代码保存成功!';
+                    stockMessage.className = 'message success';
+                } else {
+                    stockMessage.textContent = '保存失败.';
+                    stockMessage.className = 'message error';
+                }
+                stockMessage.style.display = 'block';
+            })
+            .catch(error => {
+                stockMessage.textContent = '发生错误: ' + error.message;
+                stockMessage.className = 'message error';
+                stockMessage.style.display = 'block';
             });
     });
 
@@ -664,6 +722,38 @@
         el.style.display = 'block';
         setTimeout(() => { el.style.display = 'none'; }, 3000);
     }
+
+    // 回显：异步加载已配置的值（与书籍/图片管理相同的模式）
+    async function loadConfig() {
+        try {
+            const resp = await fetch('/config');
+            const cfg = await resp.json();
+            if (cfg.wifi) {
+                document.getElementById('ssid').value = cfg.wifi.ssid || '';
+                document.getElementById('password').value = cfg.wifi.password || '';
+            }
+            if (cfg.weather) {
+                document.getElementById('api-key').value = cfg.weather['api-key'] || '';
+                document.getElementById('location').value = cfg.weather.city || '';
+            }
+            if (cfg.sleep) {
+                document.getElementById('read-sleep-seconds').value = cfg.sleep.read || '';
+                document.getElementById('weather-sleep-seconds').value = cfg.sleep.weather || '';
+            }
+            if (cfg.stocks) {
+                cfg.stocks.forEach((s, i) => {
+                    if (i < 5) {
+                        document.getElementById('code' + i).value = s.code || '';
+                        document.getElementById('name' + i).value = s.name || '';
+                    }
+                });
+            }
+        } catch (e) {
+            console.error('load config failed', e);
+        }
+    }
+    // 进入页面不立即请求，延时 600ms 等连接就绪，避免 502
+    setTimeout(loadConfig, 600);
 
 </script>
 </body>

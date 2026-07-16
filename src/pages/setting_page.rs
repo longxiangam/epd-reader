@@ -22,7 +22,7 @@ use crate::widgets::list_widget::ListWidget;
 use crate::wifi::{IP_ADDRESS, WIFI_MODEL, WifiModel};
 use crate::web_service::{web_service,STOP_WEB_SERVICE};
 
-const SETTINGS_COUNT: usize = 5;
+const SETTINGS_COUNT: usize = 6;
 const READ_SLEEP_MIN: u64 = 10;
 const WEATHER_SLEEP_MIN: u64 = 5;
 const SLEEP_STEP: u64 = 5;
@@ -55,6 +55,7 @@ pub struct SettingPage {
     last_location_loaded: bool,
     read_sleep_seconds: u64,
     weather_sleep_seconds: u64,
+    stock_edit_selected: u8,
 }
 
 impl SettingPage {
@@ -81,6 +82,14 @@ impl SettingPage {
                         }
                     }
                 }
+                4 => {
+                    // 上一支
+                    let ss = crate::storage::StockStorage::read().unwrap_or_default();
+                    if ss.count > 0 {
+                        let c = ss.count;
+                        self.stock_edit_selected = (self.stock_edit_selected + c - 1) % c;
+                    }
+                }
                 _ => {}
             }
         } else if select > 0 {
@@ -98,6 +107,14 @@ impl SettingPage {
             match select {
                 0 => { self.read_sleep_seconds += SLEEP_STEP; }
                 1 => { self.weather_sleep_seconds += SLEEP_STEP; }
+                4 => {
+                    // 下一支
+                    let ss = crate::storage::StockStorage::read().unwrap_or_default();
+                    if ss.count > 0 {
+                        let c = ss.count;
+                        self.stock_edit_selected = (self.stock_edit_selected + 1) % c;
+                    }
+                }
                 _ => {}
             }
         } else if select < SETTINGS_COUNT - 1 {
@@ -112,10 +129,23 @@ impl SettingPage {
             _ => return,
         };
         if editing {
-            let mut sleep_storage = crate::storage::SleepStorage::read().unwrap_or_default();
-            sleep_storage.read_sleep_seconds = self.read_sleep_seconds;
-            sleep_storage.weather_sleep_seconds = self.weather_sleep_seconds;
-            let _ = sleep_storage.write();
+            match select {
+                0 | 1 => {
+                    let mut sleep_storage = crate::storage::SleepStorage::read().unwrap_or_default();
+                    sleep_storage.read_sleep_seconds = self.read_sleep_seconds;
+                    sleep_storage.weather_sleep_seconds = self.weather_sleep_seconds;
+                    let _ = sleep_storage.write();
+                }
+                4 => {
+                    // 保存选中的股票
+                    let mut ss = crate::storage::StockStorage::read().unwrap_or_default();
+                    if ss.count > 0 {
+                        ss.selected = self.stock_edit_selected.min(ss.count - 1);
+                        let _ = ss.write();
+                    }
+                }
+                _ => {}
+            }
             self.mode = SettingMode::Settings { select, editing: false };
         } else {
             match select {
@@ -127,6 +157,14 @@ impl SettingPage {
                 }
                 3 => { self.mode = SettingMode::QrCode; }
                 4 => {
+                    // 股票选择：进入编辑态，从当前选中开始（未配置则不进入）
+                    let ss = crate::storage::StockStorage::read().unwrap_or_default();
+                    if ss.count > 0 {
+                        self.stock_edit_selected = ss.selected.min(ss.count - 1);
+                        self.mode = SettingMode::Settings { select, editing: true };
+                    }
+                }
+                5 => {
                     // 返回：STA 退出设置页回到主菜单；AP（首次配网）返回二维码根界面
                     match self.wifi_model {
                         Some(WifiModel::STA) => { self.running = false; }
@@ -160,11 +198,29 @@ impl SettingPage {
             format!("天气睡眠: {}s", self.weather_sleep_seconds)
         };
 
+        let stock_str = {
+            let ss = crate::storage::StockStorage::read().unwrap_or_default();
+            let label = if ss.count == 0 {
+                format!("未配置")
+            } else {
+                let raw = if editing && select == 4 { self.stock_edit_selected } else { ss.selected };
+                let i = (raw as usize).min(ss.count as usize - 1);
+                let e = &ss.entries[i];
+                if e.name.is_empty() { format!("{}", e.code) } else { format!("{}", e.name) }
+            };
+            if editing && select == 4 {
+                format!("股票: >>{}<<", label)
+            } else {
+                format!("股票: {}", label)
+            }
+        };
+
         let mut items: Vec<&str, 20> = Vec::new();
         let _ = items.push(read_str.as_str());
         let _ = items.push(weather_str.as_str());
         let _ = items.push("自动定位");
         let _ = items.push("web配置");
+        let _ = items.push(stock_str.as_str());
         let _ = items.push("返回");
 
         let mut list_widget = ListWidget::new(
@@ -295,6 +351,7 @@ impl Page for SettingPage {
             last_location_loaded: false,
             read_sleep_seconds: if sleep_storage.read_sleep_seconds > 0 { sleep_storage.read_sleep_seconds } else { 120 },
             weather_sleep_seconds: if sleep_storage.weather_sleep_seconds > 0 { sleep_storage.weather_sleep_seconds } else { 60 },
+            stock_edit_selected: 0,
         }
     }
 
@@ -423,6 +480,11 @@ impl Page for SettingPage {
             } else if !need_web && self.web_service_running {
                 STOP_WEB_SERVICE.signal(());
                 self.web_service_running = false;
+            }
+
+            // web 配置页保活：定期刷新 wifi 使用时间，避免空闲 30s 被 do_stop 自动关闭
+            if need_web {
+                crate::wifi::refresh_last_time().await;
             }
 
             // 进入定位界面时，加载已保存的定位信息用于展示

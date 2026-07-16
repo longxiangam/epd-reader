@@ -76,34 +76,43 @@ async fn web_tcp_socket(stack: &'static Stack<'static>){
                 loop {
                     let mut buffer = [0u8; 2048];
                     let mut pos = 0;
-                    let mut header_found = false;
 
-                    loop {
+                    // 1) 读到 HTTP header 结束（\r\n\r\n）
+                    let mut header_end = None;
+                    while header_end.is_none() {
+                        if pos >= buffer.len() {
+                            break;
+                        }
                         match socket.read(&mut buffer[pos..]).await {
-                            Ok(0) => {
-                                println!("read EOF");
-                                break;
-                            }
+                            Ok(0) => break,
                             Ok(len) => {
                                 pos += len;
-                                for i in 0..pos.saturating_sub(3) {
-                                    if buffer[i] == b'\r' && buffer[i+1] == b'\n'
-                                        && buffer[i+2] == b'\r' && buffer[i+3] == b'\n' {
-                                        header_found = true;
-                                        break;
-                                    }
+                                if let Some(i) = find_header_end(&buffer[..pos]) {
+                                    header_end = Some(i);
                                 }
-                                if header_found { break; }
                             }
                             Err(e) => {
                                 println!("read error: {:?}", e);
                                 break;
                             }
-                        };
+                        }
                     }
+                    let header_end = match header_end {
+                        Some(i) => i,
+                        None => break, // 没有完整 header，断开重连
+                    };
 
-                    if !header_found {
-                        break; // Connection closed or error, accept new connection
+                    // 2) 按 Content-Length 继续读完 body。
+                    //    关键修复：之前遇到 \r\n\r\n 就 break，跨多个 TCP 分段的大表单
+                    //    （如 5 支股票 10 个字段）后半段 body 读不进来，导致 parse_form 丢字段。
+                    let content_length = parse_content_length(&buffer[..header_end]);
+                    let want = (header_end + content_length).min(buffer.len());
+                    while pos < want {
+                        match socket.read(&mut buffer[pos..]).await {
+                            Ok(0) => break,
+                            Ok(len) => pos += len,
+                            Err(_) => break,
+                        }
                     }
 
                     let to_print = unsafe { core::str::from_utf8_unchecked(&buffer[..pos]) };
@@ -133,15 +142,83 @@ fn find_header_end(data: &[u8]) -> Option<usize> {
     None
 }
 
+/// 从 HTTP header 中解析 Content-Length（不区分大小写）
+fn parse_content_length(header: &[u8]) -> usize {
+    let s = match core::str::from_utf8(header) {
+        Ok(s) => s,
+        Err(_) => return 0,
+    };
+    const PREFIX: &str = "content-length:";
+    for line in s.split('\n') {
+        let line = line.trim();
+        if line.len() >= PREFIX.len() && line[..PREFIX.len()].eq_ignore_ascii_case(PREFIX) {
+            if let Ok(n) = line[PREFIX.len()..].trim().parse::<usize>() {
+                return n;
+            }
+        }
+    }
+    0
+}
+
 /// Send JSON response with HTTP/1.1 keep-alive and Content-Length.
 async fn send_json(socket: &mut TcpSocket<'_>, body: &[u8]) {
     use embedded_io_async::Write;
     let header = alloc::format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: keep-alive\r\n\r\n",
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nCache-Control: no-store\r\nContent-Length: {}\r\nConnection: keep-alive\r\n\r\n",
         body.len()
     );
     let _ = socket.write_all(header.as_bytes()).await;
     let _ = socket.write_all(body).await;
+}
+
+/// 把字符串以 JSON 转义形式追加（含中文按 UTF-8 原样）
+fn json_str(out: &mut alloc::string::String, s: &str) {
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            _ => out.push(c),
+        }
+    }
+    out.push('"');
+}
+
+/// 返回当前所有配置（供前端异步回显，与 /books 同样的模式）
+async fn handle_get_config(socket: &mut TcpSocket<'_>) {
+    let wifi = crate::storage::WifiStorage::read().unwrap_or_default();
+    let weather = crate::storage::WeatherStorage::read().unwrap_or_default();
+    let sleep = crate::storage::SleepStorage::read().unwrap_or_default();
+    let stock = crate::storage::StockStorage::read().unwrap_or_default();
+
+    let mut body = alloc::string::String::new();
+    body.push_str("{\"wifi\":{\"ssid\":");
+    json_str(&mut body, wifi.wifi_ssid.as_str());
+    body.push_str(",\"password\":");
+    json_str(&mut body, wifi.wifi_password.as_str());
+    body.push_str("},\"weather\":{\"api-key\":");
+    json_str(&mut body, weather.token.as_str());
+    body.push_str(",\"city\":");
+    json_str(&mut body, weather.city.as_str());
+    body.push_str("},\"sleep\":{\"read\":");
+    body.push_str(&alloc::format!("{}", sleep.read_sleep_seconds));
+    body.push_str(",\"weather\":");
+    body.push_str(&alloc::format!("{}", sleep.weather_sleep_seconds));
+    body.push_str("},\"stocks\":[");
+    for i in 0..(stock.count as usize).min(5) {
+        if i > 0 { body.push(','); }
+        body.push_str("{\"code\":");
+        json_str(&mut body, stock.entries[i].code.as_str());
+        body.push_str(",\"name\":");
+        json_str(&mut body, stock.entries[i].name.as_str());
+        body.push('}');
+    }
+    body.push_str("]}");
+
+    send_json(socket, body.as_bytes()).await;
 }
 
 async fn handle_get_images(socket: &mut TcpSocket<'_>) {
@@ -429,10 +506,13 @@ async fn process_http(socket:&mut TcpSocket<'_>, header_data: &[u8]) {
         (Some("POST"), Some(path)) if path.starts_with("/upload_image?") => {
             handle_upload_image(socket, &req, header_str, header_data).await;
         }
+        (Some("GET"), Some("/config")) => {
+            handle_get_config(socket).await;
+        }
         (Some("GET"), Some("/")) | (Some("GET"), Some("/index.html")) => {
             let html = include_str!("../files/config.html");
             let header = alloc::format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: keep-alive\r\n\r\n",
+                "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nCache-Control: no-store\r\nContent-Length: {}\r\nConnection: keep-alive\r\n\r\n",
                 html.as_bytes().len()
             );
             let _ = socket.write_all(header.as_bytes()).await;
@@ -446,6 +526,9 @@ async fn process_http(socket:&mut TcpSocket<'_>, header_data: &[u8]) {
         }
         (Some("POST"), Some("/configure_sleep")) => {
             handle_configure_sleep(socket, &req, header_str).await;
+        }
+        (Some("POST"), Some("/configure_stock")) => {
+            handle_configure_stock(socket, &req, header_str).await;
         }
         (Some("GET"), Some("/sleep_image")) => {
             handle_get_sleep_image(socket).await;
@@ -846,6 +929,55 @@ async fn handle_configure_weather(socket: &mut TcpSocket<'_>, req: &httparse::Re
                 }
             }
         }
+
+        send_json(socket, b"{\"success\":true}").await;
+    }
+}
+
+async fn handle_configure_stock(socket: &mut TcpSocket<'_>, req: &httparse::Request<'_, '_>, header_str: &str) {
+    let form_fields = parse_form(req, header_str);
+    println!("stock form_data:{:?}", form_fields);
+
+    if let Ok(fields) = form_fields {
+        // 收集 code0..code4 / name0..name4
+        let mut codes: [Option<&str>; 5] = [None; 5];
+        let mut names: [Option<&str>; 5] = [None; 5];
+        for field in fields {
+            let (kind, idx) = if let Some(s) = field.0.strip_prefix("code") {
+                ("code", s)
+            } else if let Some(s) = field.0.strip_prefix("name") {
+                ("name", s)
+            } else {
+                continue;
+            };
+            let i: usize = idx.parse().unwrap_or(99);
+            if i >= 5 {
+                continue;
+            }
+            match kind {
+                "code" => codes[i] = Some(field.1),
+                _ => names[i] = Some(field.1),
+            }
+        }
+
+        let mut stock_storage = crate::storage::StockStorage::read().unwrap_or_default();
+        let mut count: u8 = 0;
+        for i in 0..5 {
+            if let Some(c) = codes[i] {
+                if !c.is_empty() {
+                    let idx = count as usize;
+                    stock_storage.entries[idx].code = heapless::String::from_str(c).unwrap_or_default();
+                    stock_storage.entries[idx].name = heapless::String::from_str(names[i].unwrap_or("")).unwrap_or_default();
+                    count += 1;
+                }
+            }
+        }
+        stock_storage.count = count;
+        if stock_storage.selected >= count && count > 0 {
+            stock_storage.selected = 0;
+        }
+        let _ = stock_storage.write();
+        println!("股票配置保存: {} 支", count);
 
         send_json(socket, b"{\"success\":true}").await;
     }

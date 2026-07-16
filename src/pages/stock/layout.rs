@@ -57,31 +57,43 @@ fn draw_content<D>(
 where
     D: DrawTarget<Color = BinaryColor>,
 {
-    let header_h: i32 = 30;
+    let header_h: i32 = 32;
     let bottom_h: i32 = 16;
-    let left_pad: i32 = 34; // 左侧留白画价位刻度
+    let left_pad: i32 = 52; // 左侧留白画价位刻度（容下 2 位小数价位，如 "1256.60"）
 
-    // ---- 顶部信息：代码 | 现价 | 涨跌额 涨跌幅 | 模式 ----
+    // ---- 第一行：名称（无则显示代码） | 模式 ----
+    let title = if sd.name.is_empty() {
+        sd.code.as_str()
+    } else {
+        sd.name.as_str()
+    };
     let _ = font_mid.render_aligned(
-        format_args!("{}", sd.code.as_str()),
-        Point::new(2, 4),
+        format_args!("{}", title),
+        Point::new(2, 2),
         VerticalPosition::Top,
         HorizontalAlignment::Left,
         FontColor::Transparent(Black),
         display,
     );
+    let _ = font_mid.render_aligned(
+        format_args!("{}", data.mode.label()),
+        Point::new(w - 2, 2),
+        VerticalPosition::Top,
+        HorizontalAlignment::Right,
+        FontColor::Transparent(Black),
+        display,
+    );
 
+    // ---- 第二行：现价 | 涨跌额 涨跌幅% ----
     let price = fmt_price(sd.last_price);
-    let _ = font_mid.render_aligned(
+    let _ = font_small.render_aligned(
         format_args!("{}", price.as_str()),
-        Point::new(64, 4),
+        Point::new(2, 19),
         VerticalPosition::Top,
         HorizontalAlignment::Left,
         FontColor::Transparent(Black),
         display,
     );
-
-    // 涨跌额 + 涨跌幅%
     let mut chg_line: heapless::String<28> = heapless::String::new();
     let _ = chg_line.push_str(fmt_signed(sd.change).as_str());
     let _ = chg_line.push_str("  ");
@@ -89,16 +101,7 @@ where
     let _ = chg_line.push_str("%");
     let _ = font_small.render_aligned(
         format_args!("{}", chg_line.as_str()),
-        Point::new(150, 10),
-        VerticalPosition::Top,
-        HorizontalAlignment::Left,
-        FontColor::Transparent(Black),
-        display,
-    );
-
-    let _ = font_mid.render_aligned(
-        format_args!("{}", data.mode.label()),
-        Point::new(w - 2, 4),
+        Point::new(w - 2, 20),
         VerticalPosition::Top,
         HorizontalAlignment::Right,
         FontColor::Transparent(Black),
@@ -172,7 +175,7 @@ where
             let _ = write!(line, "{} ~ {}", fmt_date(first.date).as_str(), fmt_date(last.date).as_str());
             let _ = font_small.render_aligned(
                 format_args!("{}", line.as_str()),
-                Point::new(w / 2, h - 2),
+                Point::new(w / 2, h - bottom_h + 1),
                 VerticalPosition::Top,
                 HorizontalAlignment::Center,
                 FontColor::Transparent(Black),

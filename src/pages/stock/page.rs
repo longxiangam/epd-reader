@@ -16,6 +16,7 @@ use crate::model::stock::{
 use crate::pages::Page;
 use crate::request::{RequestClient, RequestError};
 use crate::sleep::{refresh_active_time, to_sleep_tips};
+use crate::storage::NvsStorage;
 
 pub struct StockPage {
     pub(crate) running: bool,
@@ -47,8 +48,15 @@ impl StockPage {
         self.loading = true;
         self.need_render = true;
         self.render().await;
-        let code = DEFAULT_STOCK;
-        match fetch_stock(self.mode, code).await {
+        // 读 web 配置的股票（选中那支）；未配置则用默认 sh600519
+        let code_storage = crate::storage::StockStorage::read().unwrap_or_default();
+        let (code, name) = if code_storage.count > 0 {
+            let i = (code_storage.selected as usize).min((code_storage.count as usize).saturating_sub(1));
+            (code_storage.entries[i].code.as_str(), code_storage.entries[i].name.as_str())
+        } else {
+            (DEFAULT_STOCK, "")
+        };
+        match fetch_stock(self.mode, code, name).await {
             Ok(d) => {
                 self.data = Some(d);
                 self.err_msg = None;
@@ -164,7 +172,7 @@ impl Page for StockPage {
     }
 }
 
-async fn fetch_stock(mode: ChartMode, code: &str) -> Result<Box<StockData>, &'static str> {
+async fn fetch_stock(mode: ChartMode, code: &str, name: &str) -> Result<Box<StockData>, &'static str> {
     let stack = crate::wifi::use_wifi().await.map_err(|_| "wifi连接失败")?;
     println!("[stock] heap free @wifi up: {}", esp_alloc::HEAP.free());
     crate::wifi::set_request_loading(true);
@@ -177,7 +185,7 @@ async fn fetch_stock(mode: ChartMode, code: &str) -> Result<Box<StockData>, &'st
     let out = match result {
         Ok(data) => {
             println!("[stock] resp len: {} heap free: {}", data.len(), esp_alloc::HEAP.free());
-            parse_kline(data, code, mode).ok_or("解析失败")
+            parse_kline(data, code, name, mode).ok_or("解析失败")
         }
         Err(e) => {
             println!("stock request err: {:?}", e);

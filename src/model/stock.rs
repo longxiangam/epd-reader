@@ -80,6 +80,7 @@ pub struct StockData {
     pub change: f32,
     pub change_pct: f32,
     pub code: String<10>,
+    pub name: String<32>,
 }
 
 /// 新浪 K 线接口：明文 HTTP，返回扁平 JSON 数组
@@ -158,13 +159,15 @@ fn parse_date(s: &str) -> u64 {
 /// 用字节扫描直接提取字段（新浪所有值都是带引号字符串），不依赖 mini_json——
 /// 后者会为每个字段分配 alloc::String，60 根 × 6 字段需要 ~12-15KB 堆，在 64KB 堆下会 OOM。
 /// 扫描器零堆分配，直接填入 heapless 结构。
-pub fn parse_kline(data: &[u8], code: &str, mode: ChartMode) -> Option<Box<StockData>> {
+pub fn parse_kline(data: &[u8], code: &str, name: &str, mode: ChartMode) -> Option<Box<StockData>> {
     let s = core::str::from_utf8(data).ok()?;
     let b = s.as_bytes();
     let n = b.len();
 
     let mut code_s: String<10> = String::new();
     let _ = code_s.push_str(code);
+    let mut name_s: String<32> = String::new();
+    let _ = name_s.push_str(name);
 
     let mut out = Box::new(StockData {
         mode,
@@ -174,6 +177,7 @@ pub fn parse_kline(data: &[u8], code: &str, mode: ChartMode) -> Option<Box<Stock
         change: 0.0,
         change_pct: 0.0,
         code: code_s,
+        name: name_s,
     });
 
     let mut i = 0usize;
