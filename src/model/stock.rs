@@ -38,6 +38,15 @@ impl ChartMode {
             ChartMode::Line => ChartMode::Minute,
         }
     }
+    pub fn prev(self) -> Self {
+        match self {
+            ChartMode::Minute => ChartMode::Line,
+            ChartMode::Day => ChartMode::Minute,
+            ChartMode::Week => ChartMode::Day,
+            ChartMode::Month => ChartMode::Week,
+            ChartMode::Line => ChartMode::Month,
+        }
+    }
     pub fn label(self) -> &'static str {
         match self {
             ChartMode::Minute => "分时",
@@ -60,6 +69,25 @@ impl ChartMode {
             ChartMode::Day | ChartMode::Line => ChartSource::Day,
             ChartMode::Week => ChartSource::Week,
             ChartMode::Month => ChartSource::Month,
+        }
+    }
+    /// 编码为 u8 用于存 rtc_fast（跨深睡重启保留模式）
+    pub fn encode(self) -> u8 {
+        match self {
+            ChartMode::Day => 0,
+            ChartMode::Week => 1,
+            ChartMode::Month => 2,
+            ChartMode::Line => 3,
+            ChartMode::Minute => 4,
+        }
+    }
+    pub fn decode(v: u8) -> Self {
+        match v {
+            1 => ChartMode::Week,
+            2 => ChartMode::Month,
+            3 => ChartMode::Line,
+            4 => ChartMode::Minute,
+            _ => ChartMode::Day,
         }
     }
 }

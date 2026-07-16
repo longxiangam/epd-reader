@@ -220,16 +220,11 @@ fn fmt_date(yyyymmdd: u64) -> heapless::String<12> {
 }
 
 pub fn sleep_renderer(display: &mut EpdDisplay) {
-    let font: FontRenderer = FontRenderer::new::<fonts::u8g2_font_wqy16_t_gb2312>();
-    let bb = display.bounding_box();
-    let cx = bb.top_left.x as i32 + bb.size.width as i32 / 2;
-    let cy = bb.top_left.y as i32 + bb.size.height as i32 / 2;
-    let _ = font.render_aligned(
-        format_args!("股票"),
-        Point::new(cx, cy),
-        VerticalPosition::Top,
-        HorizontalAlignment::Center,
-        FontColor::Transparent(Black),
-        display,
-    );
+    let w = display.bounding_box().size.width as i32;
+    let cy: i32 = 11;
+    if crate::wifi::is_request_loading() {
+        crate::widgets::draw_icon::draw_loading_icon(Point::new(w - 118, cy), display);
+    }
+    crate::widgets::draw_icon::draw_wifi_status(Point::new(w - 100, cy), display);
+    crate::widgets::draw_icon::draw_moon_icon(Point::new(w - 82, 4), display);
 }

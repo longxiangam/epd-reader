@@ -12,7 +12,7 @@ use u8g2_fonts::fonts;
 use u8g2_fonts::types::{FontColor, HorizontalAlignment, VerticalPosition};
 use u8g2_fonts::U8g2TextStyle;
 
-use super::draw_utils::{draw_loading_icon, draw_moon_icon, draw_wifi_status};
+use crate::widgets::draw_icon::{draw_loading_icon, draw_moon_icon, draw_wifi_status};
 use super::render_data::CalendarRenderData;
 use crate::display::EpdDisplay;
 use crate::widgets::battery::draw_battery;

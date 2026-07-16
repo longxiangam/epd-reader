@@ -7,3 +7,4 @@ pub mod calendar;
 pub mod qrcode_widget;
 pub mod battery;
 pub mod kline;
+pub mod draw_icon;

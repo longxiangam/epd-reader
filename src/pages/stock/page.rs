@@ -17,6 +17,12 @@ use crate::pages::Page;
 use crate::request::{RequestClient, RequestError};
 use crate::sleep::{refresh_active_time, to_sleep_tips};
 use crate::storage::NvsStorage;
+use esp_hal::ram;
+
+/// 股票当前图模式，存 rtc_fast，跨深睡重启保留。
+/// 深睡唤醒会重启程序，若不保留则模式被重置为默认 Day，分时的 2 分钟周期就失效了。
+#[ram(unstable(rtc_fast))]
+static mut STOCK_MODE: u8 = 0;
 
 pub struct StockPage {
     pub(crate) running: bool,
@@ -32,16 +38,30 @@ impl StockPage {
         self.running = false;
     }
 
-    /// 切换 分时/日K/周K/月K/折线。若新旧模式同数据源（日K↔折线），
-    /// 只换渲染方式，不重新请求；否则清空数据触发重新请求。
-    fn switch_mode(&mut self) {
+    /// 切换 分时/日K/周K/月K/折线（forward=true 下一个，false 上一个）。
+    /// 若新旧模式同数据源（日K↔折线），只换渲染方式不重新请求；否则清空数据触发重新请求。
+    fn switch_mode(&mut self, forward: bool) {
         let old_source = self.mode.source();
-        let new_mode = self.mode.next();
+        let new_mode = if forward { self.mode.next() } else { self.mode.prev() };
         let new_source = new_mode.source();
         if new_source != old_source {
             self.data = None;
         }
         self.mode = new_mode;
+        unsafe { *core::ptr::addr_of_mut!(STOCK_MODE) = new_mode.encode(); }
+    }
+
+    /// 切换查询的股票（长按1/2）。更新 StockStorage.selected 并触发重新拉取。
+    fn switch_stock(&mut self, forward: bool) {
+        let mut ss = crate::storage::StockStorage::read().unwrap_or_default();
+        if ss.count > 1 {
+            let c = ss.count as usize;
+            let cur = (ss.selected as usize).min(c - 1);
+            let nxt = if forward { (cur + 1) % c } else { (cur + c - 1) % c };
+            ss.selected = nxt as u8;
+            let _ = ss.write();
+            self.data = None;
+        }
     }
 
     async fn fetch(&mut self) {
@@ -119,6 +139,8 @@ impl Page for StockPage {
 
     async fn run(&mut self, _spawner: Spawner) {
         self.running = true;
+        // 深睡唤醒会重启程序，从 rtc_fast 恢复上次图模式
+        self.mode = ChartMode::decode(unsafe { *core::ptr::addr_of!(STOCK_MODE) });
         crate::display::set_sleep_renderer(Some(super::sleep_renderer));
         refresh_active_time().await;
         // 进入即拉取一次当前模式
@@ -127,11 +149,16 @@ impl Page for StockPage {
             if !self.running {
                 break;
             }
-            refresh_active_time().await;
+            // 注意：此处不能再无条件 refresh_active_time()，否则空闲时间永远归零、永不睡眠。
+            // 活动时间由按键（event::run 内部）刷新，空闲 30 秒后 to_sleep_tips 自动入睡。
             if self.need_render {
                 self.render().await;
             }
-            to_sleep_tips(Duration::from_secs(0), Duration::from_secs(30), true).await;
+            // 分时模式每 2 分钟唤醒拉取一次；其它模式每 12 小时拉取一次。
+            // 深睡唤醒 = 重启，重启后重新进入页面时的初始 fetch() 即完成刷新；
+            // 模式经 rtc_fast(STOCK_MODE) 跨重启保留，故下次入睡时长仍正确。
+            let sleep_secs: u64 = if self.mode.is_minute() { 120 } else { 12 * 3600 };
+            to_sleep_tips(Duration::from_secs(sleep_secs), Duration::from_secs(30), true).await;
             Timer::after(Duration::from_millis(50)).await;
         }
         crate::display::set_sleep_renderer(None);
@@ -139,34 +166,74 @@ impl Page for StockPage {
 
     async fn bind_event(&mut self) {
         event::clear().await;
-        // 短按1：刷新（重新请求当前模式）
+        // 短按1：上一个图模式
         event::on_target(EventType::KeyShort(1), Self::mut_to_ptr(self), move |info| {
+            Box::pin(async move {
+                let mut_ref: &mut Self = Self::mut_by_ptr(info.ptr).unwrap();
+                crate::display::QUICKLY_LUT_CHANNEL.send(false).await;
+                mut_ref.switch_mode(false);
+                if mut_ref.data.is_none() {
+                    mut_ref.fetch().await;
+                } else {
+                    mut_ref.need_render = true;
+                    mut_ref.render().await;
+                }
+                crate::display::QUICKLY_LUT_CHANNEL.send(true).await;
+            })
+        }).await;
+        // 短按2：下一个图模式
+        event::on_target(EventType::KeyShort(2), Self::mut_to_ptr(self), move |info| {
+            Box::pin(async move {
+                let mut_ref: &mut Self = Self::mut_by_ptr(info.ptr).unwrap();
+                crate::display::QUICKLY_LUT_CHANNEL.send(false).await;
+                mut_ref.switch_mode(true);
+                if mut_ref.data.is_none() {
+                    mut_ref.fetch().await;
+                } else {
+                    mut_ref.need_render = true;
+                    mut_ref.render().await;
+                }
+                crate::display::QUICKLY_LUT_CHANNEL.send(true).await;
+            })
+        }).await;
+        // 长按1：上一支股票
+        event::on_target(EventType::KeyLongEnd(1), Self::mut_to_ptr(self), move |info| {
+            Box::pin(async move {
+                let mut_ref: &mut Self = Self::mut_by_ptr(info.ptr).unwrap();
+                crate::display::QUICKLY_LUT_CHANNEL.send(false).await;
+                mut_ref.switch_stock(false);
+                if mut_ref.data.is_none() {
+                    mut_ref.fetch().await;
+                }
+                crate::display::QUICKLY_LUT_CHANNEL.send(true).await;
+            })
+        }).await;
+        // 长按2：下一支股票
+        event::on_target(EventType::KeyLongEnd(2), Self::mut_to_ptr(self), move |info| {
+            Box::pin(async move {
+                let mut_ref: &mut Self = Self::mut_by_ptr(info.ptr).unwrap();
+                crate::display::QUICKLY_LUT_CHANNEL.send(false).await;
+                mut_ref.switch_stock(true);
+                if mut_ref.data.is_none() {
+                    mut_ref.fetch().await;
+                }
+                crate::display::QUICKLY_LUT_CHANNEL.send(true).await;
+            })
+        }).await;
+        // 短按3：返回
+        event::on_target(EventType::KeyShort(3), Self::mut_to_ptr(self), move |info| {
+            Box::pin(async move {
+                let mut_ref: &mut Self = Self::mut_by_ptr(info.ptr).unwrap();
+                mut_ref.back().await;
+            })
+        }).await;
+        // 长按3：重新请求当前模式
+        event::on_target(EventType::KeyLongEnd(3), Self::mut_to_ptr(self), move |info| {
             Box::pin(async move {
                 let mut_ref: &mut Self = Self::mut_by_ptr(info.ptr).unwrap();
                 crate::display::QUICKLY_LUT_CHANNEL.send(false).await;
                 mut_ref.fetch().await;
                 crate::display::QUICKLY_LUT_CHANNEL.send(true).await;
-            })
-        }).await;
-        // 短按2：切换 分时/日K/周K/月K/折线
-        event::on_target(EventType::KeyShort(2), Self::mut_to_ptr(self), move |info| {
-            Box::pin(async move {
-                let mut_ref: &mut Self = Self::mut_by_ptr(info.ptr).unwrap();
-                crate::display::QUICKLY_LUT_CHANNEL.send(false).await;
-                mut_ref.switch_mode();
-                if mut_ref.data.is_none() {
-                    mut_ref.fetch().await;
-                } else {
-                    mut_ref.need_render = true;
-                }
-                crate::display::QUICKLY_LUT_CHANNEL.send(true).await;
-            })
-        }).await;
-        // 短按3：退出
-        event::on_target(EventType::KeyShort(3), Self::mut_to_ptr(self), move |info| {
-            Box::pin(async move {
-                let mut_ref: &mut Self = Self::mut_by_ptr(info.ptr).unwrap();
-                mut_ref.back().await;
             })
         }).await;
     }

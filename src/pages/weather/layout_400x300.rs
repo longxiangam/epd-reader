@@ -12,7 +12,8 @@ use u8g2_fonts::{FontRenderer, U8g2TextStyle};
 use u8g2_fonts::fonts;
 use u8g2_fonts::types::{FontColor, HorizontalAlignment, VerticalPosition};
 
-use super::draw_utils::{draw_loading_icon, draw_moon_icon, draw_wifi_status, weekday_name};
+use super::draw_utils::weekday_name;
+use crate::widgets::draw_icon::{draw_loading_icon, draw_moon_icon, draw_wifi_status};
 use super::render_data::WeatherRenderData;
 use crate::display::EpdDisplay;
 use crate::model::lunar::{Lunar, get_solar_term, get_zodiac, solar_term_day};

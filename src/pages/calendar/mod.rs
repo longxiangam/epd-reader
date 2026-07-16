@@ -1,5 +1,4 @@
 mod page;
-mod draw_utils;
 pub mod render_data;
 
 pub use page::CalendarPage;
