@@ -716,6 +716,19 @@ impl Page for SettingPage {
                 }
             });
         }).await;
+
+        // 设置列表界面：长按右键直接退出（与"返回"项一致）
+        event::on_target(EventType::KeyLongEnd(3), Self::mut_to_ptr(self), move |info| {
+            return Box::pin(async move {
+                let mut_ref: &mut Self = Self::mut_by_ptr(info.ptr).unwrap();
+                if matches!(mut_ref.mode, SettingMode::Settings { .. }) {
+                    match mut_ref.wifi_model {
+                        Some(WifiModel::STA) => { mut_ref.running = false; }
+                        _ => { mut_ref.mode = SettingMode::QrCode; }
+                    }
+                }
+            });
+        }).await;
     }
 }
 
