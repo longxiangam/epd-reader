@@ -291,8 +291,20 @@ pub async fn use_wifi() ->Result<&'static Stack<'static>, WifiNetError>{
         // 等锁者刷新，误判“仍有请求进行中”而永久卡在等待循环里，导致睡不下去。
         Timer::after(Duration::from_millis(500)).await;
     }
+    // 锁已独占。关键：拿到锁之后的任何失败路径都必须释放锁，否则 WIFI_LOCK 被永久卡死——
+    // 后续所有 use_wifi 都会超时失败，force_stop_wifi 也会一直等不到锁释放而无法睡眠。
     *WIFI_LOCK.lock().await = true;
 
+    let result = use_wifi_locked(secs).await;
+    if result.is_err() {
+        *WIFI_LOCK.lock().await = false;
+        println!("use_wifi failed, wifi lock released");
+    }
+    result
+}
+
+/// use_wifi 拿到 WIFI_LOCK 之后的核心逻辑。调用方（use_wifi）负责在 Err 时释放锁。
+async fn use_wifi_locked(secs: u64) -> Result<&'static Stack<'static>, WifiNetError> {
     println!("wifi state: {:?}",*WIFI_STATE.lock().await);
     if *WIFI_STATE.lock().await == None {
 
@@ -353,7 +365,10 @@ pub async fn wifi_is_idle()->bool{
 async fn do_stop(){
     loop {
         if  let Some(WifiNetState::WifiConnected)  = *WIFI_STATE.lock().await {
-            if Instant::now().as_secs() - LAST_USE_TIME_SECS.lock().await.unwrap() > HOW_LONG_SECS_CLOSE {
+            // 有请求进行中（WIFI_LOCK 被持有）时不要关 WiFi，避免打断未完成的请求；
+            // 单凭 LAST_USE_TIME_SECS 不够：socket 长读期间它不会被刷新，会误判为可关闭。
+            if Instant::now().as_secs() - LAST_USE_TIME_SECS.lock().await.unwrap() > HOW_LONG_SECS_CLOSE
+                && !*WIFI_LOCK.lock().await {
                 println!("do_stop_wifi");
                 STOP_WIFI_SIGNAL.signal(());
             }
@@ -370,36 +385,35 @@ pub async fn force_stop_wifi(){
 
     if  WIFI_STATE.lock().await.unwrap() == WifiNetState::WifiStopped {
         return;
-    }else{
-        loop {
-            println!("wait unlock wifi");
-            if !*WIFI_LOCK.lock().await  {
-                *WIFI_LOCK.lock().await =  true;
-                break;
-            }
-            Timer::after(Duration::from_millis(50)).await;
-        }
+    }
 
-        //等待任务完成
-        loop  {
-            println!("current_secs:{}",Instant::now().as_secs());
-            println!("last_secs:{}",LAST_USE_TIME_SECS.lock().await.unwrap());
-
-            if Instant::now().as_secs() - LAST_USE_TIME_SECS.lock().await.unwrap() >  5{
-                break;
-            }else{
-                println!("wait finish wifi");
-                Timer::after(Duration::from_secs(1)).await;
-            }
-
+    // 关键：若有网络请求正在进行（WIFI_LOCK 被持有），必须等其自然完成或超时，
+    // 绝不抢占式强杀 WiFi——否则会打断尚未完成的请求（含连接失败、仍在 socket 读
+    // 超时窗口内的请求）。请求侧自身有界：use_wifi 等链路最多 ~10s、socket 超时 10s，
+    // 单次请求无论成功失败都会在 ~30s 内走 finish_wifi 释放锁。
+    // 这里 45s 仅为兜底：正常永远不会触发，只有请求真正 hung 才强制停止以防睡死。
+    let wait_start = Instant::now().as_secs();
+    loop {
+        if !*WIFI_LOCK.lock().await {
+            break;
         }
-        STOP_WIFI_SIGNAL.signal(());
-        loop {
-            if  WIFI_STATE.lock().await.unwrap() == WifiNetState::WifiStopped {
-                return;
-            }
-            Timer::after(Duration::from_millis(50)).await
+        if Instant::now().as_secs() - wait_start > 45 {
+            println!("wifi request held lock >45s (hung?), force stop anyway");
+            break;
         }
+        println!("wait in-flight wifi request to finish");
+        Timer::after(Duration::from_millis(200)).await;
+    }
+
+    // 占住锁，阻止关 WiFi 期间发起新请求
+    *WIFI_LOCK.lock().await = true;
+
+    STOP_WIFI_SIGNAL.signal(());
+    loop {
+        if  WIFI_STATE.lock().await.unwrap() == WifiNetState::WifiStopped {
+            return;
+        }
+        Timer::after(Duration::from_millis(50)).await
     }
 }
 

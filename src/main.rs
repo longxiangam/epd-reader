@@ -97,6 +97,8 @@ async fn main(spawner: Spawner) -> ! {
 
     // Init storage
     crate::storage::enter_process().await;
+    // 加载全刷间隔缓存（render 任务会读取）
+    crate::display::reload_full_refresh_times();
 
     trace!("test trace");
 

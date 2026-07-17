@@ -207,6 +207,8 @@ async fn handle_get_config(socket: &mut TcpSocket<'_>) {
     body.push_str(&alloc::format!("{}", sleep.read_sleep_seconds));
     body.push_str(",\"weather\":");
     body.push_str(&alloc::format!("{}", sleep.weather_sleep_seconds));
+    body.push_str("},\"display\":{\"full_refresh\":");
+    body.push_str(&alloc::format!("{}", crate::display::get_full_refresh_times()));
     body.push_str("},\"stocks\":[");
     for i in 0..(stock.count as usize).min(5) {
         if i > 0 { body.push(','); }
@@ -526,6 +528,9 @@ async fn process_http(socket:&mut TcpSocket<'_>, header_data: &[u8]) {
         }
         (Some("POST"), Some("/configure_sleep")) => {
             handle_configure_sleep(socket, &req, header_str).await;
+        }
+        (Some("POST"), Some("/configure_display")) => {
+            handle_configure_display(socket, &req, header_str).await;
         }
         (Some("POST"), Some("/configure_stock")) => {
             handle_configure_stock(socket, &req, header_str).await;
@@ -1019,6 +1024,28 @@ async fn handle_configure_sleep(socket: &mut TcpSocket<'_>, req: &httparse::Requ
             }
         }
 
+        send_json(socket, b"{\"success\":true}").await;
+    }
+}
+
+async fn handle_configure_display(socket: &mut TcpSocket<'_>, req: &httparse::Request<'_, '_>, header_str: &str) {
+    let form_fields = parse_form(req, header_str);
+    println!("display form_data:{:?}", form_fields);
+
+    if let Ok(fields) = form_fields {
+        for field in fields {
+            if field.0 == "full-refresh" {
+                if let Ok(v) = field.1.parse::<u32>() {
+                    // 钳制到 1..=100，越界回退平台默认
+                    let v = if (1..=100).contains(&v) { v } else { crate::display::DEFAULT_FULL_REFRESH_TIMES };
+                    let mut d = crate::storage::DisplayStorage::default();
+                    d.full_refresh_times = v;
+                    let _ = d.write();
+                    crate::display::reload_full_refresh_times();
+                    println!("显示配置保存: full_refresh={}", v);
+                }
+            }
+        }
         send_json(socket, b"{\"success\":true}").await;
     }
 }

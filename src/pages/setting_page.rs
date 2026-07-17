@@ -22,10 +22,12 @@ use crate::widgets::list_widget::ListWidget;
 use crate::wifi::{IP_ADDRESS, WIFI_MODEL, WifiModel};
 use crate::web_service::{web_service,STOP_WEB_SERVICE};
 
-const SETTINGS_COUNT: usize = 7;
+const SETTINGS_COUNT: usize = 8;
 const READ_SLEEP_MIN: u64 = 10;
 const WEATHER_SLEEP_MIN: u64 = 5;
 const SLEEP_STEP: u64 = 5;
+const FULL_REFRESH_MIN: u32 = 1;
+const FULL_REFRESH_MAX: u32 = 100;
 
 #[derive(Clone, Copy, PartialEq)]
 enum SettingMode {
@@ -57,6 +59,7 @@ pub struct SettingPage {
     weather_sleep_seconds: u64,
     stock_edit_selected: u8,
     home_edit: i32,
+    full_refresh_edit: u32,
 }
 
 impl SettingPage {
@@ -95,6 +98,12 @@ impl SettingPage {
                     // 默认主页：上一个（天->股->日->天）
                     self.home_edit = match self.home_edit { 1 => 3, 3 => 2, 2 => 1, _ => 1 };
                 }
+                6 => {
+                    // 全刷次数：减（最少 1）
+                    if self.full_refresh_edit > FULL_REFRESH_MIN {
+                        self.full_refresh_edit -= 1;
+                    }
+                }
                 _ => {}
             }
         } else if select > 0 {
@@ -123,6 +132,12 @@ impl SettingPage {
                 5 => {
                     // 默认主页：下一个（天->日->股->天）
                     self.home_edit = match self.home_edit { 1 => 2, 2 => 3, 3 => 1, _ => 2 };
+                }
+                6 => {
+                    // 全刷次数：加（最多 100）
+                    if self.full_refresh_edit < FULL_REFRESH_MAX {
+                        self.full_refresh_edit += 1;
+                    }
                 }
                 _ => {}
             }
@@ -157,6 +172,13 @@ impl SettingPage {
                     // 保存默认主页
                     crate::pages::main_page::write_default_page(self.home_edit);
                 }
+                6 => {
+                    // 保存全刷次数
+                    let mut d = crate::storage::DisplayStorage::default();
+                    d.full_refresh_times = self.full_refresh_edit;
+                    let _ = d.write();
+                    crate::display::reload_full_refresh_times();
+                }
                 _ => {}
             }
             self.mode = SettingMode::Settings { select, editing: false };
@@ -183,6 +205,11 @@ impl SettingPage {
                     self.mode = SettingMode::Settings { select, editing: true };
                 }
                 6 => {
+                    // 全刷次数：进入编辑态，从当前值开始
+                    self.full_refresh_edit = crate::display::get_full_refresh_times();
+                    self.mode = SettingMode::Settings { select, editing: true };
+                }
+                7 => {
                     // 返回：STA 退出设置页回到主菜单；AP（首次配网）返回二维码根界面
                     match self.wifi_model {
                         Some(WifiModel::STA) => { self.running = false; }
@@ -247,6 +274,19 @@ impl SettingPage {
             }
         };
 
+        let refresh_str = {
+            let cur = if editing && select == 6 {
+                self.full_refresh_edit
+            } else {
+                crate::display::get_full_refresh_times()
+            };
+            if editing && select == 6 {
+                format!("全刷次数: >>{}<<", cur)
+            } else {
+                format!("全刷次数: {}", cur)
+            }
+        };
+
         let mut items: Vec<&str, 20> = Vec::new();
         let _ = items.push(read_str.as_str());
         let _ = items.push(weather_str.as_str());
@@ -254,6 +294,7 @@ impl SettingPage {
         let _ = items.push("web配置");
         let _ = items.push(stock_str.as_str());
         let _ = items.push(home_str.as_str());
+        let _ = items.push(refresh_str.as_str());
         let _ = items.push("返回");
 
         let mut list_widget = ListWidget::new(
@@ -386,6 +427,7 @@ impl Page for SettingPage {
             weather_sleep_seconds: if sleep_storage.weather_sleep_seconds > 0 { sleep_storage.weather_sleep_seconds } else { 60 },
             stock_edit_selected: 0,
             home_edit: 1,
+            full_refresh_edit: crate::display::get_full_refresh_times(),
         }
     }
 

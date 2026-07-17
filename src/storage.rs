@@ -201,6 +201,17 @@ impl Default for StockStorage{
 }
 const STOCK_STORAGE_OFFSET:usize = TIMER_LOG_END_OFFSET;
 
+const DISPLAY_STORAGE_OFFSET:usize = STOCK_STORAGE_OFFSET + size_of::<StockStorage>();
+
+/// 屏幕显示配置：快刷多少次后触发一次全刷（清残影）。
+/// 独立分区追加在末尾，不动既有结构 → 既有数据不偏移、不丢失，无需 bump INIT_TAG。
+/// 旧固件未写入此分区时读取为 flash 原始字节，由 display 侧 clamp 到平台默认值。
+#[derive(Debug,Default,Clone,Copy)]
+pub struct DisplayStorage{
+    /// 0 表示未配置，display 侧回退到平台默认（epd2in7=20，其余=5）
+    pub full_refresh_times:u32,
+}
+
 
 // 为各个存储结构体实现 NvsStorage trait
 impl_storage!(VersionStorage, VERSION_STORAGE_OFFSET);
@@ -211,6 +222,7 @@ impl_storage!(OtherStorage, OTHER_STORAGE_OFFSET);
 // HolidayStorage 使用手动实现，避免栈溢出
 impl_storage!(ErrorLogStorage, ERROR_LOG_OFFSET);
 impl_storage!(StockStorage, STOCK_STORAGE_OFFSET);
+impl_storage!(DisplayStorage, DISPLAY_STORAGE_OFFSET);
 
 // 为 HolidayStorage 手动实现 NvsStorage，使用分块写入避免栈溢出
 impl NvsStorage for HolidayStorage {
@@ -271,4 +283,6 @@ pub fn init_storage_area(){
     HolidayStorage::default().write();
     ErrorLogStorage::default().write();
     StockStorage::default().write();
+    // 0 = 未配置，display 侧回退到平台默认（无需在此处区分 feature）
+    DisplayStorage::default().write();
 }

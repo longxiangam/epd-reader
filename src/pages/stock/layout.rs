@@ -438,20 +438,15 @@ where
     for i in 0..5usize {
         let yy = y0 + i as i32 * row_h;
         let lvl = &q.sells[4 - i];
-        let mut vol_s: heapless::String<10> = heapless::String::new();
-        let _ = write!(vol_s, "{}", lvl.vol);
+        let mut label_price: heapless::String<24> = heapless::String::new();
+        let _ = write!(label_price, "卖{} {}", 5 - i, fmt_price(lvl.price).as_str());
         let _ = font.render_aligned(
-            format_args!("卖{}", 5 - i),
+            format_args!("{}", label_price.as_str()),
             Point::new(mid_x + 4, yy), VerticalPosition::Top, HorizontalAlignment::Left,
             FontColor::Transparent(Black), display,
         );
         let _ = font.render_aligned(
-            format_args!("{}", fmt_price(lvl.price).as_str()),
-            Point::new(w - 28, yy), VerticalPosition::Top, HorizontalAlignment::Right,
-            FontColor::Transparent(Black), display,
-        );
-        let _ = font.render_aligned(
-            format_args!("{}", vol_s.as_str()),
+            format_args!("{}", lvl.vol),
             Point::new(w - 4, yy), VerticalPosition::Top, HorizontalAlignment::Right,
             FontColor::Transparent(Black), display,
         );
@@ -461,7 +456,7 @@ where
         .into_styled(border.clone()).draw(display);
     // 现价行
     let _ = font.render_aligned(
-        format_args!("->{}", fmt_price(q.price).as_str()),
+        format_args!("-> {}", fmt_price(q.price).as_str()),
         Point::new(mid_x + 4, sell_end + 3), VerticalPosition::Top, HorizontalAlignment::Left,
         FontColor::Transparent(Black), display,
     );
@@ -473,20 +468,15 @@ where
     for i in 0..5usize {
         let yy = price_end + 3 + i as i32 * row_h;
         let lvl = &q.buys[i];
-        let mut vol_s: heapless::String<10> = heapless::String::new();
-        let _ = write!(vol_s, "{}", lvl.vol);
+        let mut label_price: heapless::String<24> = heapless::String::new();
+        let _ = write!(label_price, "买{} {}", i + 1, fmt_price(lvl.price).as_str());
         let _ = font.render_aligned(
-            format_args!("买{}", i + 1),
+            format_args!("{}", label_price.as_str()),
             Point::new(mid_x + 4, yy), VerticalPosition::Top, HorizontalAlignment::Left,
             FontColor::Transparent(Black), display,
         );
         let _ = font.render_aligned(
-            format_args!("{}", fmt_price(lvl.price).as_str()),
-            Point::new(w - 28, yy), VerticalPosition::Top, HorizontalAlignment::Right,
-            FontColor::Transparent(Black), display,
-        );
-        let _ = font.render_aligned(
-            format_args!("{}", vol_s.as_str()),
+            format_args!("{}", lvl.vol),
             Point::new(w - 4, yy), VerticalPosition::Top, HorizontalAlignment::Right,
             FontColor::Transparent(Black), display,
         );

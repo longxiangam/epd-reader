@@ -21,6 +21,7 @@ use u8g2_fonts::fonts;
 use u8g2_fonts::FontRenderer;
 use u8g2_fonts::types::{FontColor, HorizontalAlignment, VerticalPosition};
 use esp_hal::ram;
+use crate::storage::NvsStorage;
 
 
 pub struct RenderInfo{
@@ -74,13 +75,34 @@ pub static QUICKLY_LUT_CHANNEL: Channel<CriticalSectionRawMutex, bool, 64> = Cha
 
 type ActualSpi<'a> = CriticalSectionDevice<'a, Spi<'a, esp_hal::Blocking>, Output<'a>, embedded_hal_bus::spi::NoDelay>;
 
-/// epd2in7: every N renders, do a full refresh (set_base_map) to clear ghosting.
+/// 平台默认：多少次快刷后触发一次全刷（清残影）。可由设置/web 覆盖。
 #[cfg(feature = "epd2in7")]
-const FORCE_FULL_REFRESH_TIMES:u32 = 20;
+pub const DEFAULT_FULL_REFRESH_TIMES: u32 = 20;
 
-/// Other displays use the old fast/full refresh alternation.
+/// 平台默认：多少次快刷后触发一次全刷（清残影）。可由设置/web 覆盖。
 #[cfg(not(feature = "epd2in7"))]
-const FORCE_FULL_REFRESH_TIMES:u32 = 5;
+pub const DEFAULT_FULL_REFRESH_TIMES: u32 = 5;
+
+/// 运行时缓存的全刷间隔（0 表示尚未加载，回退到平台默认）。
+/// 单核协作式调度，对齐的 u32 读写本身原子，沿用本文件 RENDER_TIMES 的 static mut 风格。
+static mut FULL_REFRESH_TIMES: u32 = 0;
+
+/// 启动时与设置变更后调用：从 flash 读取并钳制后刷新缓存。
+/// 钳制是必须的：旧固件下该分区是 flash 原始字节（可能为 0 或超大值），
+/// 而非 2in7 路径会用 `get_render_times() % N`，N=0 会触发整除零 panic。
+pub fn reload_full_refresh_times() {
+    let raw = crate::storage::DisplayStorage::read()
+        .map(|d| d.full_refresh_times)
+        .unwrap_or(0);
+    let v = if (1..=100).contains(&raw) { raw } else { DEFAULT_FULL_REFRESH_TIMES };
+    unsafe { core::ptr::addr_of_mut!(FULL_REFRESH_TIMES).write(v); }
+}
+
+/// 当前全刷间隔（render 时调用）。
+pub fn get_full_refresh_times() -> u32 {
+    let v = unsafe { core::ptr::addr_of!(FULL_REFRESH_TIMES).read() };
+    if v == 0 { DEFAULT_FULL_REFRESH_TIMES } else { v }
+}
 
 #[embassy_executor::task]
 pub async fn render(
@@ -134,7 +156,7 @@ pub async fn render(
                 #[cfg(feature = "epd2in7")]
                 {
                     let render_count = get_render_times();
-                    let need_force_full = render_count >= FORCE_FULL_REFRESH_TIMES && refresh_lut == RefreshLut::Quick;
+                    let need_force_full = render_count >= get_full_refresh_times() && refresh_lut == RefreshLut::Quick;
 
                     if refresh_lut == RefreshLut::Quick {
                         if need_force_full {
@@ -170,7 +192,7 @@ pub async fn render(
                 #[cfg(not(feature = "epd2in7"))]
                 {
                     let need_clear = take_need_clear();
-                    let need_force_full = (get_render_times() % FORCE_FULL_REFRESH_TIMES == 0 || need_clear) && refresh_lut == RefreshLut::Quick;
+                    let need_force_full = (get_render_times() % get_full_refresh_times() == 0 || need_clear) && refresh_lut == RefreshLut::Quick;
                     if need_force_full {
                         spi_device = set_refresh_mode(RefreshLut::Full, &mut epd, spi_device);
                     }

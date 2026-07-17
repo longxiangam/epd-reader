@@ -167,6 +167,7 @@
         <button class="tab-link active" data-tab="wifi">WiFi</button>
         <button class="tab-link" data-tab="weather">天气</button>
         <button class="tab-link" data-tab="sleep">睡眠</button>
+        <button class="tab-link" data-tab="display">显示</button>
         <button class="tab-link" data-tab="books">书籍</button>
         <button class="tab-link" data-tab="images">图片</button>
         <button class="tab-link" data-tab="stock">股票</button>
@@ -210,6 +211,15 @@
         <button id="sleepImageDeleteBtn" style="background-color:#dc3545;color:white;padding:8px 16px;border:none;border-radius:4px;cursor:pointer;font-size:14px;margin-top:8px;width:100%;display:none;">删除睡眠图片</button>
         <div id="sleepImageProgress" style="margin-top:8px;font-size:14px;color:#555;"></div>
         <div id="sleepImageMessage" class="message"></div>
+    </div>
+    <div id="display" class="tab-content">
+        <h3 style="margin-top:0;">屏幕刷新</h3>
+        <form id="displayForm">
+            <label for="full-refresh">全刷间隔：每多少次快刷后触发一次全刷清残影（1~100，越小越清晰越耗电）:</label>
+            <input type="number" id="full-refresh" name="full-refresh" min="1" max="100" required />
+            <input type="submit" value="保存配置" />
+            <div id="displayMessage" class="message"></div>
+        </form>
     </div>
     <div id="books" class="tab-content">
         <h3 style="margin-top:0;">书籍列表</h3>
@@ -378,6 +388,36 @@
                 sleepMessage.textContent = '发生错误: ' + error.message;
                 sleepMessage.className = 'message error';
                 sleepMessage.style.display = 'block';
+            });
+    });
+
+    // Display form submission with AJAX
+    const displayForm = document.getElementById('displayForm');
+    const displayMessage = document.getElementById('displayMessage');
+
+    displayForm.addEventListener('submit', function(event) {
+        event.preventDefault();
+
+        const formData = new FormData(displayForm);
+        fetch('/configure_display', {
+            method: 'POST',
+            body: formData
+        })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    displayMessage.textContent = '显示配置保存成功!';
+                    displayMessage.className = 'message success';
+                } else {
+                    displayMessage.textContent = '保存显示配置失败.';
+                    displayMessage.className = 'message error';
+                }
+                displayMessage.style.display = 'block';
+            })
+            .catch(error => {
+                displayMessage.textContent = '发生错误: ' + error.message;
+                displayMessage.className = 'message error';
+                displayMessage.style.display = 'block';
             });
     });
 
@@ -739,6 +779,9 @@
             if (cfg.sleep) {
                 document.getElementById('read-sleep-seconds').value = cfg.sleep.read || '';
                 document.getElementById('weather-sleep-seconds').value = cfg.sleep.weather || '';
+            }
+            if (cfg.display) {
+                document.getElementById('full-refresh').value = cfg.display.full_refresh || '';
             }
             if (cfg.stocks) {
                 cfg.stocks.forEach((s, i) => {
