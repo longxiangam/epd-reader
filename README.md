@@ -2,22 +2,48 @@
 
 基于 ESP32-C3 的电子墨水屏阅读器，使用 Rust `#![no_std]` 嵌入式开发。
 
-支持 WiFi 配网、NTP 时间同步、TXT 电子书阅读、天气预报、农历/节假日显示、BMP 图片浏览、自动休眠、Web 配置等功能。
+支持 WiFi 配网、NTP 时间同步、TXT 电子书阅读、天气预报、农历/节假日显示、沪深股票行情、BMP 图片浏览、IP 自动定位、自动休眠、Web 配置等功能。
 
 硬件设计：https://oshwhub.com/longxiangam/epd_reader
 
 详细设计文档：[DESIGN.md](DESIGN.md)
+
+## 界面展示
+
+<table>
+  <tr>
+    <td align="center"><img src="images/main_menu.jpg" width="220"><br>主菜单</td>
+    <td align="center"><img src="images/bookshelf.jpg" width="220"><br>书架 / 进度</td>
+    <td align="center"><img src="images/reading.jpg" width="220"><br>电子书阅读</td>
+  </tr>
+  <tr>
+    <td align="center"><img src="images/weather.jpg" width="220"><br>天气预报</td>
+    <td align="center"><img src="images/calendar.jpg" width="220"><br>农历日历</td>
+    <td align="center"><img src="images/stock_intraday.jpg" width="220"><br>股票分时</td>
+  </tr>
+  <tr>
+    <td align="center"><img src="images/stock_quote.jpg" width="220"><br>实时行情盘口</td>
+    <td align="center"><img src="images/image_viewer.jpg" width="220"><br>图片浏览</td>
+    <td align="center"><img src="images/settings.jpg" width="220"><br>设置</td>
+  </tr>
+  <tr>
+    <td align="center"><img src="images/qr_ap_setup.jpg" width="220"><br>扫码配网</td>
+    <td></td><td></td>
+  </tr>
+</table>
 
 ## 功能
 
 | 功能 | 说明 |
 |------|------|
 | 电子书阅读 | TXT 文件自动分页、书签管理、进度保存 |
-| 天气显示 | 心知天气 / OpenMeteo 双数据源，5 日预报 + 温度曲线 |
-| 农历日历 | 公历/农历对照，节假日 + 补班标记 |
+| 天气显示 | 心知天气 / OpenMeteo 双数据源，5 日预报 + 温度曲线，支持 IP 自动定位 |
+| 农历日历 | 公历/农历对照，节气，节假日 + 补班标记，附 3 日天气 |
+| 股票行情 | 沪深股票分时 / 日K / 周K / 月K / 折线 + 实时盘口，多股切换、按周期自动刷新 |
 | 图片浏览 | BMP 图片查看，可设为待机壁纸 |
 | WiFi 配网 | AP 模式热点，手机扫码配网，Web 管理界面 |
 | NTP 时间 | 自动同步网络时间，深度睡眠后 RTC 恢复 |
+| 电量与显示 | ADC 电池采样与百分比显示，全刷间隔 / 默认主页 / 各页睡眠时长可配置 |
 | 低功耗 | 自动深度睡眠，按键/定时器唤醒，外设电源独立控制 |
 | 错误日志 | 自定义 Panic Handler，崩溃信息写入 Flash |
 
@@ -28,7 +54,7 @@
 | MCU | ESP32-C3 (RISC-V, 160MHz, 400KB SRAM, 4MB Flash) |
 | 显示屏 | Waveshare 2.9" (296×128) 或 4.2" (400×300) 电子墨水屏 |
 | 存储 | MicroSD 卡 (≤32GB, SD/SDHC, MBR 分区) |
-| 输入 | 按键 ×3 (其中一个通过 ADC 分压多按键) |
+| 输入 | 按键 ×3 (其中一个通过 ADC 分压实现两键) |
 | 电源 | 锂电池 + ADC 电压检测 |
 
 ## 技术栈
@@ -73,6 +99,7 @@ src/
 ├── sleep.rs             # 深度睡眠与唤醒
 ├── worldtime.rs         # NTP 时间同步
 ├── weather.rs           # 天气数据服务
+├── location.rs          # 基于 IP 的地理位置（自动定位天气城市）
 ├── request.rs           # HTTP/HTTPS 客户端
 ├── battery.rs           # 电池 ADC 采样
 ├── epd2in9_txt.rs       # TXT 文本分页引擎
@@ -80,9 +107,9 @@ src/
 ├── flash_sleep.rs       # 待机壁纸 Flash 存储
 ├── web_service.rs       # WiFi 配网 Web 服务
 ├── panic.rs             # 自定义 Panic Handler
-├── model/               # 数据模型（天气、农历、节假日）
-├── widgets/             # UI 组件（图标网格、列表、日历、图表等）
-└── pages/               # 页面（主菜单、阅读、天气、日历、图片、设置、调试）
+├── model/               # 数据模型（天气、农历、节假日、股票）
+├── widgets/             # UI 组件（图标网格、列表、日历、K 线/图表等）
+└── pages/               # 页面（主菜单、书架、阅读、天气、日历、股票、图片、设置、调试）
 ```
 
 ## 工具脚本

@@ -27,6 +27,10 @@ static mut STOCK_MODE: u8 = 4; // 默认分时（Minute=4）
 pub struct StockPage {
     pub(crate) running: bool,
     pub(crate) need_render: bool,
+    /// 回调置位、run 循环消费：拉取数据（fetch 移出回调，避免阻塞按键）。
+    pub(crate) need_fetch: bool,
+    /// 回调置位、run 循环消费：用全刷 LUT 重绘当前数据（同源切换，如 Day↔折线）。
+    pub(crate) need_clean_render: bool,
     pub(crate) mode: ChartMode,
     pub(crate) data: Option<Box<StockData>>,
     pub(crate) loading: bool,
@@ -97,6 +101,8 @@ impl Page for StockPage {
         Self {
             running: false,
             need_render: false,
+            need_fetch: false,
+            need_clean_render: false,
             mode: ChartMode::Minute,
             data: None,
             loading: false,
@@ -162,6 +168,20 @@ impl Page for StockPage {
             if !self.running {
                 break;
             }
+            // 耗时的拉取/重绘放这里执行（回调只置标志），fetch 期间按键仍可响应。
+            if self.need_fetch {
+                self.need_fetch = false;
+                // 全刷过渡清残影，send 顺序与原回调一致。
+                crate::display::QUICKLY_LUT_CHANNEL.send(false).await;
+                self.fetch().await;
+                crate::display::QUICKLY_LUT_CHANNEL.send(true).await;
+            } else if self.need_clean_render {
+                self.need_clean_render = false;
+                crate::display::QUICKLY_LUT_CHANNEL.send(false).await;
+                self.need_render = true;
+                self.render().await;
+                crate::display::QUICKLY_LUT_CHANNEL.send(true).await;
+            }
             // 注意：此处不能再无条件 refresh_active_time()，否则空闲时间永远归零、永不睡眠。
             // 活动时间由按键（event::run 内部）刷新，空闲 30 秒后 to_sleep_tips 自动入睡。
             if self.need_render {
@@ -183,54 +203,44 @@ impl Page for StockPage {
         event::on_target(EventType::KeyShort(1), Self::mut_to_ptr(self), move |info| {
             Box::pin(async move {
                 let mut_ref: &mut Self = Self::mut_by_ptr(info.ptr).unwrap();
-                crate::display::QUICKLY_LUT_CHANNEL.send(false).await;
                 mut_ref.switch_mode(false);
                 if mut_ref.data.is_none() {
-                    mut_ref.fetch().await;
+                    mut_ref.need_fetch = true;
                 } else {
-                    mut_ref.need_render = true;
-                    mut_ref.render().await;
+                    mut_ref.need_clean_render = true;
                 }
-                crate::display::QUICKLY_LUT_CHANNEL.send(true).await;
             })
         }).await;
         // 短按2：下一个图模式
         event::on_target(EventType::KeyShort(2), Self::mut_to_ptr(self), move |info| {
             Box::pin(async move {
                 let mut_ref: &mut Self = Self::mut_by_ptr(info.ptr).unwrap();
-                crate::display::QUICKLY_LUT_CHANNEL.send(false).await;
                 mut_ref.switch_mode(true);
                 if mut_ref.data.is_none() {
-                    mut_ref.fetch().await;
+                    mut_ref.need_fetch = true;
                 } else {
-                    mut_ref.need_render = true;
-                    mut_ref.render().await;
+                    mut_ref.need_clean_render = true;
                 }
-                crate::display::QUICKLY_LUT_CHANNEL.send(true).await;
             })
         }).await;
         // 长按1：上一支股票
         event::on_target(EventType::KeyLongEnd(1), Self::mut_to_ptr(self), move |info| {
             Box::pin(async move {
                 let mut_ref: &mut Self = Self::mut_by_ptr(info.ptr).unwrap();
-                crate::display::QUICKLY_LUT_CHANNEL.send(false).await;
                 mut_ref.switch_stock(false);
                 if mut_ref.data.is_none() {
-                    mut_ref.fetch().await;
+                    mut_ref.need_fetch = true;
                 }
-                crate::display::QUICKLY_LUT_CHANNEL.send(true).await;
             })
         }).await;
         // 长按2：下一支股票
         event::on_target(EventType::KeyLongEnd(2), Self::mut_to_ptr(self), move |info| {
             Box::pin(async move {
                 let mut_ref: &mut Self = Self::mut_by_ptr(info.ptr).unwrap();
-                crate::display::QUICKLY_LUT_CHANNEL.send(false).await;
                 mut_ref.switch_stock(true);
                 if mut_ref.data.is_none() {
-                    mut_ref.fetch().await;
+                    mut_ref.need_fetch = true;
                 }
-                crate::display::QUICKLY_LUT_CHANNEL.send(true).await;
             })
         }).await;
         // 短按3：返回
@@ -244,9 +254,7 @@ impl Page for StockPage {
         event::on_target(EventType::KeyLongEnd(3), Self::mut_to_ptr(self), move |info| {
             Box::pin(async move {
                 let mut_ref: &mut Self = Self::mut_by_ptr(info.ptr).unwrap();
-                crate::display::QUICKLY_LUT_CHANNEL.send(false).await;
-                mut_ref.fetch().await;
-                crate::display::QUICKLY_LUT_CHANNEL.send(true).await;
+                mut_ref.need_fetch = true;
             })
         }).await;
     }

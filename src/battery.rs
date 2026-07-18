@@ -36,7 +36,9 @@ pub async fn test_bat_adc() {
         if let Some(v) = BATTERY.lock().await.as_mut() {
             if let Some(pin) = ADC_PIN.lock().await.as_mut() {
                 if let Some(adc) = ADC_PER.lock().await.as_mut() {
+                    let mut tries = 0u32;
                     loop {
+                        tries += 1;
                         match adc.read_oneshot(pin) {
                             Ok(adc_value) => {
                                 let voltage_mv = adc_value as f32 * 2.0;
@@ -65,7 +67,12 @@ pub async fn test_bat_adc() {
                                 break;
                             }
                             Err(e) => {
+                                // ADC 偶发 Err 需重试；持续错误超过上限才放弃本轮（防死循环+持锁），保留上次电量。
                                 println!("ADC错误: {:?}", e);
+                                if tries >= 50 {
+                                    break;
+                                }
+                                Timer::after_millis(2).await;
                             }
                         }
                     }

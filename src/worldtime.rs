@@ -211,7 +211,8 @@ impl NtpTimestampGenerator for TimestampGen {
     fn init(&mut self) {}
 
     fn timestamp_sec(&self) -> u64 {
-        self.now.microsecond() as u64
+        // UNIX 秒：sntpc 内部再加 NTP 纪元差构造时间戳（误用 microsecond 会让 roundtrip/offset 失真）。
+        self.now.unix_timestamp() as u64
     }
 
     fn timestamp_subsec_micros(&self) -> u32 {
@@ -237,8 +238,9 @@ pub async fn ntp_request(
             service_index += 1;
             v
         } else {
+            // DNS 失败则尝试下一个服务器（越界由循环顶部兜底返回 NoAddr）。
             service_index += 1;
-            return Err(SntpcError::NoAddr);
+            continue;
         };
         let addr = addrs.pop().ok_or(SntpcError::DnsEmptyResponse)?;
         println!("NTP DNS: {:?}", addr);
@@ -250,10 +252,11 @@ pub async fn ntp_request(
         let ipv4_addr = Ipv4Addr::new(octets[0], octets[1], octets[2], octets[3]);
         let sock_addr = SocketAddr::new(IpAddr::V4(ipv4_addr), 123);
 
-        let mut rx_buffer = [0; 4096];
-        let mut tx_buffer = [0; 4096];
-        let mut rx_meta = [PacketMetadata::EMPTY; 16];
-        let mut tx_meta = [PacketMetadata::EMPTY; 16];
+        // NTP/SNTP 报文 48 字节，带扩展也远小于 128；不必为单包交互开 4KB。
+        let mut rx_buffer = [0; 128];
+        let mut tx_buffer = [0; 128];
+        let mut rx_meta = [PacketMetadata::EMPTY; 4];
+        let mut tx_meta = [PacketMetadata::EMPTY; 4];
 
         let mut socket = UdpSocket::new(
             *stack,
@@ -339,7 +342,6 @@ pub async fn ntp_worker() {
             if current_second > 1577836800 && current_second < 4102444800 {
                 if let Ok(now) = OffsetDateTime::from_unix_timestamp(current_second as i64) {
                     clock.set_time(now).await;
-                    Timer::after_secs(5).await;
                 }
             }
         }

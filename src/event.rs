@@ -59,21 +59,6 @@ pub async fn on_fixed<F>(event_type: EventType,target_ptr:usize, callback: F)
     LISTENER.lock().await.push(Listener{callback:Box::new(callback),event_type,ptr:Some(target_ptr),fixed:true});
 }
 
-pub async fn un(event_type: EventType)
-{
-    let mut vec = LISTENER.lock().await;
-
-    let mut find_index:Option<usize> = None;
-    for (index,listener) in vec.iter().enumerate() {
-        if listener.event_type == event_type{
-            find_index = Some(index);
-        }
-    }
-    if let Some(v) = find_index {
-        vec.remove(v);
-    }
-}
-
 pub async fn clear(){
     let mut vec = LISTENER.lock().await;
     vec.clear();
@@ -129,7 +114,10 @@ pub async fn disable_double_click(){
 pub async fn key_detection<P,const NUM:usize>(key: &mut P)
 where P:InputPin
 {
+    // KeyLongIng 节流：主循环 ~1ms 一轮，不限流会 ~1kHz 派发、纯耗电。
+    const LONG_ING_INTERVAL_MS: u64 = 100;
     let begin_ms = Instant::now().as_millis();
+    let mut last_long_ing_ms = begin_ms;
     let mut is_long = false;
     let mut key_num:usize = NUM;
     if NUM == 2 {
@@ -155,8 +143,10 @@ where P:InputPin
                 //长时间按下
                 if !is_long {
                     is_long = true;
+                    last_long_ing_ms = current;
                     toggle_event(EventType::KeyLongStart(key_num as u32), current).await;
-                }else {
+                }else if current - last_long_ing_ms >= LONG_ING_INTERVAL_MS {
+                    last_long_ing_ms = current;
                     toggle_event(EventType::KeyLongIng(key_num as u32), current).await;
                 }
             }
@@ -199,37 +189,42 @@ where P:InputPin
     }
 }
 
-async fn judge_adc_num() -> usize{
-    let temp = 0;
-    let mut effective_num = 20;
-    let mut adc_valute_sum = 0;
-    while  temp == 0 &&  effective_num > 0 {
+/// GPIO2 分压多键：用 ADC 电压区分键 2/3，采样取平均抗噪。
+/// ADC 偶发 Err 需重试（冷启动常见），仅在总尝试超限时放弃，避免卡死事件任务。
+async fn judge_adc_num() -> usize {
+    const SAMPLES: usize = 20;
+    const MAX_TRIES: usize = 200;
+    // 分压门限（12bit ADC）：< AVG_KEY2 → 键2；介于之间 → 键3；> AVG_NONE → 抖动忽略。
+    const AVG_KEY2: u32 = 200;
+    const AVG_NONE: u32 = 1000;
+
+    let mut need = SAMPLES;
+    let mut sum: u32 = 0;
+    let mut tries = 0usize;
+    while need > 0 {
+        tries += 1;
+        if tries > MAX_TRIES {
+            println!("btn adc too many tries, give up");
+            return 0;
+        }
         if let Some(pin) = ADC_PIN.lock().await.as_mut() {
             if let Some(adc) = ADC_PER.lock().await.as_mut() {
-                let val = adc.read_oneshot(pin);
-                match val {
-                    Ok(adc_value) => {
-                        adc_valute_sum += adc_value;
-                        effective_num -= 1;
+                match adc.read_oneshot(pin) {
+                    Ok(v) => {
+                        sum = sum.saturating_add(v as u32);
+                        need -= 1;
                     }
                     Err(_e) => {
-                        Timer::after_ticks(10).await;
+                        Timer::after_millis(2).await;
                     }
                 }
             }
         }
     }
-    let avg = adc_valute_sum / 20;
-    println!("btn avg:{:?}",avg);
-    let temp = if avg < 200 {
-        2
-    } else {
-        3
-    };
-
-    if avg > 1000 {
+    let avg = sum / SAMPLES as u32;
+    println!("btn avg:{:?}", avg);
+    if avg > AVG_NONE {
         return 0;
     }
-
-    temp
+    if avg < AVG_KEY2 { 2 } else { 3 }
 }
