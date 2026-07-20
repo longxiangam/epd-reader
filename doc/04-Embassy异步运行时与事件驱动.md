@@ -4,11 +4,9 @@
 
 ## 引言
 
-在传统的嵌入式 C 开发中，你通常有两种选择：裸机超级循环（`while(1)` + 中断）或者 RTOS（FreeRTOS 的任务 + 信号量）。前者简单但难以管理复杂逻辑，后者功能强大但引入了抢占式调度的复杂性（优先级反转、死锁、竞态条件……）。
+本项目要同时做很多事：刷电子墨水屏、读按键、收发网络包、计时、采样电池。这些并发由 Embassy 组织——一个基于 Rust async/await 的异步运行时。显示渲染、事件检测、网络通信、时间同步各自是一个 Embassy 任务。
 
-Embassy 给出了第三条路：**基于 Rust async/await 的协作式异步运行时**。它既有裸机的确定性，又有 RTOS 的表达力。本项目中，几乎所有任务都运行在 Embassy 上——显示渲染、事件检测、网络通信、时间同步。
-
-本文将深入 Embassy 的工作原理，以及本项目如何基于它构建事件驱动架构。
+本文讲 Embassy 在单核 ESP32-C3 上怎么调度这些任务，以及按键事件怎么从 GPIO 电平变化一步步变成页面响应。
 
 ## 1. Embassy 是什么？
 
@@ -136,19 +134,14 @@ match select(render_sign, quickly_lut).await {
 }
 ```
 
-### 2.3 协作式 vs 抢占式
+### 2.3 协作式调度的特点
 
-| 特性 | 协作式 (Embassy) | 抢占式 (FreeRTOS) |
-|------|-------------------|-------------------|
-| 任务切换 | `.await` 主动让出 | 定时器中断抢占 |
-| 临界区 | 不需要（除非访问 static mut） | 需要（关中断/互斥量） |
-| 栈开销 | 共享栈，每个任务几字节 | 每个任务独立栈（通常 1-4KB） |
-| 优先级反转 | 不存在 | 可能发生 |
-| 可预测性 | 高（切换点明确） | 低（随时可能被抢占） |
+Embassy 是**协作式**调度：任务只在 `.await` 让出时才会切换，不会被中途抢占。由此带来两个特点：
 
-协作式调度的最大优势是**简单**：你不需要担心被随时打断，不需要给每个共享变量加锁。只要你不 `.await`，当前代码就是原子执行的。
+- 两段不 `.await` 的代码天然是原子的，访问普通共享数据不需要加锁（访问 `static mut` 仍需 `CriticalSectionRawMutex`）。
+- 任务不分配独立栈，共享一个栈，每个任务自身只占很少内存。
 
-但它也有代价：如果某个任务忘记 `.await`（比如死循环），其他任务就永远得不到执行机会。所以每个任务循环中必须有 `.await`。
+代价是：任务必须自觉 `.await`。如果某个任务跑死循环不让出，其它任务就永远得不到执行机会——所以每个任务循环里都得有 `.await`。
 
 ## 3. 事件系统设计
 
@@ -161,7 +154,7 @@ match select(render_sign, quickly_lut).await {
 pub enum EventType {
     KeyShort(u32),       // 短按，参数是按键编号
     KeyLongStart(u32),   // 长按开始
-    KeyLongIng(u32),     // 长按持续中（每 1ms 触发一次）
+    KeyLongIng(u32),     // 长按持续中（节流为每 100ms 触发一次）
     KeyLongEnd(u32),     // 长按释放
     KeyDouble(u32),      // 双击
     WheelBack,           // 滚轮后退（预留）
@@ -306,7 +299,9 @@ GPIO2 ──┬──[R1]── Key2 ── GND
 ```rust
 // src/event.rs:129-200（简化流程）
 async fn key_detection<P, const NUM: usize>(key: &mut P) {
+    const LONG_ING_INTERVAL_MS: u64 = 100;          // KeyLongIng 节流间隔
     let begin_ms = Instant::now().as_millis();
+    let mut last_long_ing_ms = begin_ms;
     let mut is_long = false;
     let mut key_num = NUM;
 
@@ -322,11 +317,14 @@ async fn key_detection<P, const NUM: usize>(key: &mut P) {
 
         if is_low_times > 80 {
             // 按键处于按下状态
+            let current = Instant::now().as_millis();
             if current - begin_ms > 500 {
                 if !is_long {
                     is_long = true;
+                    last_long_ing_ms = current;
                     toggle_event(EventType::KeyLongStart(key_num)).await;
-                } else {
+                } else if current - last_long_ing_ms >= LONG_ING_INTERVAL_MS {
+                    last_long_ing_ms = current;  // 每 100ms 才派发一次，避免 ~1kHz 空转耗电
                     toggle_event(EventType::KeyLongIng(key_num)).await;
                 }
             }
@@ -378,27 +376,37 @@ async fn key_detection<P, const NUM: usize>(key: &mut P) {
 
 ### 4.3 ADC 按键识别
 
+ESP32-C3 的 `read_oneshot` 在冷启动 / 通道切换时**经常返回 `Err`**，必须容忍——只采到 `Ok` 的样本计入平均，但仅在总尝试次数超限时才放弃，避免卡死事件任务：
+
 ```rust
-// src/event.rs:202-235
+// src/event.rs（简化）
 async fn judge_adc_num() -> usize {
-    let mut adc_valute_sum = 0;
-    // 采样 20 次
-    for _ in 0..20 {
+    const SAMPLES: usize = 20;
+    const MAX_TRIES: usize = 200;
+    const AVG_KEY2: u32 = 200;   // < 200 → Key2
+    const AVG_NONE: u32 = 1000;  // > 1000 → 无按键（上拉到 VCC）
+
+    let mut need = SAMPLES;
+    let mut sum: u32 = 0;
+    let mut tries = 0usize;
+    while need > 0 {
+        tries += 1;
+        if tries > MAX_TRIES { return 0; }   // 持续 Err 超限：放弃，避免卡死
         if let Some(pin) = ADC_PIN.lock().await.as_mut() {
             if let Some(adc) = ADC_PER.lock().await.as_mut() {
-                let val = adc.read_oneshot(pin);
-                if let Ok(adc_value) = val {
-                    adc_valute_sum += adc_value;
+                match adc.read_oneshot(pin) {
+                    Ok(v)  => { sum += v as u32; need -= 1; }
+                    Err(_) => { Timer::after_millis(2).await; }  // 偶发 Err：等 2ms 重试
                 }
             }
         }
     }
-    let avg = adc_valute_sum / 20;
-    if avg < 200 { 2 } else { 3 }  // 阈值判断
+    let avg = sum / SAMPLES as u32;
+    if avg > AVG_NONE { 0 } else if avg < AVG_KEY2 { 2 } else { 3 }
 }
 ```
 
-20 次采样取平均值，阈值 200 区分 Key2（低电压）和 Key3（较高电压）。如果 ADC 值超过 1000，说明没有按键按下（上拉到 VCC），返回 0 忽略。
+20 次有效采样取平均值，阈值 200 区分 Key2（低电压）和 Key3（较高电压）；超过 1000 视为无按键返回 0。电池采样（`battery.rs`）采用同样的"出错重试、超限放弃"策略（上限 50 次），保证 ADC 偶发错误不会让按键或电量检测整体失效。
 
 ## 5. Embassy 同步原语
 

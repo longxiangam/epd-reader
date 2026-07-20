@@ -52,7 +52,7 @@
 | 组件 | 规格 |
 |------|------|
 | MCU | ESP32-C3 (RISC-V, 160MHz, 400KB SRAM, 4MB Flash) |
-| 显示屏 | Waveshare 2.9" (296×128) 或 4.2" (400×300) 电子墨水屏 |
+| 显示屏 | Waveshare 4.2" (400×300) 或 2.7" (264×176) 电子墨水屏 |
 | 存储 | MicroSD 卡 (≤32GB, SD/SDHC, MBR 分区) |
 | 输入 | 按键 ×3 (其中一个通过 ADC 分压实现两键) |
 | 电源 | 锂电池 + ADC 电压检测 |
@@ -72,19 +72,29 @@
 
 ## 构建
 
+需要 nightly 工具链（见 `rust-toolchain.toml`）。固件体积已超过 debug 默认配置，**必须用 release 构建**（`Cargo.toml` 中 `[profile.release] opt-level = "s"`），否则链接时 `.text` 会溢出 3MB 应用分区。
+
 ```bash
 # 安装工具链
 rustup target add riscv32imc-unknown-none-elf
 cargo install espflash
 
-# 构建 4.2 寸版本并烧录
-cargo run --features epd4in2
+# 构建 4.2 寸版本并烧录（.cargo/config.toml 配置了 espflash 为 runner）
+cargo run --release --features epd4in2
 
-# 构建 2.9 寸版本
-cargo run --features epd2in9
+# 构建 2.7 寸版本
+cargo run --release --features epd2in7
 
-# 带调试模式（启动时检查错误日志）
-cargo run --features "epd4in2,enable_debug"
+# 带调试模式（启动时若 Flash 有错误日志则进入调试页）
+cargo run --release --features "epd4in2,enable_debug"
+```
+
+> 目前可正常构建的是 `epd4in2` 与 `epd2in7`。`epd2in9` 仅在驱动层（`display.rs`/`epd2in9_txt.rs`）保留了类型适配，但天气页、日历页缺 128×296 布局文件，编译会失败，暂不可用。
+
+`weather-openmeteo` feature 可切换天气数据源为 Open-Meteo（默认用心知天气 Seniverse）：
+
+```bash
+cargo run --release --features "epd4in2,weather-openmeteo"
 ```
 
 ## 项目结构

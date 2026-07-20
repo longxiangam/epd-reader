@@ -100,10 +100,10 @@ fn init_heap() {
 }
 
 // 新版
-esp_alloc::heap_allocator!(size: 80 * 1024);
+esp_alloc::heap_allocator!(size: 64 * 1024);
 ```
 
-从手动初始化 `embedded_alloc::Heap` 到一行宏搞定。堆大小也从 38KB 增加到了 80KB。
+从手动初始化 `embedded_alloc::Heap` 到一行宏搞定。堆大小在迁移后一度调到 80KB，后来把 HTTP/TLS 大缓冲移到 `.bss`，又下调到当前的 64KB。
 
 ## 3. GPIO 迁移
 

@@ -36,8 +36,10 @@ epd-reader 是一个运行在 **ESP32-C3** 上的嵌入式电子墨水屏（E-Pa
 | 功能 | 说明 |
 |------|------|
 | 电子书阅读 | 支持 TXT 文件，自动分页、书签管理、进度显示 |
-| 天气显示 | 支持心知天气 / OpenMeteo 双数据源，5 日预报 + 温度曲线 |
-| 农历日历 | 公历/农历对照、节假日显示（含补班标记） |
+| 天气显示 | 心知天气 / Open-Meteo 双数据源，5 日预报 + 温度曲线 |
+| 自动定位 | 基于 IP 反查城市与经纬度，自动设置天气查询地点 |
+| 农历日历 | 公历/农历对照、节气、节假日显示（含补班标记） |
+| 股票行情 | 沪深股票分时 / 日K / 周K / 月K / 折线 + 实时盘口，多股切换、按周期自动刷新 |
 | 图片浏览 | 支持黑白 BMP 图片查看，可设为待机壁纸 |
 | WiFi 配网 | AP 模式热点 + Web 配置界面，手机扫码即可配网 |
 | NTP 时间 | 自动同步网络时间，深度睡眠唤醒后通过 RTC 恢复 |
@@ -50,10 +52,10 @@ epd-reader 是一个运行在 **ESP32-C3** 上的嵌入式电子墨水屏（E-Pa
 | 组件 | 型号/规格 |
 |------|-----------|
 | MCU | ESP32-C3 (RISC-V, 160MHz, 400KB SRAM) |
-| 显示屏 | Waveshare 2.9" 或 4.2" 电子墨水屏 |
-| 存储 | MicroSD 卡（通过 SPI 连接） |
+| 显示屏 | Waveshare 4.2" (400×300) 或 2.7" (264×176) 电子墨水屏（2.9" 驱动层有适配但页面布局缺失，暂不可用） |
+| 存储 | MicroSD 卡（通过 SPI 连接，≤32GB SD/SDHC，MBR 分区） |
 | Flash | 内置 4MB Flash |
-| 输入 | 按键 ×3（其中一个通过 ADC 分压实现多按键） |
+| 输入 | 按键 ×3（GPIO9 独立键 + GPIO2 经 ADC 分压实现两键） |
 | 电源 | 锂电池 + ADC 电压检测 |
 
 ### 1.4 技术栈
@@ -89,20 +91,22 @@ epd-reader 是一个运行在 **ESP32-C3** 上的嵌入式电子墨水屏（E-Pa
 │                        应用层 (Pages)                            │
 │  MainPage ─┬─ ReadPage (电子书)   ─┬─ WeatherPage (天气)         │
 │            ├─ CalendarPage (日历)   ├─ ImagePage (图片)          │
-│            ├─ SettingPage (设置)    └─ DebugPage (调试)          │
+│            ├─ StockPage (股票)      ├─ SettingPage (设置)         │
+│            └─ DebugPage (调试)                                   │
 ├─────────────────────────────────────────────────────────────────┤
 │                      UI 组件层 (Widgets)                         │
-│  IconGridWidget │ ListWidget │ Calendar │ TempChart              │
-│  WeatherIcon    │ QrcodeWidget│ Battery  │ ScrollBar             │
+│  IconGridWidget │ ListWidget │ Calendar │ TempChart │ KLine       │
+│  WeatherIcon    │ QrcodeWidget│ Battery │ draw_icon │ ScrollBar  │
 ├─────────────────────────────────────────────────────────────────┤
 │                      服务层 (Services)                           │
 │  Display (渲染) │ Event (事件) │ WiFi (网络) │ Storage (持久化)   │
 │  WorldTime (NTP)│ Weather (天气)│ Battery (电池)│ Sleep (睡眠)   │
 │  Request (HTTP) │ WebService (配置)│ SDMount (文件) │ TxtReader   │
+│  Location (IP 定位)                                             │
 ├─────────────────────────────────────────────────────────────────┤
 │                      数据模型层 (Model)                          │
-│  seniverse (天气数据) │ open_meteo (天气数据) │ lunar (农历)      │
-│  holiday (节假日)                                       │
+│  seniverse (天气) │ open_meteo (天气) │ lunar (农历/节气/星座)    │
+│  holiday (节假日) │ stock (K线/盘口)                              │
 ├─────────────────────────────────────────────────────────────────┤
 │                    ESP 生态 (esp-rs v1.x)                        │
 │  esp-hal │ esp-radio │ esp-storage │ esp-alloc │ esp-rtos       │
@@ -124,16 +128,18 @@ main.rs
  ├── display.rs ◄── epd-waveshare, embedded-graphics, critical-section
  ├── event.rs   ◄── embassy-sync, embassy-futures, esp-hal (GPIO/ADC)
  ├── pages/     ◄── event, display, widgets, model
- │   ├── main_page.rs      (页面管理器)
- │   ├── read_page.rs       ◄── epd2in9_txt, sd_mount
- │   ├── weather_page.rs    ◄── weather, worldtime
- │   ├── calendar_page.rs   ◄── weather, worldtime, widgets::calendar
- │   ├── image_page.rs      ◄── sd_mount, flash_sleep
- │   ├── setting_page.rs    ◄── wifi, web_service, storage
- │   └── debug_page.rs      ◄── storage
+ │   ├── main_page.rs      (页面管理器/默认主页/唤醒回上次页)
+ │   ├── read/             ◄── epd2in9_txt, sd_mount（layout 按 feature 选尺寸）
+ │   ├── weather/          ◄── weather, worldtime, location
+ │   ├── calendar/         ◄── weather, worldtime, widgets::calendar, model::lunar
+ │   ├── stock/            ◄── request, model::stock, widgets::kline, wifi
+ │   ├── image_page.rs     ◄── sd_mount, flash_sleep
+ │   ├── setting_page.rs   ◄── wifi, web_service, storage, location
+ │   └── debug_page.rs     ◄── storage
  ├── wifi.rs    ◄── esp-radio, embassy-net, dhcparse
  ├── storage.rs ◄── esp-storage
- ├── weather.rs ◄── request, storage, worldtime
+ ├── weather.rs ◄── request, storage, worldtime, model::{seniverse,open_meteo,holiday}
+ ├── location.rs ◄── request, wifi, mini-json
  ├── worldtime.rs ◄── sntpc, embassy-net, no-std-net
  ├── request.rs ◄── reqwless, embedded-tls
  ├── battery.rs ◄── esp-hal (ADC)
@@ -200,16 +206,20 @@ storage,  data, fat,      ,         128K,      ← FAT 文件系统 (128KB)
 
 ```toml
 [features]
-epd2in9 = []           # 2.9 寸屏幕 (296×128)
+epd2in9 = []           # 2.9 寸屏幕 (296×128) — 仅驱动层适配，页面布局缺失，暂不可编译
+epd2in7 = []           # 2.7 寸屏幕 (264×176)
 epd4in2 = []           # 4.2 寸屏幕 (400×300)
-enable_debug = []      # 启用调试模式（启动时检查错误日志）
-weather-openmeteo = [] # 使用 OpenMeteo 替代心知天气
+enable_debug = []      # 启动时若 Flash 有错误日志则进入调试页
+weather-openmeteo = [] # 天气数据源切换为 Open-Meteo（默认心知天气）
 ```
 
 ```bash
-cargo run --features epd4in2                    # 构建 4.2 寸版本
-cargo run --features "epd4in2,enable_debug"     # 带调试模式
+cargo run --release --features epd4in2               # 构建 4.2 寸版本
+cargo run --release --features epd2in7               # 构建 2.7 寸版本
+cargo run --release --features "epd4in2,enable_debug" # 带调试模式
 ```
+
+> 固件体积已超过 debug 默认配置，必须用 `--release` 才能链接进 3MB factory 分区。`epd2in9` 缺页面布局，暂不可编译。
 
 ### 3.5 核心依赖说明
 
@@ -270,51 +280,56 @@ sntpc = "0.3"
 ```
 src/
 ├── main.rs              # 程序入口，硬件初始化，主循环
-├── panic.rs             # 自定义 panic 处理器
+├── panic.rs             # 自定义 panic 处理器（崩溃写 Flash）
 ├── display.rs           # 电子墨水屏渲染服务（独立 Embassy task）
 ├── event.rs             # 事件系统（按键检测 + 发布-订阅）
 ├── sleep.rs             # 深度睡眠与唤醒管理
 ├── wifi.rs              # WiFi STA/AP 模式（基于 esp-radio）
 ├── worldtime.rs         # NTP 时间同步，Clock 全局时钟
-├── weather.rs           # 天气数据请求与缓存
-├── request.rs           # HTTP/HTTPS 请求客户端
+├── weather.rs           # 天气/节假日数据请求与缓存（双数据源）
+├── location.rs          # 基于 IP 的自动定位（ip-api）
+├── request.rs           # HTTP/HTTPS GET 客户端
 ├── battery.rs           # 电池电压 ADC 采样
 ├── storage.rs           # Flash 持久化存储（NVS 区域）
-├── sd_mount.rs          # SD 卡挂载与文件操作封装
-├── epd2in9_txt.rs       # TXT 文本分页引擎
+├── sd_mount.rs          # SD 卡挂载与文件操作封装（含手动 LFN）
+├── epd2in9_txt.rs       # TXT 文本分页引擎（多屏尺寸）
 ├── flash_sleep.rs       # 待机壁纸的 Flash 存储与渲染
 ├── web_service.rs       # WiFi 配网的 Web 服务
-├── random.rs            # 随机数生成器封装
-├── utils.rs             # 通用工具函数
+├── random.rs            # 硬件 RNG → rand_core 封装
+├── utils.rs             # make_static! 宏
 │
 ├── model/               # 数据模型层
 │   ├── mod.rs
 │   ├── seniverse.rs     # 心知天气 API 数据结构
 │   ├── open_meteo.rs    # Open-Meteo API 数据转换
 │   ├── holiday.rs       # 节假日数据结构
-│   └── lunar.rs         # 农历算法
+│   ├── lunar.rs         # 农历/节气/星座算法
+│   └── stock.rs         # 股票模型（KLine/ChartMode/RealtimeQuote + 解析）
 │
 ├── widgets/             # UI 组件层
 │   ├── mod.rs
 │   ├── icon_grid_widget.rs  # 图标网格菜单
 │   ├── list_widget.rs       # 可滚动列表
-│   ├── weather_icon.rs      # 天气图标渲染
+│   ├── weather_icon.rs      # 天气图标（BMP）
 │   ├── temp_chart.rs        # 温度趋势图
-│   ├── calendar.rs          # 日历组件（含农历）
+│   ├── calendar.rs          # 日历组件（含农历/节气/节假日）
+│   ├── kline.rs             # 股票蜡烛图/折线
 │   ├── qrcode_widget.rs     # 二维码组件
 │   ├── battery.rs           # 电池图标
+│   ├── draw_icon.rs         # 状态图标（wifi/加载/月亮）
 │   └── scroll_bar.rs        # 滚动条
 │
-└── pages/               # 页面层
-    ├── mod.rs               # Page trait 定义，main_task
-    ├── main_page.rs         # 主菜单页面（页面管理器）
-    ├── read_page.rs         # 电子书阅读页面
-    ├── weather_page.rs      # 天气展示页面
-    ├── calendar_page.rs     # 日历页面
+└── pages/               # 页面层（每个子目录含 mod.rs/page.rs/layout*.rs）
+    ├── mod.rs               # Page trait 定义，main_task，PageEnum
+    ├── main_page.rs         # 主菜单页面（页面管理器/默认主页/唤醒回上次页）
+    ├── debug_page.rs        # 错误日志调试页
     ├── image_page.rs        # 图片浏览页面
     ├── setting_page.rs      # 设置/配网页面
-    ├── debug_page.rs        # 调试信息页面
-    └── read_menu_page.rs    # 阅读菜单（占位）
+    ├── read_menu_page.rs    # 占位（todo!()，未使用）
+    ├── read/                # 电子书阅读（layout 按 feature 选尺寸）
+    ├── weather/             # 天气页面（layout_264x176 / layout_400x300）
+    ├── calendar/            # 农历日历页面
+    └── stock/               # 股票页面（layout 单文件不分尺寸）
 ```
 
 ---
@@ -347,7 +362,7 @@ async fn main(spawner: Spawner) -> ! {
 #### 5.1.2 初始化流程
 
 ```
-esp_alloc::heap_allocator!(size: 80 * 1024)  ← 初始化 80KB 全局堆
+esp_alloc::heap_allocator!(size: 64 * 1024)  ← 初始化 64KB 全局堆
   │
 hal_init(HalConfig::default().with_cpu_clock(CpuClock::max()))  ← HAL 初始化
   │
@@ -385,12 +400,13 @@ spawner.spawn(event::run)                 ← 启动事件检测任务
 #### 5.1.3 内存分配器（esp-alloc）
 
 ```rust
-esp_alloc::heap_allocator!(size: 80 * 1024);  // 80KB 堆内存
+esp_alloc::heap_allocator!(size: 64 * 1024);  // 64KB 堆内存
 ```
 
 **与旧版差异：**
 - 旧版使用 `embedded-alloc` + 手动 `unsafe { ALLOCATOR.init(...) }` 初始化
-- 新版使用 `esp-alloc` 宏一行搞定，堆大小从 38KB 增至 80KB
+- 新版使用 `esp-alloc` 宏一行搞定
+- 堆大小现为 64KB（HTTP/TLS 大缓冲已移至 `.bss`，由 `WIFI_LOCK` 串行化独占，故不必占堆）
 - `esp-alloc` 自动管理 ESP32-C3 的内存区域，更安全可靠
 
 #### 5.1.4 HAL 初始化
@@ -545,14 +561,19 @@ pub async fn render(
 
 #### 5.2.6 刷新策略
 
-电子墨水屏有局部刷新（Quick）和全刷（Full）两种模式，系统每 5 次局部刷新后强制全刷一次：
+电子墨水屏有局部刷新（Quick）和全刷（Full）两种模式。每 N 次快刷后强制全刷一次清残影：N 的平台默认值是常量（`epd2in7` 为 20，其余为 5），但可在运行时被设置页 / Web 配置覆盖（`DisplayStorage.full_refresh_times`，`reload_full_refresh_times()` 钳制到 `1..=100`）：
 
 ```rust
-const FORCE_FULL_REFRESH_TIMES: u32 = 5;
-if get_render_times() % FORCE_FULL_REFRESH_TIMES == 0 && refresh_lut == RefreshLut::Quick {
+// 非 epd2in7 路径
+let need_clear = take_need_clear();   // 冷启动首帧为 true（rtc_fast）
+let need_force_full = (get_render_times() % get_full_refresh_times() == 0 || need_clear)
+    && refresh_lut == RefreshLut::Quick;
+if need_force_full {
     spi_device = set_refresh_mode(RefreshLut::Full, &mut epd, spi_device);
 }
 ```
+
+2.7 寸屏（`epd2in7`）路径不同：用 `PREV_BUFFER`（5808B）保存上一帧做差分，唤醒/首帧用 `set_base_map_quiet` 静默过渡，常规帧走 `update_and_display_frame_partial`，周期性 `set_base_map` 全刷。`RENDER_TIMES`、`NEED_CLEAR`、`PREV_BUFFER` 均在 rtc_fast，深睡唤醒后保留。
 
 ### 5.3 event.rs — 事件系统
 
@@ -564,11 +585,11 @@ if get_render_times() % FORCE_FULL_REFRESH_TIMES == 0 && refresh_lut == RefreshL
 pub enum EventType {
     KeyShort(u32),       // 短按
     KeyLongStart(u32),   // 长按开始
-    KeyLongIng(u32),     // 长按持续中
+    KeyLongIng(u32),     // 长按持续中（节流为每 100ms 派发一次，避免 ~1kHz 空转耗电）
     KeyLongEnd(u32),     // 长按释放
     KeyDouble(u32),      // 双击
-    WheelBack,           // 滚轮后退
-    WheelFront,          // 滚轮前进
+    WheelBack,           // 滚轮后退（预留）
+    WheelFront,          // 滚轮前进（预留）
 }
 ```
 
@@ -781,17 +802,21 @@ pub fn write_flash(flash_addr: u32, bytes: &[u8]) -> Result<(), FlashStorageErro
 
 ```
 NVS 分区 (0x9000 起始)
-  ├── VersionStorage     偏移 +0x00     版本号 + 初始化标记 (0x1234abcb)
+  ├── VersionStorage     偏移 +0x00     版本号 + 初始化标记 (0x1234_abce)
   ├── WifiStorage        偏移 +sizeof    WiFi SSID + 密码 + 配置完成标记
-  ├── WeatherStorage     偏移 +sizeof    天气 API Key + 缓存数据
-  ├── SleepStorage       偏移 +sizeof    睡眠超时配置
-  ├── OtherStorage       偏移 +sizeof    保留
-  ├── HolidayStorage     偏移 +sizeof    节假日缓存数据
-  └── ErrorLogStorage    偏移 +sizeof    错误计数 + 最后错误信息
+  ├── WeatherStorage     偏移 +sizeof    天气 token + 城市 + 同步时间 + 缓存数据
+  ├── SleepStorage       偏移 +sizeof    阅读睡眠 / 天气睡眠时长
+  ├── OtherStorage       偏移 +sizeof    复用：首字符存默认主页(1=天气/2=日历/3=股票)
+  ├── HolidayStorage     偏移 +sizeof    节假日 token + 同步时间 + 缓存数据
+  ├── ErrorLogStorage    偏移 +sizeof    错误计数 + 最后错误信息
+  ├── StockStorage       偏移 +sizeof    最多 5 对 (代码,名称) + count + selected
+  └── DisplayStorage     偏移 +sizeof    全刷间隔 (0=未配置，display 侧 clamp)
 
 Storage 分区 (0x310000 起始)
   └── 待机壁纸图片       8 字节头 + 像素数据
 ```
+
+`StockStorage` 与 `DisplayStorage` 是后加的，追加在末尾、不动既有偏移，因此无需改 `INIT_TAG`——旧固件留下的原始字节由使用方钳制。
 
 #### 5.5.3 序列化与宏
 
@@ -881,6 +906,12 @@ if ts > 1577836800 && ts < 4102444800 {  // 2020-2100 范围
 
 旧版直接使用 `unwrap()`，新版增加了时间戳范围验证。
 
+其它要点：
+- NTP 服务器池 `["ntp.aliyun.com", "ntp.tuna.tsinghua.edu.cn", "ntp1.aliyun.com"]` 循环遍历，**DNS 失败即切下一台**，越界才返回错误（不再单点卡死）。
+- `TimestampGen::timestamp_sec()` 必须返回 UNIX 秒（sntpc 内部再加 NTP 纪元差），误用微秒会让 roundtrip/offset 失真。
+- `ntp_worker` 默认每小时对时一次，失败退避（避免每秒空转耗电），且对时成功后联动同步天气与节假日。
+- `CLOCK_RESTORED_THIS_BOOT`（普通内存，每次开机复位）与 `CLOCK_SYNC_TIME_SECOND`（rtc_fast）区分：界面显示时间应基于前者，避免唤醒瞬间 Clock 实例仍是 `UNIX_EPOCH` 显示成 1970。
+
 ### 5.8 request.rs — HTTP 客户端
 
 **文件路径：** `src/request.rs`
@@ -907,7 +938,7 @@ pub struct RequestClient {
 static mut LAST_BATTERY_PERCENT: u32 = 0;
 ```
 
-核心逻辑不变，RTC 内存属性更新为 `#[ram(unstable(rtc_fast))]`。
+每 60 秒采样一次（`voltage = adc × 2`，分压系数；电量用平方曲线映射）。ESP32-C3 的 `read_oneshot` 在冷启动 / 通道切换时经常返回 `Err`，因此采用**出错重试、超限放弃**的策略：最多重试 50 次，期间保留上一次电量；超限才跳过本轮，避免死循环 + 持锁。`LAST_BATTERY_PERCENT` 镜像到 rtc_fast，供 `sleep_renderer` 在渲染路径里同步读取（不必锁 Mutex）。
 
 ### 5.10 panic.rs — 自定义异常处理
 
@@ -933,16 +964,15 @@ fn panic_handler(info: &PanicInfo) -> ! {
 
 ### 5.11 其余模块
 
-以下模块核心逻辑未变，仅因 API 升级做了适配：
-
-| 模块 | 主要变化 |
-|------|---------|
-| `epd2in9_txt.rs` | SD 卡类型适配 |
-| `sd_mount.rs` | embedded-sdmmc API 适配 |
-| `flash_sleep.rs` | `storage::read_flash/write_flash` 内部使用 `FLASH::steal()` |
-| `web_service.rs` | `Stack<'static>` 类型简化 |
-| `weather.rs` | 无重大变化 |
-| `random.rs` | 无变化 |
+| 模块 | 说明 |
+|------|------|
+| `location.rs` | **新增**。基于 IP 的自动定位：请求 `ip-api.com`（明文 HTTP）反查城市与经纬度，产出 `"lat:lon"` 供心知天气查询。走标准 `use_wifi` 三段式 |
+| `weather.rs` | 双数据源（`weather-openmeteo` feature 切换）；`request()` 统一入口；含节假日同步（`HolidayInfo`，最多重试 3 次、失败冷却 60s）；rtc_fast 跨深睡标志 |
+| `epd2in9_txt.rs` | TXT 分页引擎，按 feature 给出 2.9/2.7/4.2 三套 `LINES_NUM/WIDTH/HEIGHT` |
+| `sd_mount.rs` | embedded-sdmmc 封装；**手动实现 FAT32 LFN 目录项写入**以支持中文书名；按短名派生 `.idx/.log` |
+| `flash_sleep.rs` | 待机壁纸 Flash 存储（魔数 `"SLEP"` + 崩溃安全写入）；BMP→1bit 转换（ITU-R BT.601 灰度） |
+| `web_service.rs` | 配网 Web 服务（见 5.4.5）；表单支持 20 字段、按 Content-Length 跨分段读 body |
+| `random.rs` | `esp_hal::rng::Rng` → `rand_core::RngCore + CryptoRng` 封装，供 TLS/二维码使用 |
 
 ---
 
@@ -955,7 +985,8 @@ fn panic_handler(info: &PanicInfo) -> ! {
 | `seniverse.rs` | 心知天气 API 数据结构，风向转换，蒲福风级 |
 | `open_meteo.rs` | Open-Meteo API 数据转换（WMO → 心知天气格式） |
 | `holiday.rs` | 节假日数据结构（含日期、名称、是否休息日） |
-| `lunar.rs` | 农历算法（1900-2100 预计算数据，支持闰月） |
+| `lunar.rs` | 农历/节气/星座算法（1900-2100 预计算数据，支持闰月） |
+| `stock.rs` | 股票模型：`KLine`/`ChartMode`(6 模式环形)/`RealtimeQuote`，新浪 K 线与腾讯盘口解析、URL 构造、价格格式化 |
 
 ---
 
@@ -969,12 +1000,14 @@ fn panic_handler(info: &PanicInfo) -> ! {
 |------|------|------|
 | IconGridWidget | `icon_grid_widget.rs` | 图标网格菜单（主页面） |
 | ListWidget | `list_widget.rs` | 可滚动列表（书签、文件列表） |
-| Calendar | `calendar.rs` | 日历网格（公历+农历+节假日） |
-| WeatherIcon | `weather_icon.rs` | 天气图标（31 种天气类型，32×32 BMP） |
+| Calendar | `calendar.rs` | 日历网格（公历+农历+节气+节假日） |
+| WeatherIcon | `weather_icon.rs` | 天气图标（约 20 种天气类型，32×32 BMP） |
 | TempChart | `temp_chart.rs` | 温度趋势折线图（高/低温双线） |
+| KLine | `kline.rs` | 股票蜡烛图/折线（涨跌空心/实心、窗口截断） |
 | QrcodeWidget | `qrcode_widget.rs` | 二维码生成与显示 |
 | Battery | `battery.rs` | 电池图标 + 百分比 |
-| ScrollBar | `scroll_bar.rs` | 滚动条（水平/垂直） |
+| draw_icon | `draw_icon.rs` | 状态图标（wifi / 加载中 / 月亮） |
+| ScrollBar | `scroll_bar.rs` | 滚动条（水平/垂直，被 ListWidget 使用） |
 
 ---
 
@@ -1005,6 +1038,7 @@ MainPage.run()
             EReadPage → ReadPage::new().bind_event().run()
             EWeatherPage → WeatherPage::new().bind_event().run()
             ECalendarPage → CalendarPage::new().bind_event().run()
+            EStockPage → StockPage::new().bind_event().run()
             EImageListPage → ImagePage::new().bind_event().run()
             ESettingPage → SettingPage::new().bind_event().run()
             EDebugPage → DebugPage::new().bind_event().run()
@@ -1016,12 +1050,13 @@ MainPage.run()
 
 | 页面 | 按键映射 | 主要功能 |
 |------|---------|---------|
-| **MainPage** | Key1/2 上下，Key3 确认 | 图标网格菜单导航 |
-| **ReadPage** | Key1 上页，Key2 下页，Key3 菜单 | 电子书阅读、书签、跳页 |
-| **WeatherPage** | 自动定时刷新 | 天气概览、7 日预报、温度曲线 |
-| **CalendarPage** | Key1/2 长按切月，短按刷新 | 日历、农历、节假日 |
-| **ImagePage** | Key1/2 选择，Key3 查看/菜单 | BMP 图片浏览和壁纸设置 |
-| **SettingPage** | Key1/2 调整，Key3 确认 | WiFi 配网、睡眠时间、重置 |
+| **MainPage** | Key1/2 上下，Key3 确认 | 图标网格菜单导航；冷启动进默认主页、唤醒回上次页（rtc_fast） |
+| **ReadPage** | Key1 上页，Key2 下页，Key3 菜单 | 电子书阅读、书签、跳页（长按加速）、旋转、重建索引 |
+| **WeatherPage** | Key1 刷天气，Key2 刷节假日，Key3 退出 | 天气概览、5 日预报、温度曲线；60s 定时唤醒刷新 |
+| **CalendarPage** | Key1/2 长按切月，Key3 回本月，短按刷新 | 日历、农历、节气、节假日（休/班） |
+| **StockPage** | Key1/2 切图模式，Key3 返回，长按1/2 切股票，长按3 刷新 | 分时/日K/周K/月K/折线/盘口；实时模式 120s、其它 12h 唤醒刷新 |
+| **ImagePage** | Key1/2 选择，Key3 查看/菜单 | BMP 图片浏览和壁纸设置（仅 4.2 寸） |
+| **SettingPage** | Key1/2 调整，Key3 确认 | 睡眠时长、自动定位、web 配置、股票选择、默认主页、全刷次数、重置 |
 | **DebugPage** | Key3 退出，Key1 长按清除 | 错误日志查看 |
 
 ---
@@ -1130,8 +1165,8 @@ ntp_worker / weather 触发 → use_wifi() (加锁) → 获取 Stack
 ```
 ESP32-C3 内存 (~400KB SRAM)
   │
-  ├── 全局堆 (80KB)          esp-alloc 宏自动管理
-  │     esp_alloc::heap_allocator!(size: 80 * 1024)
+  ├── 全局堆 (64KB)          esp-alloc 宏自动管理
+  │     esp_alloc::heap_allocator!(size: 64 * 1024)
   │     用于 Vec, String, Box 等动态分配
   │
   ├── Embassy 任务栈          由 executor 自动分配
@@ -1285,15 +1320,14 @@ rustup target add riscv32imc-unknown-none-elf
 # 安装 espflash
 cargo install espflash
 
-# 构建 2.9 寸版本
-cargo build --features epd2in9
+# 构建并烧录 4.2 寸版本（.cargo/config.toml 已配置 espflash 为 runner）
+cargo run --release --features epd4in2
 
-# 构建并烧录
-cargo run --features epd2in9
+# 构建 2.7 寸版本
+cargo run --release --features epd2in7
 
-# 构建 4.2 寸版本
-cargo run --features epd4in2
-
-# 带调试模式
-cargo run --features "epd4in2,enable_debug"
+# 带调试模式（启动时若 Flash 有错误日志则进入调试页）
+cargo run --release --features "epd4in2,enable_debug"
 ```
+
+> 必须用 `--release`（`[profile.release] opt-level = "s"`），否则 `.text` 会溢出 3MB factory 分区。`epd2in9` 缺天气/日历页面布局，暂不可编译。
