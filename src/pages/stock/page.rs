@@ -43,20 +43,20 @@ impl StockPage {
     }
 
     /// 切换 分时/日K/周K/月K/折线（forward=true 下一个，false 上一个）。
-    /// 若新旧模式同数据源（日K↔折线），只换渲染方式不重新请求；否则清空数据触发重新请求。
-    fn switch_mode(&mut self, forward: bool) {
+    /// 返回是否跨数据源（跨源需重新请求；同源如 日K↔折线 只换渲染方式）。
+    /// 不清空 data：拉取期间保留旧数据用于显示（参考天气页），新数据回来后再替换。
+    fn switch_mode(&mut self, forward: bool) -> bool {
         let old_source = self.mode.source();
         let new_mode = if forward { self.mode.next() } else { self.mode.prev() };
         let new_source = new_mode.source();
-        if new_source != old_source {
-            self.data = None;
-        }
         self.mode = new_mode;
         unsafe { *core::ptr::addr_of_mut!(STOCK_MODE) = new_mode.encode(); }
+        new_source != old_source
     }
 
-    /// 切换查询的股票（长按1/2）。更新 StockStorage.selected 并触发重新拉取。
-    fn switch_stock(&mut self, forward: bool) {
+    /// 切换查询的股票（长按1/2）。更新 StockStorage.selected；返回是否实际切换。
+    /// 不清空 data：保留旧股票数据用于拉取期间显示。
+    fn switch_stock(&mut self, forward: bool) -> bool {
         let mut ss = crate::storage::StockStorage::read().unwrap_or_default();
         if ss.count > 1 {
             let c = ss.count as usize;
@@ -64,16 +64,20 @@ impl StockPage {
             let nxt = if forward { (cur + 1) % c } else { (cur + c - 1) % c };
             ss.selected = nxt as u8;
             let _ = ss.write();
-            self.data = None;
+            true
+        } else {
+            false
         }
     }
 
+    /// 拉取当前模式数据。先整屏重绘显示加载状态（有旧数据则显示旧图表 + 加载图标，
+    /// 参考天气页；无数据——如深睡唤醒/首次进入——则空白 + 加载图标），完成后整屏重绘新数据。
     async fn fetch(&mut self) {
-        // 先设加载标志，确保渲染时右上角加载图标可见
         crate::wifi::set_request_loading(true);
         self.loading = true;
         self.need_render = true;
         self.render().await;
+
         // 读 web 配置的股票（选中那支）；未配置则用默认 sh600519
         let code_storage = crate::storage::StockStorage::read().unwrap_or_default();
         let (code, name) = if code_storage.count > 0 {
@@ -91,7 +95,10 @@ impl StockPage {
                 self.err_msg = Some(msg);
             }
         }
+        // 无论成败请求都已结束：复位加载标志，避免 wifi 失败时图标残留。
+        crate::wifi::set_request_loading(false);
         self.loading = false;
+        // 完成后整屏重绘（run 循环消费 need_render）。
         self.need_render = true;
     }
 }
@@ -162,7 +169,7 @@ impl Page for StockPage {
         self.mode = ChartMode::decode(unsafe { *core::ptr::addr_of!(STOCK_MODE) });
         crate::display::set_sleep_renderer(Some(super::sleep_renderer));
         refresh_active_time().await;
-        // 进入即拉取一次当前模式
+        // 进入即拉取一次当前模式（唤醒/首次进入：无旧数据，显示空白 + 加载图标）
         self.fetch().await;
         loop {
             if !self.running {
@@ -171,10 +178,7 @@ impl Page for StockPage {
             // 耗时的拉取/重绘放这里执行（回调只置标志），fetch 期间按键仍可响应。
             if self.need_fetch {
                 self.need_fetch = false;
-                // 全刷过渡清残影，send 顺序与原回调一致。
-                crate::display::QUICKLY_LUT_CHANNEL.send(false).await;
                 self.fetch().await;
-                crate::display::QUICKLY_LUT_CHANNEL.send(true).await;
             } else if self.need_clean_render {
                 self.need_clean_render = false;
                 crate::display::QUICKLY_LUT_CHANNEL.send(false).await;
@@ -191,7 +195,14 @@ impl Page for StockPage {
             // 深睡唤醒 = 重启，重启后重新进入页面时的初始 fetch() 即完成刷新；
             // 模式经 rtc_fast(STOCK_MODE) 跨重启保留，故下次入睡时长仍正确。
             let sleep_secs: u64 = if self.mode.is_realtime() { 120 } else { 12 * 3600 };
-            to_sleep_tips(Duration::from_secs(sleep_secs), Duration::from_secs(30), true).await;
+            // 空闲多久入睡复用配置「天气睡眠时间」，与天气/日历页一致。
+            let sleep_storage = crate::storage::SleepStorage::read().unwrap_or_default();
+            let idle_secs = if sleep_storage.weather_sleep_seconds > 0 {
+                sleep_storage.weather_sleep_seconds
+            } else {
+                5
+            };
+            to_sleep_tips(Duration::from_secs(sleep_secs), Duration::from_secs(idle_secs), true).await;
             Timer::after(Duration::from_millis(50)).await;
         }
         crate::display::set_sleep_renderer(None);
@@ -203,11 +214,10 @@ impl Page for StockPage {
         event::on_target(EventType::KeyShort(1), Self::mut_to_ptr(self), move |info| {
             Box::pin(async move {
                 let mut_ref: &mut Self = Self::mut_by_ptr(info.ptr).unwrap();
-                mut_ref.switch_mode(false);
-                if mut_ref.data.is_none() {
-                    mut_ref.need_fetch = true;
+                if mut_ref.switch_mode(false) {
+                    mut_ref.need_fetch = true;       // 跨源：重新请求（保留旧数据用于显示）
                 } else {
-                    mut_ref.need_clean_render = true;
+                    mut_ref.need_clean_render = true; // 同源：仅重渲染
                 }
             })
         }).await;
@@ -215,8 +225,7 @@ impl Page for StockPage {
         event::on_target(EventType::KeyShort(2), Self::mut_to_ptr(self), move |info| {
             Box::pin(async move {
                 let mut_ref: &mut Self = Self::mut_by_ptr(info.ptr).unwrap();
-                mut_ref.switch_mode(true);
-                if mut_ref.data.is_none() {
+                if mut_ref.switch_mode(true) {
                     mut_ref.need_fetch = true;
                 } else {
                     mut_ref.need_clean_render = true;
@@ -227,8 +236,7 @@ impl Page for StockPage {
         event::on_target(EventType::KeyLongEnd(1), Self::mut_to_ptr(self), move |info| {
             Box::pin(async move {
                 let mut_ref: &mut Self = Self::mut_by_ptr(info.ptr).unwrap();
-                mut_ref.switch_stock(false);
-                if mut_ref.data.is_none() {
+                if mut_ref.switch_stock(false) {
                     mut_ref.need_fetch = true;
                 }
             })
@@ -237,8 +245,7 @@ impl Page for StockPage {
         event::on_target(EventType::KeyLongEnd(2), Self::mut_to_ptr(self), move |info| {
             Box::pin(async move {
                 let mut_ref: &mut Self = Self::mut_by_ptr(info.ptr).unwrap();
-                mut_ref.switch_stock(true);
-                if mut_ref.data.is_none() {
+                if mut_ref.switch_stock(true) {
                     mut_ref.need_fetch = true;
                 }
             })
