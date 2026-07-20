@@ -166,7 +166,7 @@ targets = ["riscv32imc-unknown-none-elf"]
 ```
 
 **说明：**
-- ESP32-C3 使用 RISC-V 32 位指令集（`riscv32imc`），没有 MMU，不支持标准操作系统
+- ESP32-C3 使用 RISC-V 32 位指令集（`riscv32imc`），无 MMU，跑不了 Linux 这类标准操作系统。不过 Rust 仍可用 ESP-IDF 的 std 模式（`riscv32imc-esp-espidf`）或 esp-hal 裸机模式；本项目选后者，所以目标是 `riscv32imc-unknown-none-elf`
 - 需要 nightly Rust 以使用 `generic_const_exprs`、`type_alias_impl_trait` 等不稳定特性
 - esp-hal v1.x 对 nightly 兼容性更好，不再需要锁定特定日期版本
 
