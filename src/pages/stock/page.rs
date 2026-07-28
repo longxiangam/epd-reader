@@ -268,7 +268,10 @@ impl Page for StockPage {
 }
 
 async fn fetch_stock(mode: ChartMode, code: &str, name: &str) -> Result<Box<StockData>, &'static str> {
-    let stack = crate::wifi::use_wifi().await.map_err(|_| "wifi连接失败")?;
+    let stack = crate::wifi::use_wifi().await.map_err(|e| {
+        println!("stock use_wifi err: {:?}", e);
+        wifi_err_msg(e)
+    })?;
     crate::wifi::set_request_loading(true);
     let mut req = RequestClient::new(stack).await;
 
@@ -304,5 +307,16 @@ fn reason_of(e: &RequestError) -> &'static str {
         RequestError::UnsupportedScheme => "不支持协议",
         RequestError::PortParse(_) => "端口错误",
         _ => "请求失败",
+    }
+}
+
+/// use_wifi 失败的具体原因（对应 wifi.rs::WifiNetError 各分支）。
+fn wifi_err_msg(e: crate::wifi::WifiNetError) -> &'static str {
+    use crate::wifi::WifiNetError::*;
+    match e {
+        WaitConnecting => "wifi启动超时", // REINIT 后连接任务 3s 内未就绪
+        TimeOut => "wifi连接超时",        // 等锁或等链路 up 超过 10s
+        Infallible => "wifi未就绪",       // 未拿到网络栈（IP 尚未获取）
+        Using => "wifi忙",                // 当前未产生
     }
 }

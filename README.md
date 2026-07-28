@@ -52,7 +52,7 @@
 | 组件 | 规格 |
 |------|------|
 | MCU | ESP32-C3 (RISC-V, 160MHz, 400KB SRAM, 4MB Flash) |
-| 显示屏 | Waveshare 4.2" (400×300) 或 2.7" (264×176) 电子墨水屏 |
+| 显示屏 | Waveshare 4.2" (400×300) / 2.7" (264×176) / 2.9" (296×128) 电子墨水屏 |
 | 存储 | MicroSD 卡 (≤32GB, SD/SDHC, MBR 分区) |
 | 输入 | 按键 ×3 (其中一个通过 ADC 分压实现两键) |
 | 电源 | 锂电池 + ADC 电压检测 |
@@ -85,11 +85,14 @@ cargo run --release --features epd4in2
 # 构建 2.7 寸版本
 cargo run --release --features epd2in7
 
+# 构建 2.9 寸版本（天气/日历页为 296×128 横屏适配，视觉未精细调整）
+cargo run --release --features epd2in9
+
 # 带调试模式（启动时若 Flash 有错误日志则进入调试页）
 cargo run --release --features "epd4in2,enable_debug"
 ```
 
-> 目前可正常构建的是 `epd4in2` 与 `epd2in7`。`epd2in9` 仅在驱动层（`display.rs`/`epd2in9_txt.rs`）保留了类型适配，但天气页、日历页缺 128×296 布局文件，编译会失败，暂不可用。
+> 三个尺寸都能编译。`epd2in9` 的天气/日历页布局是按 296×128 横屏适配的，功能正常但排版未针对该尺寸精细调整。
 
 `weather-openmeteo` feature 可切换天气数据源为 Open-Meteo（默认用心知天气 Seniverse）：
 

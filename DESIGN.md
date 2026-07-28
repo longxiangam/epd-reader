@@ -52,7 +52,7 @@ epd-reader 是一个运行在 **ESP32-C3** 上的嵌入式电子墨水屏（E-Pa
 | 组件 | 型号/规格 |
 |------|-----------|
 | MCU | ESP32-C3 (RISC-V, 160MHz, 400KB SRAM) |
-| 显示屏 | Waveshare 4.2" (400×300) 或 2.7" (264×176) 电子墨水屏（2.9" 驱动层有适配但页面布局缺失，暂不可用） |
+| 显示屏 | Waveshare 4.2" (400×300) / 2.7" (264×176) / 2.9" (296×128) 电子墨水屏（2.9" 天气/日历页为横屏适配，排版未精细调整） |
 | 存储 | MicroSD 卡（通过 SPI 连接，≤32GB SD/SDHC，MBR 分区） |
 | Flash | 内置 4MB Flash |
 | 输入 | 按键 ×3（GPIO9 独立键 + GPIO2 经 ADC 分压实现两键） |
@@ -206,7 +206,7 @@ storage,  data, fat,      ,         128K,      ← FAT 文件系统 (128KB)
 
 ```toml
 [features]
-epd2in9 = []           # 2.9 寸屏幕 (296×128) — 仅驱动层适配，页面布局缺失，暂不可编译
+epd2in9 = []           # 2.9 寸屏幕 (296×128) — 天气/日历页为横屏适配，排版未精细调整
 epd2in7 = []           # 2.7 寸屏幕 (264×176)
 epd4in2 = []           # 4.2 寸屏幕 (400×300)
 enable_debug = []      # 启动时若 Flash 有错误日志则进入调试页
@@ -219,7 +219,7 @@ cargo run --release --features epd2in7               # 构建 2.7 寸版本
 cargo run --release --features "epd4in2,enable_debug" # 带调试模式
 ```
 
-> 固件体积已超过 debug 默认配置，必须用 `--release` 才能链接进 3MB factory 分区。`epd2in9` 缺页面布局，暂不可编译。
+> 固件体积已超过 debug 默认配置，必须用 `--release` 才能链接进 3MB factory 分区。`epd2in9` 的天气/日历页是按 296×128 横屏适配的，功能正常但排版未精细调整。
 
 ### 3.5 核心依赖说明
 
@@ -1330,4 +1330,4 @@ cargo run --release --features epd2in7
 cargo run --release --features "epd4in2,enable_debug"
 ```
 
-> 必须用 `--release`（`[profile.release] opt-level = "s"`），否则 `.text` 会溢出 3MB factory 分区。`epd2in9` 缺天气/日历页面布局，暂不可编译。
+> 必须用 `--release`（`[profile.release] opt-level = "s"`），否则 `.text` 会溢出 3MB factory 分区。
