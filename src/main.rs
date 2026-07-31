@@ -27,6 +27,10 @@ mod panic;
 mod web_service;
 mod flash_sleep;
 mod location;
+#[cfg(feature = "ttf_spike")]
+mod ttf_spike;
+#[cfg(feature = "ttf_spike")]
+mod ttf_sd;
 
 extern crate alloc;
 use core::cell::RefCell;
@@ -78,9 +82,16 @@ esp_bootloader_esp_idf::esp_app_desc!();
 
 #[esp_rtos::main]
 async fn main(spawner: Spawner) -> ! {
-    // 请求缓冲已移至 .bss（request.rs 的静态数组），堆无需再容纳那 25KB，
-    // 故从 90KB 降到 64KB，把静态内存让给 .bss/栈，避免 SRAM 溢出挤占主栈。
+    // 请求缓冲已移至 .bss（request.rs 的静态数组），堆无需再容纳那 25KB。
+    // ttf_spike 下不连 WiFi（阅读/联网互斥），堆可大幅缩小，把 SRAM 让给主栈
+    // （矢量渲染的 async 状态机占栈较大，需要更大的主栈才不溢出）。
+    #[cfg(feature = "ttf_spike")]
+    esp_alloc::heap_allocator!(size: 32 * 1024);
+    #[cfg(not(feature = "ttf_spike"))]
     esp_alloc::heap_allocator!(size: 64 * 1024);
+
+    // TTF spike：基准 run() 会阻塞启动数秒，暂不在 boot 调用；
+    // 改为在主页直接渲染矢量字做端到端验证（见 main_page render）。
 
     println!("entry");
     let config = HalConfig::default().with_cpu_clock(CpuClock::max());
@@ -236,12 +247,17 @@ async fn main(spawner: Spawner) -> ! {
         Timer::after_millis(10).await;
         spawner.spawn(pages::main_task(spawner.clone()).unwrap());
 
-        WIFI_MODEL.lock().await.replace(WifiModel::STA);
-        let _stack = crate::wifi::connect_wifi(
-            &spawner,
-            Rng::new(),
-            peripherals.WIFI,
-        ).await;
+        // ttf_spike：开机不连 WiFi，让渲染纯离线跑（阅读/联网互斥的最简形态）。
+        // 避免 force_stop 中途打断连接导致 esp-radio 驱动（pmksa）空指针崩溃。
+        #[cfg(not(feature = "ttf_spike"))]
+        {
+            WIFI_MODEL.lock().await.replace(WifiModel::STA);
+            let _stack = crate::wifi::connect_wifi(
+                &spawner,
+                Rng::new(),
+                peripherals.WIFI,
+            ).await;
+        }
     }
 
     loop {

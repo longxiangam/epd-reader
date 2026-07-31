@@ -74,6 +74,15 @@ pub struct ReadPage {
     exit_selected: bool,
     jump_accel: u32,
     book_progress: Vec<String<16>, 40>,
+    /// run() 里 books_dir 的裸指针（绕过 Page::render 无参 trait 限制，供 TTF 渲染打开字体）。
+    /// 仅在 run() 作用域内有效（设置于打开 books_dir 后、退出前置空）。
+    books_dir_ptr: *mut ActualDirectory<'static>,
+    /// TTF 动态分页状态（ttf_spike 路径）：按字节偏移即时分页。
+    ttf_offset: u32,
+    ttf_end: u32,
+    ttf_file_len: u32,
+    ttf_hist: Vec<u32, 32>,
+    ttf_px: f32,
 }
 
 impl ReadPage {
@@ -150,6 +159,15 @@ impl ReadPage {
         }
 
         self.book_pages = book_pages;
+
+        // TTF 动态分页：打开/换书时重置到开头
+        #[cfg(feature = "ttf_spike")]
+        {
+            self.ttf_offset = 0;
+            self.ttf_end = 0;
+            self.ttf_file_len = file_len;
+            self.ttf_hist.clear();
+        }
     }
 
     async fn get_log_vec(&mut self, books_dir: &mut ActualDirectory<'_>) {
@@ -259,6 +277,25 @@ impl ReadPage {
 
     async fn do_change_page(&mut self, page_index: u32) {
         if self.book_pages.is_none() { return; }
+
+        // TTF 动态分页：按字节偏移翻页，绕过 page_index/.idx。调用方传 page_index±1
+        // 来区分下一页/上一页（加速长按也只翻一页；跳页/书签在 ttf 路径暂不可用）。
+        #[cfg(feature = "ttf_spike")]
+        if self.reading {
+            if page_index > self.page_index {
+                if self.ttf_end < self.ttf_file_len {
+                    let _ = self.ttf_hist.push(self.ttf_offset);
+                    self.ttf_offset = self.ttf_end;
+                }
+            } else if page_index < self.page_index {
+                if let Some(prev) = self.ttf_hist.pop() {
+                    self.ttf_offset = prev;
+                    self.ttf_end = prev;
+                }
+            }
+            self.need_render = true;
+            return;
+        }
 
         if page_index >= self.book_pages.as_ref().unwrap().total_page {
             self.page_index = self.book_pages.as_ref().unwrap().total_page;
@@ -577,10 +614,17 @@ impl ReadPage {
     }
 
     fn render_progress(&self, display: &mut crate::display::EpdDisplay) {
-        if let Some(ref bp) = self.book_pages {
-            let total = bp.total_page;
+        if self.book_pages.is_some() {
+            // ttf 路径用字节偏移百分比；否则用页码
+            #[cfg(feature = "ttf_spike")]
+            let (total, current) = (self.ttf_file_len, self.ttf_offset.min(self.ttf_file_len));
+            #[cfg(not(feature = "ttf_spike"))]
+            let (total, current) = {
+                let total = self.book_pages.as_ref().unwrap().total_page;
+                let current = if self.page_index > total { total } else { self.page_index };
+                (total, current)
+            };
             if total == 0 { return; }
-            let current = if self.page_index > total { total } else { self.page_index };
             let vw = super::visual_width();
             let vh = super::visual_height();
             let bar_height: u32 = 3;
@@ -642,6 +686,12 @@ impl Page for ReadPage {
             exit_selected: false,
             jump_accel: 0,
             book_progress: Vec::new(),
+            books_dir_ptr: core::ptr::null_mut(),
+            ttf_offset: 0,
+            ttf_end: 0,
+            ttf_file_len: 0,
+            ttf_hist: Vec::new(),
+            ttf_px: 20.0,
         };
 
         unsafe {
@@ -729,7 +779,13 @@ impl Page for ReadPage {
                         let font = font.with_ignore_unknown_chars(true);
                         display.clear_buffer(Color::White);
                         {
-                            if self.page_index == self.book_pages.as_ref().unwrap().total_page {
+                            #[cfg(feature = "ttf_spike")]
+                            let is_last =
+                                self.ttf_file_len > 0 && self.ttf_offset >= self.ttf_file_len;
+                            #[cfg(not(feature = "ttf_spike"))]
+                            let is_last =
+                                self.page_index == self.book_pages.as_ref().unwrap().total_page;
+                            if is_last {
                                 let _ = font.render_aligned(
                                     "已是最后一页",
                                     center,
@@ -739,6 +795,81 @@ impl Page for ReadPage {
                                     display,
                                 );
                             } else {
+                                #[cfg(feature = "ttf_spike")]
+                                {
+                                    // TTF 动态分页：读 .txt 一页字节 → 用字体即时分页+渲染
+                                    let mut drew = false;
+                                    if !self.books_dir_ptr.is_null() {
+                                        let bd: &mut ActualDirectory<'_> =
+                                            unsafe { &mut *self.books_dir_ptr };
+                                        let book_name = self.menus.as_ref().unwrap()
+                                            [self.choose_index as usize].clone();
+                                        let file_name = format!("{}.txt", book_name);
+                                        let mut consumed = 0usize;
+                                        let mut font_ok = false;
+                                        let short_name =
+                                            crate::sd_mount::SdMount::find_entry_by_name(bd, &file_name)
+                                                .map(|e| e.name);
+                                        let mut n = 0usize;
+                                        if let Some(sn) = short_name {
+                                            if let Ok(mut bf) = bd.open_file_in_dir(
+                                                sn,
+                                                embedded_sdmmc::Mode::ReadOnly,
+                                            ) {
+                                                n = crate::ttf_sd::read_book_chunk(
+                                                    &mut bf, self.ttf_offset,
+                                                );
+                                                bf.close();
+                                            }
+                                        }
+                                        // bf 已关闭、bd 释放后再开字体（避免两个文件同时借 books_dir）
+                                        if n > 0 {
+                                            if let Ok(mut ff) =
+                                                crate::sd_mount::SdMount::open_file_by_name(
+                                                    bd,
+                                                    "font.ttf",
+                                                    embedded_sdmmc::Mode::ReadOnly,
+                                                )
+                                            {
+                                                if let Some(fi) = crate::ttf_sd::open_font(&mut ff)
+                                                {
+                                                    let line_h = self.ttf_px as i32 + 4;
+                                                    let max_lines = ((super::visual_height() as i32
+                                                        - super::PROGRESS_AREA_HEIGHT as i32
+                                                        - 4)
+                                                        / line_h) as u32;
+                                                    consumed = crate::ttf_sd::paginate_render(
+                                                        &mut ff, &fi, display, n, self.ttf_px,
+                                                        Point::new(super::text_left_margin(), 2),
+                                                        super::text_width() as i32, line_h,
+                                                        max_lines,
+                                                    );
+                                                    font_ok = true;
+                                                }
+                                                ff.close();
+                                            }
+                                        }
+                                        if font_ok {
+                                            self.ttf_end = self.ttf_offset + consumed as u32;
+                                            drew = true;
+                                        } else {
+                                            println!(
+                                                "[read ttf] 动态分页渲染失败（books/ 需有 .txt 与 font.ttf）"
+                                            );
+                                        }
+                                    }
+                                    if !drew {
+                                        let _ = font.render_aligned(
+                                            self.page_content.as_str(),
+                                            Point::new(super::text_left_margin(), 2),
+                                            VerticalPosition::Top,
+                                            HorizontalAlignment::Left,
+                                            FontColor::Transparent(Black),
+                                            display,
+                                        );
+                                    }
+                                }
+                                #[cfg(not(feature = "ttf_spike"))]
                                 let _ = font.render_aligned(
                                     self.page_content.as_str(),
                                     Point::new(super::text_left_margin(), 2),
@@ -787,6 +918,9 @@ impl Page for ReadPage {
                                 };
                                 self.menus = Some(books);
                                 self.load_book_progress(&mut books_dir);
+                                // 记录 books_dir 裸指针，供 TTF 渲染（render 无参）打开字体；仅此作用域内有效
+                                self.books_dir_ptr =
+                                    core::ptr::addr_of_mut!(books_dir) as *mut ActualDirectory<'static>;
 
                                 loop {
                                     if !self.running { break; }
@@ -796,10 +930,13 @@ impl Page for ReadPage {
                                             self.get_log_vec(&mut books_dir).await;
                                         }
                                         if self.change_page {
-                                            println!("change_page : {}", self.page_index);
                                             self.change_page = false;
-                                            self.book_pages.as_mut().unwrap().set_current_page(self.page_index);
-                                            self.get_page_content(&mut books_dir).await;
+                                            #[cfg(not(feature = "ttf_spike"))]
+                                            {
+                                                self.book_pages.as_mut().unwrap().set_current_page(self.page_index);
+                                                self.get_page_content(&mut books_dir).await;
+                                            }
+                                            // ttf 路径不用 page_content：render 直接从 ttf_offset 读字节
                                         }
                                     }
 
@@ -944,6 +1081,7 @@ impl Page for ReadPage {
             }
         }
         display::set_sleep_renderer(None);
+        self.books_dir_ptr = core::ptr::null_mut();
         if let Some(display) = display_mut() {
             display.set_rotation(DisplayRotation::Rotate0);
         }

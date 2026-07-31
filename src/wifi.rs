@@ -328,7 +328,9 @@ async fn use_wifi_locked(secs: u64) -> Result<&'static Stack<'static>, WifiNetEr
     }
 
 
-    let mut try_times = 10;
+    // STACK_MUT 由 connect_wifi 在拿到 IP 后才写入；冷启动/唤醒时 DHCP 可能要十几秒，
+    // 原固定 10 次重试（约 5s）太短，会误报 Infallible。改为基于时间的等待。
+    const WAIT_STACK_SECS: u64 = 30;
     loop {
         refresh_last_time().await;
         println!("use_wifi Waiting is_link_up...");
@@ -341,11 +343,10 @@ async fn use_wifi_locked(secs: u64) -> Result<&'static Stack<'static>, WifiNetEr
                 } else if Instant::now().as_secs() - secs > TIME_OUT_SECS {
                     return Err(WifiNetError::TimeOut);
                 }
-            } else if try_times == 0 {
+            } else if Instant::now().as_secs() - secs > WAIT_STACK_SECS {
+                // 超过 30s connect_wifi 仍未拿到 IP；真失败时会多等一会才报错。
                 return Err(WifiNetError::Infallible);
             }
-
-            try_times -= 1;
         }
         Timer::after(Duration::from_millis(500)).await;
     }

@@ -81,7 +81,8 @@ impl<C> Drawable for Calendar<C>
         // 使用 display.clipped 包裹裁剪区域
         let mut clipped_display = display.clipped(&clipping_area);
 
-        let year_style = U8g2TextStyle::new(fonts::u8g2_font_wqy16_t_gb2312b, self.front_color);
+        // 年份样式：用 wqy16（gb2312 超集）即可，不必单独链入加粗变体，省一张 176KB 字体表
+        let year_style = U8g2TextStyle::new(fonts::u8g2_font_wqy16_t_gb2312, self.front_color);
         let year_text_style = TextStyleBuilder::new().baseline(Baseline::Middle)
             .alignment(Alignment::Center).build();
         

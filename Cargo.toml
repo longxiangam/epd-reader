@@ -18,6 +18,9 @@ embedded-graphics = "0.8"
 embedded-layout = { version = "0.4", default-features = false }
 embedded-text = "0.7.2"
 u8g2-fonts = { version = "0.7.1", features = ["embedded_graphics_textstyle"] }
+# TTF 矢量字体 spike（仅 ttf_spike feature 启用，验证用，不入正式流程）
+# no_std 浮点：开 ab_glyph 自带的 libm 特性，它会级联 core_maths(tt­f-parser) 与 libm(rasterizer)。
+ab_glyph = { version = "0.2.32", default-features = false, features = ["libm"], optional = true }
 
 static_cell = { version = "2.1.0", features = ["nightly"] }
 critical-section = "1.2"
@@ -58,6 +61,7 @@ epd2in7 = []
 epd4in2 = []
 enable_debug = []
 weather-openmeteo = []
+ttf_spike = ["dep:ab_glyph"]
 
 [profile.release]
 opt-level = "s"
