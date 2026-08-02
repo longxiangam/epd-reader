@@ -34,7 +34,7 @@ use crate::storage::NvsStorage;
 static MAIN_PAGE:Mutex<CriticalSectionRawMutex,Option<MainPage> > = Mutex::new(None);
 
 #[ram(unstable(rtc_fast))]
-static mut PAGE_INDEX:i32 = 1;
+pub(crate) static mut PAGE_INDEX:i32 = 1;
 
 /// 冷启动标记（rtc_fast）：false=冷启动，true=深睡唤醒。
 /// 用于区分"开机进默认主页" vs "唤醒回上次所在页"。
@@ -265,10 +265,24 @@ impl Page for  MainPage{
 
                 }
                 EReadPage => {
-                    let mut read_page = ReadPage::new();
-                    read_page.bind_event().await;
-                    read_page.run(spawner).await;
-                    self.back().await;
+                    #[cfg(feature = "ttf_spike")]
+                    {
+                        // 重启分模式：置 rtc_fast 阅读标志 + 清书索引（进书单而非续读上次）
+                        // → 短深睡唤醒（保留 rtc_fast）。唤醒后 main 见 READING_MODE=true，
+                        // 不初始化 WiFi，独占堆做 TTF。
+                        unsafe {
+                            core::ptr::addr_of_mut!(crate::pages::read::READING_MODE).write(true);
+                            core::ptr::addr_of_mut!(crate::pages::read::PAGE_INDEX).write(None);
+                        }
+                        crate::sleep::reboot_sleep().await;
+                    }
+                    #[cfg(not(feature = "ttf_spike"))]
+                    {
+                        let mut read_page = ReadPage::new();
+                        read_page.bind_event().await;
+                        read_page.run(spawner).await;
+                        self.back().await;
+                    }
                 }
                 EImageListPage => {
                     let mut image_page = ImagePage::new();

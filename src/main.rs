@@ -80,15 +80,37 @@ use critical_section::Mutex as CsMutex;
 
 esp_bootloader_esp_idf::esp_app_desc!();
 
+/// 堆缓冲放进独立的 dram2 段（bootloader 释放的 ~64KB DRAM，原本空闲）。
+/// 好处：主 DRAM 全部留给栈（TTF 渲染异步链深也能容纳，64KB 堆放主 DRAM 时曾栈溢出），
+/// 堆又够用（WiFi ~60KB / TtfWs 44KB），且栈溢出看门狗（_stack_end 处 watchpoint）不受影响。
+/// 阅读与正常模式共用这一块堆，无需按模式区分。
+#[unsafe(link_section = ".dram2_uninit")]
+static mut DRAM2_HEAP: core::mem::MaybeUninit<[u8; 65280]> = core::mem::MaybeUninit::uninit();
+
 #[esp_rtos::main]
 async fn main(spawner: Spawner) -> ! {
-    // 请求缓冲已移至 .bss（request.rs 的静态数组），堆无需再容纳那 25KB。
-    // ttf_spike 下不连 WiFi（阅读/联网互斥），堆可大幅缩小，把 SRAM 让给主栈
-    // （矢量渲染的 async 状态机占栈较大，需要更大的主栈才不溢出）。
-    #[cfg(feature = "ttf_spike")]
-    esp_alloc::heap_allocator!(size: 32 * 1024);
-    #[cfg(not(feature = "ttf_spike"))]
-    esp_alloc::heap_allocator!(size: 64 * 1024);
+    // 堆放进 dram2 独立段（不占主 DRAM）→ 主 DRAM 全给栈，堆栈不再争抢。
+    unsafe {
+        let heap_ptr = core::ptr::addr_of_mut!(DRAM2_HEAP) as *mut u8;
+        esp_alloc::HEAP.add_region(esp_alloc::HeapRegion::new(
+            heap_ptr,
+            65280,
+            esp_alloc::MemoryCapability::Internal.into(),
+        ));
+    }
+    // 诊断：堆（dram2）与主栈区大小，确认堆栈不再争抢
+    unsafe extern "C" {
+        static _stack_end: u8;
+        static _stack_start: u8;
+    }
+    let stack_region = unsafe {
+        core::ptr::addr_of!(_stack_start) as usize - core::ptr::addr_of!(_stack_end) as usize
+    };
+    println!(
+        "[boot] heap(dram2)={}KB free, main stack region={}KB",
+        esp_alloc::HEAP.free() / 1024,
+        stack_region / 1024
+    );
 
     // TTF spike：基准 run() 会阻塞启动数秒，暂不在 boot 调用；
     // 改为在主页直接渲染矢量字做端到端验证（见 main_page render）。
@@ -204,6 +226,27 @@ async fn main(spawner: Spawner) -> ! {
         let _ = sd.volume_manager.open_volume(embedded_sdmmc::VolumeIdx(0));
     }
 
+    // RTC 唤醒键注册：必须在阅读分支之前——阅读模式睡眠(to_sleep_tips/reboot_sleep)
+    // 也要靠这个 RTC IO 唤醒源，否则睡下唤不醒。
+    let rtc_io = static_cell::make_static!(rtc_pin);
+    add_rtcio(rtc_io, WakeupLevel::Low).await;
+
+    // 重启分模式（ttf_spike）：阅读模式启动时不初始化 WiFi，独占整块堆做 TTF（大字形缓存）。
+    // 模式标志存 flash（rtc_fast 不跨 software_reset）；直接进 reading_task。
+    #[cfg(feature = "ttf_spike")]
+    {
+        let reading_mode = unsafe { *core::ptr::addr_of!(crate::pages::read::READING_MODE) };
+        if reading_mode {
+            println!("[boot] 阅读模式：跳过 WiFi，独占堆做 TTF");
+            refresh_active_time().await;
+            spawner.spawn(crate::pages::reading_task(spawner.clone()).unwrap());
+            // main 不返回即可；睡眠/交互由 reading_task(ReadPage) 处理
+            loop {
+                Timer::after(Duration::from_secs(5)).await;
+            }
+        }
+    }
+
     let mut need_ap = false;
     loop {
         println!("entry need_ap 1");
@@ -219,9 +262,6 @@ async fn main(spawner: Spawner) -> ! {
         println!("entry need_ap");
         Timer::after(Duration::from_millis(50)).await;
     }
-
-    let rtc_io = static_cell::make_static!(rtc_pin);
-    add_rtcio(rtc_io, WakeupLevel::Low).await;
 
     if need_ap {
         use crate::pages::Page;
@@ -247,9 +287,7 @@ async fn main(spawner: Spawner) -> ! {
         Timer::after_millis(10).await;
         spawner.spawn(pages::main_task(spawner.clone()).unwrap());
 
-        // ttf_spike：开机不连 WiFi，让渲染纯离线跑（阅读/联网互斥的最简形态）。
-        // 避免 force_stop 中途打断连接导致 esp-radio 驱动（pmksa）空指针崩溃。
-        #[cfg(not(feature = "ttf_spike"))]
+        // 正常模式开机连 WiFi。阅读走独立重启模式（READING_MODE），不在此连。
         {
             WIFI_MODEL.lock().await.replace(WifiModel::STA);
             let _stack = crate::wifi::connect_wifi(

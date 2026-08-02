@@ -7,7 +7,7 @@ pub mod main_page;
 
 mod image_page;
 mod calendar;
-mod read;
+pub mod read;
 mod read_menu_page;
 mod weather;
 mod stock;
@@ -88,4 +88,32 @@ pub async fn main_task(spawner:Spawner){
 
         Timer::after(Duration::from_millis(50)).await;
     }
+}
+
+/// 阅读模式入口（重启分模式）：阅读模式启动时由 main 直接 spawn，独占堆做 TTF。
+/// ReadPage 退出（running=false）即离开阅读 → 清模式标志 → software_reset 回正常模式。
+#[cfg(feature = "ttf_spike")]
+#[embassy_executor::task]
+pub async fn reading_task(spawner: Spawner) {
+    // 等显示任务就绪：reading_task 启动比显示任务初始化(EPD init)快，若不等，
+    // ReadPage::run 开头的 set_rotation 与首帧 render 会因 display_mut()=None 被跳过
+    // → 进阅读首帧空白、且未旋转（点键后显示任务已就绪才正常）。
+    {
+        let mut waited = 0u32;
+        while crate::display::display_mut().is_none() {
+            if waited > 150 { break; } // 最多等 ~3s（防御；正常 ~百 ms 就绪）
+            waited += 1;
+            Timer::after(Duration::from_millis(20)).await;
+        }
+    }
+    let mut p = read::ReadPage::new();
+    p.bind_event().await;
+    p.run(spawner).await;
+    // 离开阅读：清阅读标志 + 主网格菜单位设 -1（显示网格，避免唤醒后又自动进阅读）
+    // → 短深睡唤醒回正常模式（rtc_fast 保留，但 READING_MODE=false → 走正常路径）。
+    unsafe {
+        core::ptr::addr_of_mut!(read::READING_MODE).write(false);
+        core::ptr::addr_of_mut!(main_page::PAGE_INDEX).write(-1);
+    }
+    crate::sleep::reboot_sleep().await;
 }

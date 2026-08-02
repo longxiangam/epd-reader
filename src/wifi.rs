@@ -277,7 +277,13 @@ pub async fn refresh_last_time(){
 
 const TIME_OUT_SECS: u64 = 10;
 static WIFI_LOCK:Mutex<CriticalSectionRawMutex,bool> = Mutex::new(false);
+/// 阅读期间置 true：拦截所有 use_wifi 请求（阅读/联网运行期互斥）。
+pub static WIFI_BLOCKED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 pub async fn use_wifi() ->Result<&'static Stack<'static>, WifiNetError>{
+    // 阅读期间禁止联网（阅读独占内存，WiFi 已停）
+    if WIFI_BLOCKED.load(core::sync::atomic::Ordering::Acquire) {
+        return Err(WifiNetError::Using);
+    }
     let secs = Instant::now().as_secs();
     loop {
         if !*WIFI_LOCK.lock().await  {
@@ -737,4 +743,29 @@ fn create_dns_response(ip:Ipv4Addr, request: &[u8]) -> Vec<u8, 512> {
     response.extend_from_slice(&ip.octets()).unwrap();
 
     response
+}
+
+/// 快速停 WiFi：最多等 3 秒在飞请求（而非 45 秒），用于进阅读页时避免卡太久。
+pub async fn force_stop_wifi_quick() {
+    if *WIFI_STATE.lock().await == None { return; }
+    if WIFI_STATE.lock().await.unwrap() == WifiNetState::WifiStopped { return; }
+
+    let wait_start = Instant::now().as_secs();
+    loop {
+        if !*WIFI_LOCK.lock().await { break; }
+        if Instant::now().as_secs() - wait_start > 3 {
+            println!("[wifi] 请求持锁 >3s，阅读强制停止");
+            break;
+        }
+        Timer::after(Duration::from_millis(200)).await;
+    }
+    *WIFI_LOCK.lock().await = true;
+    STOP_WIFI_SIGNAL.signal(());
+
+    let stop_start = Instant::now().as_secs();
+    loop {
+        if WIFI_STATE.lock().await.unwrap() == WifiNetState::WifiStopped { return; }
+        if Instant::now().as_secs() - stop_start > 2 { return; }
+        Timer::after(Duration::from_millis(50)).await;
+    }
 }

@@ -63,6 +63,24 @@ pub async fn to_sleep_tips(sleep_time:Duration, idle_time:Duration, show_sleep:b
 pub async fn get_rtc_ms()->u64{
     RTC_MANGE.lock().await.as_mut().unwrap().current_time_us() / 1000
 }
+
+/// "重启"切换模式：短深睡（50ms 定时器唤醒）。
+/// 深睡唤醒会重新跑 main（重新决定起不起 WiFi、重新分配堆），且**保留 rtc_fast**
+/// （模式标志/书索引/续读偏移），所以模式切换不需要 software_reset（那会清 rtc_fast）、
+/// 也不需要 flash。EINK/SD 电源按正常深睡一样关掉，唤醒后 main 重新上电。
+pub async fn reboot_sleep() {
+    let wakeup_pins = unsafe { core::ptr::addr_of_mut!(WAKEUP_PINS).as_mut().unwrap() };
+    let rtcio = RtcioWakeupSource::new(wakeup_pins.as_mut_slice());
+    let timer = TimerWakeupSource::new(core::time::Duration::from_millis(50));
+    let mut ws: Vec<&dyn WakeSource, 2> = Vec::new();
+    let _ = ws.push(&rtcio);
+    let _ = ws.push(&timer);
+    unsafe {
+        if let Some(mut p) = EINK_PWER_PIN.lock().await.take() { p.set_high(); }
+        if let Some(mut p) = SD_PWER_PIN.lock().await.take() { p.set_high(); }
+    }
+    RTC_MANGE.lock().await.as_mut().unwrap().sleep_deep(ws.as_slice());
+}
 pub async fn get_sleep_ms()->u64{
     get_rtc_ms().await - unsafe { *core::ptr::addr_of!(WHEN_SLEEP_RTC_MS) }
 }

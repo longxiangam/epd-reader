@@ -1,11 +1,13 @@
 //! SD 卡 TTF 按需随机读取字形（不整文件载入）。
 //!
-//! ab_glyph 要求整字体为连续 &[u8]，放不下 RAM；故自行实现 TTF 解析：
-//! 表目录 → head/maxp/hhea → cmap → loca → hmtx → glyf，逐字形从 SD 随机读取，
-//! 二次曲线展平 + 奇偶扫描线填充。算法已在 ttf_spike/render_ref.py 对照 PIL 验证。
+//! 自实现 TTF 解析（表目录→cmap→loca→hmtx→glyf）逐字形从 SD seek+read，
+//! 二次曲线展平 + 奇偶扫描线填充。所有工作区缓冲打包进 `TtfWs`，**堆分配**
+//! （进阅读分配、退出释放），与 WiFi 的堆内存运行期互斥，不再常驻 .bss。
 #![cfg(feature = "ttf_spike")]
 #![allow(dead_code)]
 
+use alloc::alloc::{alloc, dealloc, Layout};
+use core::mem::size_of;
 use embedded_graphics::Pixel;
 use embedded_graphics::draw_target::DrawTarget;
 use embedded_graphics::geometry::{Dimensions, Point};
@@ -14,58 +16,24 @@ use embedded_sdmmc::VolumeIdx;
 use esp_println::println;
 
 use crate::display::EpdDisplay;
-use crate::sd_mount::{ActualFile, SdMount, SD_MOUNT};
+use crate::sd_mount::{ActualFile, SdMount};
 
-const SAMPLE: &str = include_str!("../ttf_spike/sample.txt");
-
-// ── 单字形渲染工作区（静态 .bss，避免占堆）。容量偏保守以省 DRAM 让给主栈；
-// 极复杂字形会被裁剪（spike 可接受）。
-const MAX_PTS: usize = 300;
+// ── 缓冲容量（阅读模式堆宽裕，放宽以保证复杂 CJK 字形不截断）──
+const MAX_PTS: usize = 400;
 const MAX_CONTOURS: usize = 64;
-const MAX_SEGS: usize = 400;
-const MAX_CROSS: usize = 150;
-static mut PTS_X: [i32; MAX_PTS] = [0; MAX_PTS];
-static mut PTS_Y: [i32; MAX_PTS] = [0; MAX_PTS];
-static mut PTS_ON: [u8; MAX_PTS] = [0; MAX_PTS];
-static mut END_PTS: [u16; MAX_CONTOURS] = [0; MAX_CONTOURS];
-static mut SEG: [f32; MAX_SEGS * 4] = [0.0; MAX_SEGS * 4];
-static mut CROSS_X: [f32; MAX_CROSS] = [0.0; MAX_CROSS];
-// cmap 子表整块缓存（simhei 仅 1.3KB）：查表零 SD 访问，否则每字上千次 seek 会饿死系统
+const MAX_SEGS: usize = 512;
+const MAX_CROSS: usize = 160;
 const CMAP_CACHE_MAX: usize = 2048;
-static mut CMAP_CACHE: [u8; CMAP_CACHE_MAX] = [0u8; CMAP_CACHE_MAX];
-static mut CMAP_LEN: u32 = 0;
-// 单字形整块读缓冲：避免解析时每个 u8/u16 都 seek 一次
-const GLYF_BUF_MAX: usize = 1536;
-static mut GLYF_BUF: [u8; GLYF_BUF_MAX] = [0u8; GLYF_BUF_MAX];
-// 读书一页的字节缓冲（即时分页用）：调用方 read_book_chunk 填充，paginate_render 消费
-const BOOK_BUF_MAX: usize = 4096;
-static mut BOOK_BUF: [u8; BOOK_BUF_MAX] = [0u8; BOOK_BUF_MAX];
+const HMTX_CACHE_MAX: usize = 1024;
+const LOCA_CACHE_MAX: usize = 1024;
+const GLYF_BUF_MAX: usize = 1024;
+const BOOK_BUF_MAX: usize = 2048;
+const GC_N: usize = 256;
+const GC_BMP_BYTES: usize = 72;
 
-// ── 字形位图缓存：渲染过的字形存 1-bit 位图，跨页复用，避免重复读 SD + 重复光栅化 ──
-const GC_N: usize = 128;          // 缓存槽位数（~一页唯一字数）
-const GC_BMP_BYTES: usize = 80;   // 单字形位图上限（~24×24/8≈72）
-static mut GC_GID: [u16; GC_N] = [0xFFFF; GC_N]; // 0xFFFF = 空
-static mut GC_W: [u8; GC_N] = [0; GC_N];
-static mut GC_H: [u8; GC_N] = [0; GC_N];
-static mut GC_BMP: [[u8; GC_BMP_BYTES]; GC_N] = [[0u8; GC_BMP_BYTES]; GC_N];
-static mut GC_NEXT: usize = 0;    // 轮询分配位置
-
-unsafe fn cu16(rel: u32) -> u16 {
-    let base = core::ptr::addr_of_mut!(CMAP_CACHE).cast::<u8>();
-    let mut b = [0u8; 2];
-    b[0] = base.add(rel as usize).read();
-    b[1] = base.add(rel as usize + 1).read();
-    u16::from_be_bytes(b)
-}
-unsafe fn cu32(rel: u32) -> u32 {
-    let base = core::ptr::addr_of_mut!(CMAP_CACHE).cast::<u8>();
-    let mut b = [0u8; 4];
-    for i in 0..4 {
-        b[i] = base.add(rel as usize + i).read();
-    }
-    u32::from_be_bytes(b)
-}
-
+/// TTF 字体元信息（表偏移/度量）。Copy：首次解析后缓存在 TtfWs.fi，
+/// 避免每页翻页重复读表目录 + 重读 cmap 子表。
+#[derive(Clone, Copy)]
 pub struct FontInfo {
     units_per_em: u16,
     loc_fmt: i16,
@@ -76,9 +44,74 @@ pub struct FontInfo {
     hmtx_off: u32,
     cmap_sub: u32,
     cmap_fmt: u16,
+    ascent: i16,
+    descent: i16,
 }
 
-// ── 随机读取 ──
+impl FontInfo {
+    /// 行高 = (升部 + |降部|) 缩放 + 1px 间隙。比 px+4 紧，能多排几行铺满屏。
+    pub fn line_height(&self, px: f32) -> i32 {
+        let h = (self.ascent as i32 - self.descent as i32) as f32 * px / self.units_per_em as f32;
+        h as i32 + 1
+    }
+}
+
+/// TTF 渲染工作区（~18KB）。堆分配，进阅读时创建、退出时释放。
+/// 字形缓存 GC_N=96：足够容纳一整页 CJK 的去重字形，使「渲染后预加载下一页」
+/// 真正命中缓存——翻页时绝大多数字形直接 blit，不再重新光栅化。
+pub struct TtfWs {
+    pub pts_x: [i32; MAX_PTS],
+    pub pts_y: [i32; MAX_PTS],
+    pub pts_on: [u8; MAX_PTS],
+    pub end_pts: [u16; MAX_CONTOURS],
+    /// 线段池（定点 Q8：坐标=像素×256）。f32 在无 FPU 的 C3 上慢 ~10×，改定点。
+    pub seg: [i32; MAX_SEGS * 4],
+    pub cross_x: [i32; MAX_CROSS],
+    pub cmap_cache: [u8; CMAP_CACHE_MAX],
+    pub cmap_len: u32,
+    /// 整张 hmtx（水平度量）表缓存进 RAM：advance() 不再每字读 SD，
+    /// 翻页时布局零 SD 读（只剩读 .txt 正文一次）。
+    pub hmtx_cache: [u8; HMTX_CACHE_MAX],
+    pub hmtx_len: u32,
+    /// 整张 loca 表缓存进 RAM：parse_glyph 取字形偏移不再每字读 2 次 SD。
+    pub loca_cache: [u8; LOCA_CACHE_MAX],
+    pub loca_len: u32,
+    pub glyf_buf: [u8; GLYF_BUF_MAX],
+    pub book_buf: [u8; BOOK_BUF_MAX],
+    pub gc_gid: [u16; GC_N],
+    pub gc_w: [u8; GC_N],
+    pub gc_h: [u8; GC_N],
+    /// 该字形位图 top 相对行顶(pen_y)的 y 偏移：基线对齐用（标点/不同升部字下沉到底）。
+    pub gc_yoff: [i16; GC_N],
+    pub gc_bmp: [[u8; GC_BMP_BYTES]; GC_N],
+    pub gc_next: usize,
+    /// 缓存已解析的 FontInfo（首次 open_font 填充）；Some 时 open_font 直接返回，不再读 SD。
+    pub fi: Option<FontInfo>,
+    /// 诊断：本次 paginate_render 的缓存命中/未命中计数（翻页提速排查用）。
+    pub dbg_hits: u32,
+    pub dbg_miss: u32,
+}
+
+/// 堆上分配并清零一个 TtfWs（直接 Layout 分配，避免 Box::new 的栈临时量）。
+pub fn alloc_ws() -> Option<&'static mut TtfWs> {
+    let layout = Layout::new::<TtfWs>();
+    unsafe {
+        let ptr = alloc(layout);
+        if ptr.is_null() {
+            return None;
+        }
+        core::ptr::write_bytes(ptr, 0, size_of::<TtfWs>());
+        Some(&mut *(ptr as *mut TtfWs))
+    }
+}
+
+/// 释放 TtfWs（退出阅读时调用）。
+pub unsafe fn free_ws(ws: *mut TtfWs) {
+    let layout = Layout::new::<TtfWs>();
+    dealloc(ws as *mut u8, layout);
+}
+
+// ── 随机读取（文件，无 ws）──
 fn read_at(f: &mut ActualFile, off: u32, dst: &mut [u8]) {
     let _ = f.seek_from_start(off);
     let mut got = 0;
@@ -88,10 +121,6 @@ fn read_at(f: &mut ActualFile, off: u32, dst: &mut [u8]) {
             Ok(n) => got += n,
         }
     }
-}
-/// 读进裸指针（静态缓冲），绕开 edition 2024 static_mut_refs 限制。
-unsafe fn read_into(f: &mut ActualFile, off: u32, dst: *mut u8, len: usize) {
-    read_at(f, off, core::slice::from_raw_parts_mut(dst, len));
 }
 fn u8_at(f: &mut ActualFile, o: u32) -> u8 {
     let mut b = [0u8; 1];
@@ -111,48 +140,41 @@ fn u32_at(f: &mut ActualFile, o: u32) -> u32 {
     read_at(f, o, &mut b);
     u32::from_be_bytes(b)
 }
-
-unsafe fn pts_on(i: usize) -> u8 {
-    core::ptr::addr_of_mut!(PTS_ON).cast::<u8>().add(i).read()
-}
-unsafe fn set_xy(i: usize, x: i32, y: i32) {
-    core::ptr::addr_of_mut!(PTS_X).cast::<i32>().add(i).write(x);
-    core::ptr::addr_of_mut!(PTS_Y).cast::<i32>().add(i).write(y);
-}
-unsafe fn seg_push(seg_n: &mut usize, x0: f32, y0: f32, x1: f32, y1: f32) {
-    if *seg_n < MAX_SEGS {
-        let b = core::ptr::addr_of_mut!(SEG).cast::<f32>().add(*seg_n * 4);
-        b.write(x0);
-        b.add(1).write(y0);
-        b.add(2).write(x1);
-        b.add(3).write(y1);
-        *seg_n += 1;
-    }
-}
-unsafe fn seg_quad(seg_n: &mut usize, p0: (f32, f32), p1: (f32, f32), p2: (f32, f32)) {
-    let n2 = 6;
-    let (mut cx, mut cy) = p0;
-    for k in 1..=n2 {
-        let t = k as f32 / n2 as f32;
-        let mt = 1.0 - t;
-        let ex = mt * mt * p0.0 + 2.0 * mt * t * p1.0 + t * t * p2.0;
-        let ey = mt * mt * p0.1 + 2.0 * mt * t * p1.1 + t * t * p2.1;
-        seg_push(seg_n, cx, cy, ex, ey);
-        cx = ex;
-        cy = ey;
-    }
+unsafe fn read_into(f: &mut ActualFile, off: u32, dst: *mut u8, len: usize) {
+    read_at(f, off, core::slice::from_raw_parts_mut(dst, len));
 }
 
-fn parse_font_info(f: &mut ActualFile) -> Option<FontInfo> {
+// cmap 缓存读取（ws）
+fn cu16(ws: &TtfWs, rel: usize) -> u16 {
+    u16::from_be_bytes([ws.cmap_cache[rel], ws.cmap_cache[rel + 1]])
+}
+fn cu32(ws: &TtfWs, rel: usize) -> u32 {
+    u32::from_be_bytes([
+        ws.cmap_cache[rel],
+        ws.cmap_cache[rel + 1],
+        ws.cmap_cache[rel + 2],
+        ws.cmap_cache[rel + 3],
+    ])
+}
+
+// loca 缓存读取（ws）
+fn lu16(ws: &TtfWs, o: usize) -> u16 {
+    u16::from_be_bytes([ws.loca_cache[o], ws.loca_cache[o + 1]])
+}
+fn lu32(ws: &TtfWs, o: usize) -> u32 {
+    u32::from_be_bytes([
+        ws.loca_cache[o],
+        ws.loca_cache[o + 1],
+        ws.loca_cache[o + 2],
+        ws.loca_cache[o + 3],
+    ])
+}
+
+fn parse_font_info(f: &mut ActualFile, ws: &mut TtfWs) -> Option<FontInfo> {
     let num_tables = u16_at(f, 4);
     let mut off = 12u32;
-    let mut loc = 0u32;
-    let mut glyf = 0u32;
-    let mut hmtx = 0u32;
-    let mut cmap = 0u32;
-    let mut head = 0u32;
-    let mut maxp = 0u32;
-    let mut hhea = 0u32;
+    let (mut loc, mut glyf, mut hmtx, mut cmap, mut head, mut maxp, mut hhea) =
+        (0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32);
     let mut buf = [0u8; 4];
     for _ in 0..num_tables {
         read_at(f, off, &mut buf);
@@ -175,6 +197,8 @@ fn parse_font_info(f: &mut ActualFile) -> Option<FontInfo> {
     let units_per_em = u16_at(f, head + 18);
     let loc_fmt = i16_at(f, head + 50);
     let num_glyphs = u16_at(f, maxp + 4) as u32;
+    let ascent = i16_at(f, hhea + 4); // 基线以上的升部（用于行内基线对齐）
+    let descent = i16_at(f, hhea + 6); // 基线以下的降部（负值；与升部算行高）
     let num_h_metrics = u16_at(f, hhea + 34);
     let nrec = u16_at(f, cmap + 2);
     let mut best: Option<(u8, u32, u16)> = None;
@@ -192,28 +216,58 @@ fn parse_font_info(f: &mut ActualFile) -> Option<FontInfo> {
         }
     }
     let (_, cmap_sub, cmap_fmt) = best?;
-    // 整块读 cmap 子表进 RAM 缓存（查表不再访问 SD）
-    // 注意：format 4 的 length 是 u16（@+2），format 12 的 length 才是 u32（@+2）。
+    // 整块读 cmap 子表进 ws.cmap_cache
     let sub_len = if cmap_fmt == 12 {
         u32_at(f, cmap_sub + 2) as usize
     } else {
         u16_at(f, cmap_sub + 2) as usize
     };
     if sub_len > 0 && sub_len <= CMAP_CACHE_MAX {
-        unsafe {
-            let dst = core::ptr::addr_of_mut!(CMAP_CACHE).cast::<u8>();
+        let mut off_b = 0u32;
+        while off_b < sub_len as u32 {
+            let n = (sub_len as u32 - off_b).min(512) as usize;
             let mut tmp = [0u8; 512];
-            let mut off = 0u32;
-            while off < sub_len as u32 {
-                let n = (sub_len as u32 - off).min(512) as usize;
-                read_at(f, cmap_sub + off, &mut tmp[..n]);
-                for i in 0..n {
-                    dst.add(off as usize + i).write(tmp[i]);
-                }
-                off += n as u32;
+            read_at(f, cmap_sub + off_b, &mut tmp[..n]);
+            for i in 0..n {
+                ws.cmap_cache[off_b as usize + i] = tmp[i];
             }
-            core::ptr::addr_of_mut!(CMAP_LEN).write(sub_len as u32);
+            off_b += n as u32;
         }
+        ws.cmap_len = sub_len as u32;
+    }
+    // 整块读 hmtx 进 ws.hmtx_cache：advance() 之后从 RAM 取，翻页布局零 SD 读。
+    let hmtx_bytes = (num_h_metrics as usize).saturating_mul(4);
+    if hmtx_bytes > 0 && hmtx_bytes <= HMTX_CACHE_MAX {
+        let mut off_b = 0u32;
+        while off_b < hmtx_bytes as u32 {
+            let n = (hmtx_bytes as u32 - off_b).min(512) as usize;
+            let mut tmp = [0u8; 512];
+            read_at(f, hmtx + off_b, &mut tmp[..n]);
+            for i in 0..n {
+                ws.hmtx_cache[off_b as usize + i] = tmp[i];
+            }
+            off_b += n as u32;
+        }
+        ws.hmtx_len = hmtx_bytes as u32;
+    }
+    // 整块读 loca 进 ws.loca_cache：parse_glyph 取字形偏移不再每字读 2 次 SD。
+    let loca_entry = if loc_fmt == 1 {
+        (num_glyphs as usize + 1) * 4
+    } else {
+        (num_glyphs as usize + 1) * 2
+    };
+    if loca_entry > 0 && loca_entry <= LOCA_CACHE_MAX {
+        let mut off_b = 0u32;
+        while off_b < loca_entry as u32 {
+            let n = (loca_entry as u32 - off_b).min(512) as usize;
+            let mut tmp = [0u8; 512];
+            read_at(f, loc + off_b, &mut tmp[..n]);
+            for i in 0..n {
+                ws.loca_cache[off_b as usize + i] = tmp[i];
+            }
+            off_b += n as u32;
+        }
+        ws.loca_len = loca_entry as u32;
     }
     Some(FontInfo {
         units_per_em,
@@ -225,23 +279,38 @@ fn parse_font_info(f: &mut ActualFile) -> Option<FontInfo> {
         hmtx_off: hmtx,
         cmap_sub,
         cmap_fmt,
+        ascent,
+        descent,
     })
 }
 
-fn char_to_gid(_f: &mut ActualFile, fi: &FontInfo, ch: char) -> u16 {
+/// 解析已打开的字体（表目录 + 缓存 cmap 进 ws）。
+///
+/// **幂等**：首次调用读表目录 + 把整个 cmap 子表缓存进 ws.cmap_cache，并把解析出的
+/// FontInfo 存进 ws.fi。后续每次翻页（render / preload 各调一次）直接返回缓存的
+/// FontInfo，**不再读 SD**——这是翻页提速的关键（否则每次都要重扫表目录 + 重读 2KB cmap）。
+pub fn open_font(f: &mut ActualFile, ws: &mut TtfWs) -> Option<FontInfo> {
+    if let Some(fi) = ws.fi {
+        return Some(fi);
+    }
+    let fi = parse_font_info(f, ws)?;
+    ws.fi = Some(fi);
+    Some(fi)
+}
+
+fn char_to_gid(ws: &TtfWs, fi: &FontInfo, ch: char) -> u16 {
     let c = ch as u32;
-    // 从 RAM 缓存读取，零 SD 访问
     if fi.cmap_fmt == 12 {
-        let ng = unsafe { cu32(12) };
-        let base = 16u32;
+        let ng = cu32(ws, 12);
+        let base = 16usize;
         let mut lo = 0i64;
         let mut hi = ng as i64 - 1;
         while lo <= hi {
-            let m = ((lo + hi) / 2) as u32;
+            let m = ((lo + hi) / 2) as usize;
             let g = base + m * 12;
-            let st = unsafe { cu32(g) };
-            let en = unsafe { cu32(g + 4) };
-            let sg = unsafe { cu32(g + 8) };
+            let st = cu32(ws, g);
+            let en = cu32(ws, g + 4);
+            let sg = cu32(ws, g + 8);
             if c < st {
                 hi = m as i64 - 1;
             } else if c > en {
@@ -251,30 +320,26 @@ fn char_to_gid(_f: &mut ActualFile, fi: &FontInfo, ch: char) -> u16 {
             }
         }
     } else if fi.cmap_fmt == 4 {
-        let seg = unsafe { cu16(6) } as u32 / 2;
-        let eb = 14u32;
+        let seg = cu16(ws, 6) as usize / 2;
+        let eb = 14usize;
         let sb = eb + seg * 2 + 2;
         let db = sb + seg * 2;
         let rb = db + seg * 2;
-        let mut i = 0u32;
+        let mut i = 0usize;
         while i < seg {
-            if unsafe { cu16(eb + i * 2) } as u32 >= c {
-                let start = unsafe { cu16(sb + i * 2) } as u32;
+            if cu16(ws, eb + i * 2) as u32 >= c {
+                let start = cu16(ws, sb + i * 2) as u32;
                 if start > c {
                     return 0;
                 }
-                let d = unsafe { cu16(db + i * 2) } as i16 as i32;
-                let ro = unsafe { cu16(rb + i * 2) } as u32;
+                let d = cu16(ws, db + i * 2) as i16 as i32;
+                let ro = cu16(ws, rb + i * 2) as u32;
                 if ro == 0 {
                     return ((c as i32 + d) & 0xFFFF) as u16;
                 }
-                let gid_addr = rb + i * 2 + ro + 2 * (c - start);
-                let gid = unsafe { cu16(gid_addr) };
-                return if gid == 0 {
-                    0
-                } else {
-                    ((gid as i32 + d) & 0xFFFF) as u16
-                };
+                let gid_addr = rb + i * 2 + ro as usize + 2 * (c - start) as usize;
+                let gid = cu16(ws, gid_addr);
+                return if gid == 0 { 0 } else { ((gid as i32 + d) & 0xFFFF) as u16 };
             }
             i += 1;
         }
@@ -282,42 +347,50 @@ fn char_to_gid(_f: &mut ActualFile, fi: &FontInfo, ch: char) -> u16 {
     0
 }
 
-fn advance(f: &mut ActualFile, fi: &FontInfo, gid: u16) -> u16 {
-    if (gid as u32) < fi.num_h_metrics as u32 {
-        u16_at(f, fi.hmtx_off + gid as u32 * 4)
+fn advance(f: &mut ActualFile, ws: &TtfWs, fi: &FontInfo, gid: u16) -> u16 {
+    let idx = if (gid as u32) < fi.num_h_metrics as u32 {
+        gid as u32
     } else if fi.num_h_metrics > 0 {
-        u16_at(f, fi.hmtx_off + (fi.num_h_metrics as u32 - 1) * 4)
+        fi.num_h_metrics as u32 - 1
     } else {
-        0
+        return 0;
+    };
+    let o = idx as usize * 4;
+    // 命中 hmtx 缓存则从 RAM 取（翻页布局不再读 SD）；否则回退 SD 随机读。
+    if ws.hmtx_len > 0 && o + 2 <= ws.hmtx_len as usize {
+        u16::from_be_bytes([ws.hmtx_cache[o], ws.hmtx_cache[o + 1]])
+    } else {
+        u16_at(f, fi.hmtx_off + idx * 4)
     }
 }
 
-fn parse_glyph(f: &mut ActualFile, fi: &FontInfo, gid: u16) -> Option<(usize, usize, [i16; 4])> {
+fn parse_glyph(
+    f: &mut ActualFile, fi: &FontInfo, gid: u16, ws: &mut TtfWs,
+) -> Option<(usize, usize, [i16; 4])> {
     let (a, b) = if fi.loc_fmt == 1 {
-        let a = u32_at(f, fi.loca_off + gid as u32 * 4);
-        let b = u32_at(f, fi.loca_off + (gid as u32 + 1) * 4);
-        (a, b)
+        let o0 = gid as usize * 4;
+        let o1 = o0 + 4;
+        if ws.loca_len > 0 && o1 + 4 <= ws.loca_len as usize {
+            (lu32(ws, o0), lu32(ws, o1))
+        } else {
+            (u32_at(f, fi.loca_off + gid as u32 * 4), u32_at(f, fi.loca_off + (gid as u32 + 1) * 4))
+        }
     } else {
-        let a = u16_at(f, fi.loca_off + gid as u32 * 2) as u32 * 2;
-        let b = u16_at(f, fi.loca_off + (gid as u32 + 1) * 2) as u32 * 2;
-        (a, b)
+        let o0 = gid as usize * 2;
+        let o1 = o0 + 2;
+        if ws.loca_len > 0 && o1 + 2 <= ws.loca_len as usize {
+            (lu16(ws, o0) as u32 * 2, lu16(ws, o1) as u32 * 2)
+        } else {
+            (u16_at(f, fi.loca_off + gid as u32 * 2) as u32 * 2, u16_at(f, fi.loca_off + (gid as u32 + 1) * 2) as u32 * 2)
+        }
     };
     let glen = b.saturating_sub(a) as usize;
     if glen == 0 || glen > GLYF_BUF_MAX {
         return None;
     }
-    // 整块读字形进 RAM，之后解析零 SD 访问
-    unsafe {
-        read_into(
-            f,
-            fi.glyf_off + a,
-            core::ptr::addr_of_mut!(GLYF_BUF) as *mut u8,
-            glen,
-        );
-    }
-    let g = |rel: usize| -> u8 { unsafe { core::ptr::addr_of_mut!(GLYF_BUF).cast::<u8>().add(rel).read() } };
-    let gu16 = |rel: usize| -> u16 { unsafe { u16::from_be_bytes([g(rel), g(rel + 1)]) } };
-    let gi16 = |rel: usize| -> i16 { gu16(rel) as i16 };
+    unsafe { read_into(f, fi.glyf_off + a, ws.glyf_buf.as_mut_ptr(), glen); }
+    let gu16 = |rel: usize| u16::from_be_bytes([ws.glyf_buf[rel], ws.glyf_buf[rel + 1]]);
+    let gi16 = |rel: usize| gu16(rel) as i16;
 
     let nc = gi16(0);
     if nc < 0 || nc as usize > MAX_CONTOURS {
@@ -327,40 +400,28 @@ fn parse_glyph(f: &mut ActualFile, fi: &FontInfo, gid: u16) -> Option<(usize, us
     let bbox = [gi16(2), gi16(4), gi16(6), gi16(8)];
     let mut p = 10usize;
     for i in 0..nc {
-        unsafe {
-            core::ptr::addr_of_mut!(END_PTS).cast::<u16>().add(i).write(gu16(p + i * 2));
-        }
+        ws.end_pts[i] = gu16(p + i * 2);
     }
     p += nc * 2;
-    let npt = if nc > 0 {
-        unsafe { core::ptr::addr_of_mut!(END_PTS).cast::<u16>().add(nc - 1).read() as usize + 1 }
-    } else {
-        return None;
-    };
+    let npt = if nc > 0 { ws.end_pts[nc - 1] as usize + 1 } else { return None };
     if npt > MAX_PTS {
         return None;
     }
     let instr_len = gu16(p);
     p += 2 + instr_len as usize;
-    // flags（带 repeat）
+    // flags
     let mut got = 0usize;
     while got < npt {
-        let fl = g(p);
+        let fl = ws.glyf_buf[p];
         p += 1;
-        unsafe {
-            core::ptr::addr_of_mut!(PTS_ON).cast::<u8>().add(got).write(fl);
-        }
+        ws.pts_on[got] = fl;
         got += 1;
         if fl & 0x08 != 0 {
-            let rep = g(p) as usize;
+            let rep = ws.glyf_buf[p] as usize;
             p += 1;
             for _ in 0..rep {
-                if got >= npt {
-                    break;
-                }
-                unsafe {
-                    core::ptr::addr_of_mut!(PTS_ON).cast::<u8>().add(got).write(fl);
-                }
+                if got >= npt { break; }
+                ws.pts_on[got] = fl;
                 got += 1;
             }
         }
@@ -368,273 +429,200 @@ fn parse_glyph(f: &mut ActualFile, fi: &FontInfo, gid: u16) -> Option<(usize, us
     // x
     let mut x: i32 = 0;
     for i in 0..npt {
-        let fl = unsafe { pts_on(i) };
+        let fl = ws.pts_on[i];
         if fl & 0x02 != 0 {
-            let dx = g(p) as i32;
+            let dx = ws.glyf_buf[p] as i32;
             p += 1;
             x += if fl & 0x10 != 0 { dx } else { -dx };
         } else if fl & 0x10 == 0 {
             x += gi16(p) as i32;
             p += 2;
         }
-        unsafe {
-            set_xy_x(i, x);
-        }
+        ws.pts_x[i] = x;
     }
     // y
     let mut y: i32 = 0;
     for i in 0..npt {
-        let fl = unsafe { pts_on(i) };
+        let fl = ws.pts_on[i];
         if fl & 0x04 != 0 {
-            let dy = g(p) as i32;
+            let dy = ws.glyf_buf[p] as i32;
             p += 1;
             y += if fl & 0x20 != 0 { dy } else { -dy };
         } else if fl & 0x20 == 0 {
             y += gi16(p) as i32;
             p += 2;
         }
-        unsafe { set_xy_y(i, y); }
+        ws.pts_y[i] = y;
     }
     Some((npt, nc, bbox))
 }
 
-unsafe fn set_xy_x(i: usize, x: i32) {
-    core::ptr::addr_of_mut!(PTS_X).cast::<i32>().add(i).write(x);
+fn seg_push(ws: &mut TtfWs, sn: &mut usize, x0: i32, y0: i32, x1: i32, y1: i32) {
+    if *sn < MAX_SEGS {
+        let b = *sn * 4;
+        ws.seg[b] = x0;
+        ws.seg[b + 1] = y0;
+        ws.seg[b + 2] = x1;
+        ws.seg[b + 3] = y1;
+        *sn += 1;
+    }
 }
-unsafe fn set_xy_y(i: usize, y: i32) {
-    core::ptr::addr_of_mut!(PTS_Y).cast::<i32>().add(i).write(y);
+/// 二次贝塞尔曲线定点化（Q8）：6 等分，系数 (1-t)²,2(1-t)t,t² 预算成 Q8(×256)。
+/// B = (c0*p0 + c1*p1 + c2*p2) >> 8。c、p 均为 Q8，乘积 Q16，>>8 回 Q8。全程整数，无 FPU。
+fn seg_quad(ws: &mut TtfWs, sn: &mut usize, p0: (i32, i32), p1: (i32, i32), p2: (i32, i32)) {
+    const C: [[i32; 3]; 6] = [
+        [178, 71, 7], [114, 114, 28], [64, 128, 64], [28, 114, 114], [7, 71, 178], [0, 0, 256],
+    ];
+    let (mut cx, mut cy) = p0;
+    for k in 0..6 {
+        let c = C[k];
+        let ex = (c[0] * p0.0 + c[1] * p1.0 + c[2] * p2.0) >> 8;
+        let ey = (c[0] * p0.1 + c[1] * p1.1 + c[2] * p2.1) >> 8;
+        seg_push(ws, sn, cx, cy, ex, ey);
+        cx = ex;
+        cy = ey;
+    }
 }
 
-unsafe fn flatten_contour(
-    mut seg_n: usize, s: usize, e: usize, sc: f32, x0: i32, y1: i32,
+fn flatten_contour(
+    ws: &mut TtfWs, mut seg_n: usize, s: usize, e: usize, sc_q8: i32, x0: i32, y1: i32,
 ) -> usize {
     let n = e - s + 1;
-    if n == 0 {
-        return seg_n;
-    }
-    let px = core::ptr::addr_of_mut!(PTS_X).cast::<i32>();
-    let py = core::ptr::addr_of_mut!(PTS_Y).cast::<i32>();
-    let pon = core::ptr::addr_of_mut!(PTS_ON).cast::<u8>();
-    let tx = |xi: i32| (xi - x0) as f32 * sc;
-    let ty = |yi: i32| (y1 - yi) as f32 * sc;
+    if n == 0 { return seg_n; }
+    // 定点（Q8）：像素坐标 = font_unit * sc_q8，sc_q8 = px*256/upem。中点 /2 → >>1。
+    let tx = |xi: i32| (xi - x0) * sc_q8;
+    let ty = |yi: i32| (y1 - yi) * sc_q8;
 
     let mut start = 0usize;
     while start < n {
-        if pon.add(s + start).read() & 1 != 0 {
-            break;
-        }
+        if ws.pts_on[s + start] & 1 != 0 { break; }
         start += 1;
     }
     if start == n {
-        // 全 off：合成中点起点，相邻中点为隐式 on
         let mut vcur = (
-            (tx(px.add(s + n - 1).read()) + tx(px.add(s).read())) / 2.0,
-            (ty(py.add(s + n - 1).read()) + ty(py.add(s).read())) / 2.0,
+            (tx(ws.pts_x[s + n - 1]) + tx(ws.pts_x[s])) >> 1,
+            (ty(ws.pts_y[s + n - 1]) + ty(ws.pts_y[s])) >> 1,
         );
         for k in 0..n {
-            let ctrl = (tx(px.add(s + k).read()), ty(py.add(s + k).read()));
-            let nxt = (tx(px.add(s + (k + 1) % n).read()), ty(py.add(s + (k + 1) % n).read()));
-            let end = ((ctrl.0 + nxt.0) / 2.0, (ctrl.1 + nxt.1) / 2.0);
-            seg_quad(&mut seg_n, vcur, ctrl, end);
+            let ctrl = (tx(ws.pts_x[s + k]), ty(ws.pts_y[s + k]));
+            let nxt = (tx(ws.pts_x[s + (k + 1) % n]), ty(ws.pts_y[s + (k + 1) % n]));
+            let end = ((ctrl.0 + nxt.0) >> 1, (ctrl.1 + nxt.1) >> 1);
+            seg_quad(ws, &mut seg_n, vcur, ctrl, end);
             vcur = end;
         }
         return seg_n;
     }
     let idx = |k: usize| s + (start + k) % n;
-    let v0 = (tx(px.add(idx(0)).read()), ty(py.add(idx(0)).read()));
+    let v0 = (tx(ws.pts_x[idx(0)]), ty(ws.pts_y[idx(0)]));
     let mut vcur = v0;
     let mut k = 1usize;
     while k < n {
-        let ison = pon.add(idx(k)).read() & 1 != 0;
+        let ison = ws.pts_on[idx(k)] & 1 != 0;
         if ison {
-            let p = (tx(px.add(idx(k)).read()), ty(py.add(idx(k)).read()));
-            seg_push(&mut seg_n, vcur.0, vcur.1, p.0, p.1);
+            let p = (tx(ws.pts_x[idx(k)]), ty(ws.pts_y[idx(k)]));
+            seg_push(ws, &mut seg_n, vcur.0, vcur.1, p.0, p.1);
             vcur = p;
             k += 1;
         } else {
-            let ctrl = (tx(px.add(idx(k)).read()), ty(py.add(idx(k)).read()));
-            if k + 1 < n && pon.add(idx(k + 1)).read() & 1 != 0 {
-                let end = (tx(px.add(idx(k + 1)).read()), ty(py.add(idx(k + 1)).read()));
-                seg_quad(&mut seg_n, vcur, ctrl, end);
+            let ctrl = (tx(ws.pts_x[idx(k)]), ty(ws.pts_y[idx(k)]));
+            if k + 1 < n && ws.pts_on[idx(k + 1)] & 1 != 0 {
+                let end = (tx(ws.pts_x[idx(k + 1)]), ty(ws.pts_y[idx(k + 1)]));
+                seg_quad(ws, &mut seg_n, vcur, ctrl, end);
                 vcur = end;
                 k += 2;
             } else {
-                let nxt = (tx(px.add(idx(k + 1)).read()), ty(py.add(idx(k + 1)).read()));
-                let end = ((ctrl.0 + nxt.0) / 2.0, (ctrl.1 + nxt.1) / 2.0);
-                seg_quad(&mut seg_n, vcur, ctrl, end);
+                let nxt = (tx(ws.pts_x[idx(k + 1)]), ty(ws.pts_y[idx(k + 1)]));
+                let end = ((ctrl.0 + nxt.0) >> 1, (ctrl.1 + nxt.1) >> 1);
+                seg_quad(ws, &mut seg_n, vcur, ctrl, end);
                 vcur = end;
                 k += 1;
             }
         }
     }
     if vcur != v0 {
-        seg_push(&mut seg_n, vcur.0, vcur.1, v0.0, v0.1);
+        seg_push(ws, &mut seg_n, vcur.0, vcur.1, v0.0, v0.1);
     }
     seg_n
 }
 
-unsafe fn fill_glyph<D: DrawTarget<Color = BinaryColor>>(
-    display: &mut D, seg_n: usize, ox: i32, oy: i32, w: i32, h: i32, color: BinaryColor,
+fn fill_glyph<D: DrawTarget<Color = BinaryColor>>(
+    ws: &mut TtfWs, display: &mut D, seg_n: usize, ox: i32, oy: i32, w: i32, h: i32, color: BinaryColor,
 ) {
-    let seg = core::ptr::addr_of_mut!(SEG).cast::<f32>();
-    let cross = core::ptr::addr_of_mut!(CROSS_X).cast::<f32>();
     for y in 0..h {
-        let yc = y as f32 + 0.5;
+        let yc = (y << 8) + 128; // Q8: y + 0.5
         let mut nc = 0usize;
         for s in 0..seg_n {
-            let b = seg.add(s * 4);
-            let (ax, ay) = (b.read(), b.add(1).read());
-            let (bx, by) = (b.add(2).read(), b.add(3).read());
+            let b = s * 4;
+            let (ax, ay) = (ws.seg[b], ws.seg[b + 1]);
+            let (bx, by) = (ws.seg[b + 2], ws.seg[b + 3]);
             if (ay <= yc && yc < by) || (by <= yc && yc < ay) {
                 if nc < MAX_CROSS {
-                    let t = if by != ay { (yc - ay) / (by - ay) } else { 0.0 };
-                    cross.add(nc).write(ax + t * (bx - ax));
+                    let dy = by - ay;
+                    // t_q8=(yc-ay)/dy ∈[0,256]；cross=ax + t_q8*(bx-ax)/256
+                    let t_q8 = if dy != 0 { ((yc - ay) << 8) / dy } else { 0 };
+                    ws.cross_x[nc] = ax + ((t_q8 * (bx - ax)) >> 8);
                     nc += 1;
                 }
             }
         }
-        // 插入排序
         for i in 1..nc {
             let mut j = i;
             while j > 0 {
-                let a = cross.add(j - 1).read();
-                let b = cross.add(j).read();
-                if a > b {
-                    cross.add(j - 1).write(b);
-                    cross.add(j).write(a);
+                let a = ws.cross_x[j - 1];
+                let bv = ws.cross_x[j];
+                if a > bv {
+                    ws.cross_x[j - 1] = bv;
+                    ws.cross_x[j] = a;
                     j -= 1;
-                } else {
-                    break;
-                }
+                } else { break; }
             }
         }
         let mut k = 0;
         while k + 1 < nc {
-            let xs = cross.add(k).read();
-            let xe = cross.add(k + 1).read();
-            let x0i = (if xs < 0.0 { 0.0 } else { xs }) as i32;
-            let x1i = (if xe > w as f32 { w as f32 } else { xe }) as i32;
+            let x0i = (ws.cross_x[k] >> 8).max(0);
+            let x1i = (ws.cross_x[k + 1] >> 8).min(w);
             for x in x0i..x1i {
-                let _ = display.draw_iter(core::iter::once(Pixel(
-                    Point::new(ox + x, oy + y), color,
-                )));
+                let _ = display.draw_iter(core::iter::once(Pixel(Point::new(ox + x, oy + y), color)));
             }
             k += 2;
         }
     }
 }
 
-/// 解析已打开的字体文件（表目录 + 缓存 cmap）。不锁 SD，文件由调用方打开。
-pub fn open_font(file: &mut ActualFile) -> Option<FontInfo> {
-    parse_font_info(file)
-}
-
-/// 用已打开的字体把一段文本渲染进 display（逐字按需随机读字形）。
-/// `text` 中的 `\n` 断行；超过 `max_width` 兜底换行；到屏幕底部停止。
-/// 不锁 SD——文件由调用方打开（避免与已持有 SD_MOUNT 的调用方死锁）。
-pub fn render_string(
-    file: &mut ActualFile,
-    fi: &FontInfo,
-    display: &mut EpdDisplay,
-    text: &str,
-    px: f32,
-    top_left: Point,
-    max_width: i32,
-    line_h: i32,
-) {
-    let vh = display.bounding_box().size.height as i32;
-    let sc = px / fi.units_per_em as f32;
-    let left = top_left.x;
-    let mut pen_x = left;
-    let mut pen_y = top_left.y;
-    for ch in text.chars() {
-        if ch == '\n' || ch == '\r' {
-            pen_x = left;
-            pen_y += line_h;
-            continue;
-        }
-        let gid = char_to_gid(file, fi, ch);
-        let adv_f = advance(file, fi, gid) as f32 * sc;
-        if pen_x + adv_f as i32 > left + max_width {
-            pen_x = left;
-            pen_y += line_h;
-        }
-        if pen_y + line_h > vh {
-            break;
-        }
-        if let Some((npt, ncon, bbox)) = parse_glyph(file, fi, gid) {
-            let x0 = bbox[0] as i32;
-            let x1 = bbox[2] as i32;
-            let y1 = bbox[3] as i32;
-            let gw = ((x1 - x0) as f32 * sc) as i32 + 1;
-            let gh = ((bbox[3] - bbox[1]) as f32 * sc) as i32 + 1;
-            let mut seg_n = 0usize;
-            let mut si = 0usize;
-            for ci in 0..ncon {
-                let ei = unsafe {
-                    core::ptr::addr_of_mut!(END_PTS).cast::<u16>().add(ci).read() as usize
-                };
-                if ei >= npt {
-                    break;
-                }
-                seg_n = unsafe { flatten_contour(seg_n, si, ei, sc, x0, y1) };
-                si = ei + 1;
-            }
-            unsafe { fill_glyph(display, seg_n, pen_x, pen_y, gw, gh, BinaryColor::On) };
-        }
-        pen_x += adv_f as i32;
-    }
-}
-
-/// 缓存查表：命中返回槽位号。
-unsafe fn cache_lookup(gid: u16) -> Option<usize> {
-    let g = core::ptr::addr_of!(GC_GID).cast::<u16>();
+// ── 字形位图缓存 ──
+fn cache_lookup(ws: &TtfWs, gid: u16) -> Option<usize> {
     let mut i = 0;
     while i < GC_N {
-        if g.add(i).read() == gid {
-            return Some(i);
-        }
+        if ws.gc_gid[i] == gid { return Some(i); }
         i += 1;
     }
     None
 }
-
-/// 分配槽位（轮询覆盖），记录 gid/w/h 并清空位图区，返回槽位号。
-unsafe fn cache_store(gid: u16, w: u8, h: u8) -> usize {
-    let next = core::ptr::addr_of_mut!(GC_NEXT);
-    let slot = next.read();
-    *next = (slot + 1) % GC_N;
-    core::ptr::addr_of_mut!(GC_GID).cast::<u16>().add(slot).write(gid);
-    core::ptr::addr_of_mut!(GC_W).cast::<u8>().add(slot).write(w);
-    core::ptr::addr_of_mut!(GC_H).cast::<u8>().add(slot).write(h);
-    let bmp = core::ptr::addr_of_mut!(GC_BMP).cast::<u8>().add(slot * GC_BMP_BYTES);
-    let mut i = 0;
-    while i < GC_BMP_BYTES {
-        bmp.add(i).write(0);
-        i += 1;
-    }
+fn cache_store(ws: &mut TtfWs, gid: u16, w: u8, h: u8, yoff: i16) -> usize {
+    let slot = ws.gc_next;
+    ws.gc_next = (slot + 1) % GC_N;
+    ws.gc_gid[slot] = gid;
+    ws.gc_w[slot] = w;
+    ws.gc_h[slot] = h;
+    ws.gc_yoff[slot] = yoff;
+    for i in 0..GC_BMP_BYTES { ws.gc_bmp[slot][i] = 0; }
     slot
 }
-
-/// 把已展平的 SEG 奇偶填充进 GC_BMP[slot]（1-bit，gw×gh）。
-unsafe fn fill_into_bitmap(seg_n: usize, gw: i32, gh: i32, slot: usize) {
+fn fill_into_bitmap(ws: &mut TtfWs, seg_n: usize, gw: i32, gh: i32, slot: usize) {
     let rowbytes = ((gw as usize) + 7) / 8;
-    let bmp = core::ptr::addr_of_mut!(GC_BMP).cast::<u8>().add(slot * GC_BMP_BYTES);
-    let seg = core::ptr::addr_of!(SEG).cast::<f32>();
-    let cross = core::ptr::addr_of_mut!(CROSS_X).cast::<f32>();
-    let mut y = 0;
-    while y < gh {
-        let yc = y as f32 + 0.5;
+    for y in 0..gh {
+        let yc = (y << 8) + 128; // Q8: y + 0.5
         let mut nc = 0usize;
         let mut s = 0;
         while s < seg_n {
-            let b = seg.add(s * 4);
-            let (ax, ay) = (b.read(), b.add(1).read());
-            let (bx, by) = (b.add(2).read(), b.add(3).read());
+            let b = s * 4;
+            let (ax, ay) = (ws.seg[b], ws.seg[b + 1]);
+            let (bx, by) = (ws.seg[b + 2], ws.seg[b + 3]);
             if (ay <= yc && yc < by) || (by <= yc && yc < ay) {
                 if nc < MAX_CROSS {
-                    let t = if by != ay { (yc - ay) / (by - ay) } else { 0.0 };
-                    cross.add(nc).write(ax + t * (bx - ax));
+                    let dy = by - ay;
+                    let t_q8 = if dy != 0 { ((yc - ay) << 8) / dy } else { 0 };
+                    ws.cross_x[nc] = ax + ((t_q8 * (bx - ax)) >> 8);
                     nc += 1;
                 }
             }
@@ -644,70 +632,50 @@ unsafe fn fill_into_bitmap(seg_n: usize, gw: i32, gh: i32, slot: usize) {
         while i < nc {
             let mut j = i;
             while j > 0 {
-                let a = cross.add(j - 1).read();
-                let bv = cross.add(j).read();
-                if a > bv {
-                    cross.add(j - 1).write(bv);
-                    cross.add(j).write(a);
-                    j -= 1;
-                } else {
-                    break;
-                }
+                let a = ws.cross_x[j - 1];
+                let bv = ws.cross_x[j];
+                if a > bv { ws.cross_x[j - 1] = bv; ws.cross_x[j] = a; j -= 1; } else { break; }
             }
             i += 1;
         }
         let mut k = 0;
         while k + 1 < nc {
-            let xs = cross.add(k).read();
-            let xe = cross.add(k + 1).read();
-            let mut x = (if xs < 0.0 { 0.0 } else { xs }) as i32;
-            let xend = (if xe > gw as f32 { gw as f32 } else { xe }) as i32;
+            let mut x = (ws.cross_x[k] >> 8).max(0);
+            let xend = (ws.cross_x[k + 1] >> 8).min(gw);
             while x < xend {
                 if x >= 0 && (x as usize) < gw as usize {
                     let idx = (y as usize) * rowbytes + (x as usize) / 8;
                     let mask = 0x80u8 >> (x % 8);
-                    bmp.add(idx).write(bmp.add(idx).read() | mask);
+                    ws.gc_bmp[slot][idx] |= mask;
                 }
                 x += 1;
             }
             k += 2;
         }
-        y += 1;
     }
 }
-
-/// 把 GC_BMP[slot] 的位图 blit 到 display（原点 ox,oy）。
-unsafe fn blit_slot<D: DrawTarget<Color = BinaryColor>>(
-    display: &mut D, slot: usize, ox: i32, oy: i32,
-) {
-    let w = core::ptr::addr_of!(GC_W).cast::<u8>().add(slot).read() as i32;
-    let h = core::ptr::addr_of!(GC_H).cast::<u8>().add(slot).read() as i32;
+fn blit_slot<D: DrawTarget<Color = BinaryColor>>(ws: &TtfWs, display: &mut D, slot: usize, ox: i32, oy: i32) {
+    let w = ws.gc_w[slot] as i32;
+    let h = ws.gc_h[slot] as i32;
     let rowbytes = ((w as usize) + 7) / 8;
-    let bmp = core::ptr::addr_of!(GC_BMP).cast::<u8>().add(slot * GC_BMP_BYTES);
-    let mut y = 0;
-    while y < h {
+    for y in 0..h {
         let mut x = 0;
         while x < w {
             let idx = (y as usize) * rowbytes + (x as usize) / 8;
-            if bmp.add(idx).read() & (0x80u8 >> (x % 8)) != 0 {
-                let _ = display.draw_iter(core::iter::once(Pixel(
-                    Point::new(ox + x, oy + y), BinaryColor::On,
-                )));
+            if ws.gc_bmp[slot][idx] & (0x80u8 >> (x % 8)) != 0 {
+                let _ = display.draw_iter(core::iter::once(Pixel(Point::new(ox + x, oy + y), BinaryColor::On)));
             }
             x += 1;
         }
-        y += 1;
     }
 }
 
-/// 把书的字节从 offset 起读进 BOOK_BUF，返回读到的字节数。
-pub fn read_book_chunk(f: &mut ActualFile, offset: u32) -> usize {
-    let dst = core::ptr::addr_of_mut!(BOOK_BUF) as *mut u8;
+/// 读 .txt 一页字节进 ws.book_buf，返回读到的字节数。
+pub fn read_book_chunk(f: &mut ActualFile, offset: u32, ws: &mut TtfWs) -> usize {
     let _ = f.seek_from_start(offset);
     let mut got = 0usize;
     while got < BOOK_BUF_MAX {
-        let buf = unsafe { core::slice::from_raw_parts_mut(dst.add(got), BOOK_BUF_MAX - got) };
-        match f.read(buf) {
+        match f.read(&mut ws.book_buf[got..]) {
             Ok(0) | Err(_) => break,
             Ok(n) => got += n,
         }
@@ -715,105 +683,73 @@ pub fn read_book_chunk(f: &mut ActualFile, offset: u32) -> usize {
     got
 }
 
-/// 即时分页+渲染：扫描 BOOK_BUF[..book_len] 的 UTF-8 文本，按 TTF advance 宽度换行，
-/// 填满 max_lines 行即止，返回消费的字节数（下一页从此字节开始）。
-pub fn paginate_render(
-    f: &mut ActualFile,
-    fi: &FontInfo,
-    display: &mut EpdDisplay,
-    book_len: usize,
-    px: f32,
-    top_left: Point,
-    max_w: i32,
-    line_h: i32,
-    max_lines: u32,
+/// 即时分页+渲染：扫描 ws.book_buf[..book_len] 的 UTF-8，按 advance 换行、满 max_lines 止，
+/// 返回消费字节数。字形命中缓存则 blit，否则光栅化进缓存再 blit。
+pub fn paginate_render<D: DrawTarget<Color = BinaryColor>>(
+    f: &mut ActualFile, fi: &FontInfo, ws: &mut TtfWs, display: &mut D,
+    book_len: usize, px: f32, top_left: Point, max_w: i32, line_h: i32, max_lines: u32,
 ) -> usize {
-    if max_lines == 0 {
-        return 0;
-    }
-    let vh = display.bounding_box().size.height as i32;
-    let sc = px / fi.units_per_em as f32;
+    if max_lines == 0 { return 0; }
+    ws.dbg_hits = 0;
+    ws.dbg_miss = 0;
+    let sc = px / fi.units_per_em as f32; // advance 布局用（每字一次，f32 可接受）
+    let sc_q8 = (px * 256.0 / fi.units_per_em as f32) as i32; // 光栅化定点（无 FPU 提速）
     let left = top_left.x;
     let mut pen_x = left;
     let mut pen_y = top_left.y;
     let mut line = 0u32;
     let mut i = 0usize;
-    let buf = core::ptr::addr_of!(BOOK_BUF) as *const u8;
     while i < book_len {
-        let b0 = unsafe { buf.add(i).read() };
-        // UTF-8 首字节定字符字节长度（续字节不应出现在首位，按 1 跳过）
-        let clen = if b0 < 0x80 {
-            1
-        } else if b0 < 0xC0 {
-            1
-        } else if b0 < 0xE0 {
-            2
-        } else if b0 < 0xF0 {
-            3
-        } else {
-            4
-        };
-        if i + clen > book_len {
-            break; // 缓冲末尾不完整字符，留给下一页
-        }
-        let ch = unsafe {
-            let s = core::slice::from_raw_parts(buf.add(i), clen);
-            core::str::from_utf8(s)
-                .ok()
-                .and_then(|s| s.chars().next())
-                .unwrap_or('\u{FFFD}')
-        };
+        let b0 = ws.book_buf[i];
+        let clen = if b0 < 0x80 { 1 } else if b0 < 0xC0 { 1 }
+            else if b0 < 0xE0 { 2 } else if b0 < 0xF0 { 3 } else { 4 };
+        if i + clen > book_len { break; }
+        let ch = core::str::from_utf8(&ws.book_buf[i..i + clen])
+            .ok().and_then(|s| s.chars().next()).unwrap_or('\u{FFFD}');
         if ch == '\n' || ch == '\r' {
             line += 1;
             i += clen;
-            if line >= max_lines {
-                break;
-            }
+            if line >= max_lines { break; }
             pen_x = left;
             pen_y += line_h;
             continue;
         }
-        let gid = char_to_gid(f, fi, ch);
-        let adv_f = advance(f, fi, gid) as f32 * sc;
+        let gid = char_to_gid(ws, fi, ch);
+        let adv_f = advance(f, ws, fi, gid) as f32 * sc;
         if pen_x + adv_f as i32 > left + max_w {
             line += 1;
-            if line >= max_lines {
-                break; // 此字留到下一页（i 未推进）
-            }
+            if line >= max_lines { break; }
             pen_x = left;
             pen_y += line_h;
         }
-        if pen_y + line_h > vh {
-            break;
-        }
-        // 字形位图缓存：命中直接 blit；未命中则光栅化进缓存再 blit（跨页复用）
-        if let Some(slot) = unsafe { cache_lookup(gid) } {
-            unsafe { blit_slot(display, slot, pen_x, pen_y) };
-        } else if let Some((npt, ncon, bbox)) = parse_glyph(f, fi, gid) {
+        if let Some(slot) = cache_lookup(ws, gid) {
+            ws.dbg_hits += 1;
+            blit_slot(ws, display, slot, pen_x, pen_y + ws.gc_yoff[slot] as i32);
+        } else if let Some((npt, ncon, bbox)) = parse_glyph(f, fi, gid, ws) {
+            ws.dbg_miss += 1;
             let x0 = bbox[0] as i32;
             let x1 = bbox[2] as i32;
-            let y1 = bbox[3] as i32;
-            let gw = ((x1 - x0) as f32 * sc) as i32 + 1;
-            let gh = ((bbox[3] - bbox[1]) as f32 * sc) as i32 + 1;
+            let ymax = bbox[3] as i32;
+            // 基线对齐：位图 top 相对行顶的偏移 = (升部 - 字形顶) 缩放。
+            // CJK（顶≈升部）→ 偏移≈0（贴行顶）；标点（顶小）→ 下沉到基线。
+            let yoff = (((fi.ascent as i32 - ymax) * sc_q8) >> 8) as i16;
+            let gw = ((x1 - x0) * sc_q8 >> 8) + 1;
+            let gh = ((bbox[3] as i32 - bbox[1] as i32) * sc_q8 >> 8) + 1;
             let mut seg_n = 0usize;
             let mut si = 0usize;
             for ci in 0..ncon {
-                let ei = unsafe {
-                    core::ptr::addr_of_mut!(END_PTS).cast::<u16>().add(ci).read() as usize
-                };
-                if ei >= npt {
-                    break;
-                }
-                seg_n = unsafe { flatten_contour(seg_n, si, ei, sc, x0, y1) };
+                let ei = ws.end_pts[ci] as usize;
+                if ei >= npt { break; }
+                seg_n = flatten_contour(ws, seg_n, si, ei, sc_q8, x0, ymax);
                 si = ei + 1;
             }
             let rowbytes = ((gw as usize) + 7) / 8;
             if gw > 0 && gh > 0 && (gh as usize) * rowbytes <= GC_BMP_BYTES {
-                let slot = unsafe { cache_store(gid, gw as u8, gh as u8) };
-                unsafe { fill_into_bitmap(seg_n, gw, gh, slot) };
-                unsafe { blit_slot(display, slot, pen_x, pen_y) };
+                let slot = cache_store(ws, gid, gw as u8, gh as u8, yoff);
+                fill_into_bitmap(ws, seg_n, gw, gh, slot);
+                blit_slot(ws, display, slot, pen_x, pen_y + yoff as i32);
             } else {
-                unsafe { fill_glyph(display, seg_n, pen_x, pen_y, gw, gh, BinaryColor::On) };
+                fill_glyph(ws, display, seg_n, pen_x, pen_y + yoff as i32, gw, gh, BinaryColor::On);
             }
         }
         pen_x += adv_f as i32;
@@ -822,34 +758,74 @@ pub fn paginate_render(
     i
 }
 
-/// 主页 demo：从 SD 根目录 font.ttf 整屏渲染 SAMPLE。
-pub async fn render_text(display: &mut EpdDisplay) {
-    let vw = display.bounding_box().size.width as i32;
-    let mut guard = SD_MOUNT.lock().await;
-    let Some(ref mut sd) = *guard else {
-        println!("[ttf_sd] no SD");
-        return;
-    };
-    let Ok(v) = sd.volume_manager.open_volume(VolumeIdx(0)) else {
-        println!("[ttf_sd] open vol fail");
-        return;
-    };
-    let Ok(mut root) = v.open_root_dir() else {
-        println!("[ttf_sd] root dir fail");
-        return;
-    };
-    let Ok(mut f) = SdMount::open_file_by_name(&mut root, "font.ttf", embedded_sdmmc::Mode::ReadOnly)
-    else {
-        println!("[ttf_sd] font.ttf not found");
-        return;
-    };
-    let Some(fi) = open_font(&mut f) else {
-        println!("[ttf_sd] parse font info fail");
-        return;
-    };
-    println!(
-        "[ttf_sd] upem={} glyphs={} loc_fmt={} cmap_fmt={}",
-        fi.units_per_em, fi.num_glyphs, fi.loc_fmt, fi.cmap_fmt
-    );
-    render_string(&mut f, &fi, display, SAMPLE, 18.0, Point::new(6, 4), vw - 12, 20);
+/// 预加载：扫描 ws.book_buf[..book_len] 的字形，**只缓存不画**（加速下一次翻页）。
+/// 逻辑同 paginate_render，但跳过所有 display 绘制。
+///
+/// **async + 周期让出 CPU**：光栅化是软浮点重活（~10ms/字），一页 ~170 字要 ~1.8s。
+/// 若同步跑会卡死显示任务的墨水屏刷新（协作式调度，日志里 preload 堵在 begin render 之前）。
+/// 每 8 个字 await 一次，让显示任务能并行刷屏——翻页时屏幕先出图，预加载在后台跑完。
+pub async fn preload_glyphs(
+    f: &mut ActualFile<'_>, fi: &FontInfo, ws: &mut TtfWs,
+    book_len: usize, px: f32, max_w: i32, line_h: i32, max_lines: u32,
+) {
+    if max_lines == 0 { return; }
+    let sc = px / fi.units_per_em as f32;
+    let sc_q8 = (px * 256.0 / fi.units_per_em as f32) as i32;
+    let mut pen_x = 0i32;
+    let mut line = 0u32;
+    let mut i = 0usize;
+    let mut since_yield = 0u32;
+    while i < book_len {
+        let b0 = ws.book_buf[i];
+        let clen = if b0 < 0x80 { 1 } else if b0 < 0xC0 { 1 }
+            else if b0 < 0xE0 { 2 } else if b0 < 0xF0 { 3 } else { 4 };
+        if i + clen > book_len { break; }
+        let ch = core::str::from_utf8(&ws.book_buf[i..i + clen])
+            .ok().and_then(|s| s.chars().next()).unwrap_or('\u{FFFD}');
+        if ch == '\n' || ch == '\r' {
+            line += 1; i += clen;
+            if line >= max_lines { break; }
+            pen_x = 0;
+            continue;
+        }
+        let gid = char_to_gid(ws, fi, ch);
+        let adv_f = advance(f, ws, fi, gid) as f32 * sc;
+        if pen_x + adv_f as i32 > max_w {
+            line += 1;
+            if line >= max_lines { break; }
+            pen_x = 0;
+        }
+        // 只缓存不画
+        if cache_lookup(ws, gid).is_none() {
+            if let Some((npt, ncon, bbox)) = parse_glyph(f, fi, gid, ws) {
+                let x0 = bbox[0] as i32;
+                let x1 = bbox[2] as i32;
+                let ymax = bbox[3] as i32;
+                let yoff = (((fi.ascent as i32 - ymax) * sc_q8) >> 8) as i16;
+                let gw = ((x1 - x0) * sc_q8 >> 8) + 1;
+                let gh = ((bbox[3] as i32 - bbox[1] as i32) * sc_q8 >> 8) + 1;
+                let mut seg_n = 0usize;
+                let mut si = 0usize;
+                for ci in 0..ncon {
+                    let ei = ws.end_pts[ci] as usize;
+                    if ei >= npt { break; }
+                    seg_n = flatten_contour(ws, seg_n, si, ei, sc_q8, x0, ymax);
+                    si = ei + 1;
+                }
+                let rowbytes = ((gw as usize) + 7) / 8;
+                if gw > 0 && gh > 0 && (gh as usize) * rowbytes <= GC_BMP_BYTES {
+                    let slot = cache_store(ws, gid, gw as u8, gh as u8, yoff);
+                    fill_into_bitmap(ws, seg_n, gw, gh, slot);
+                }
+            }
+        }
+        pen_x += adv_f as i32;
+        i += clen;
+        // 周期让出 CPU：让显示任务能并行刷墨水屏（preload 不再阻塞刷新）
+        since_yield += 1;
+        if since_yield >= 8 {
+            since_yield = 0;
+            embassy_time::Timer::after(embassy_time::Duration::from_micros(1)).await;
+        }
+    }
 }

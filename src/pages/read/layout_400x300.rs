@@ -5,6 +5,7 @@ use embedded_graphics::geometry::Dimensions;
 use u8g2_fonts::FontRenderer;
 use u8g2_fonts::fonts;
 use u8g2_fonts::types::{FontColor, HorizontalAlignment, VerticalPosition};
+use core::sync::atomic::{AtomicU8, Ordering};
 
 use crate::display::EpdDisplay;
 
@@ -14,8 +15,18 @@ pub const DISPLAY_HEIGHT: u32 = 300;
 pub const FONT_SIZE: u32 = 16;
 pub const PROGRESS_AREA_HEIGHT: u32 = 20;
 
-pub fn visual_width() -> u32 { DISPLAY_HEIGHT }
-pub fn visual_height() -> u32 { DISPLAY_WIDTH }
+/// 默认朝向旋转号：0=Rotate0,1=Rotate90,2=Rotate180,3=Rotate270。400x300 默认 Rotate90(竖屏)。
+const DEFAULT_ROT_NUM: u8 = 1;
+/// 当前旋转状态（0..3，相对默认依次向右 +90°）。ReadPage 在 set_rotation 前 set_rotation_state。
+static ROTATE_STATE: AtomicU8 = AtomicU8::new(0);
+
+pub fn set_rotation_state(r: u8) { ROTATE_STATE.store(r % 4, Ordering::Relaxed); }
+fn cur_rot_num() -> u8 { (DEFAULT_ROT_NUM.wrapping_add(ROTATE_STATE.load(Ordering::Relaxed))) % 4 }
+/// Rotate90/270 需交换宽高（竖屏）；Rotate0/180 用原生宽高（横屏）。
+fn swapped() -> bool { cur_rot_num() % 2 == 1 }
+
+pub fn visual_width() -> u32 { if swapped() { DISPLAY_HEIGHT } else { DISPLAY_WIDTH } }
+pub fn visual_height() -> u32 { if swapped() { DISPLAY_WIDTH } else { DISPLAY_HEIGHT } }
 
 pub fn text_width() -> u32 { visual_width() }
 pub fn text_left_margin() -> i32 { 0 }
@@ -24,8 +35,13 @@ pub fn page_lines() -> u32 {
     (visual_height() - PROGRESS_AREA_HEIGHT) / FONT_SIZE - 1
 }
 
-pub fn current_rotation(flipped: bool) -> DisplayRotation {
-    if flipped { DisplayRotation::Rotate270 } else { DisplayRotation::Rotate90 }
+pub fn current_rotation() -> DisplayRotation {
+    match cur_rot_num() {
+        0 => DisplayRotation::Rotate0,
+        1 => DisplayRotation::Rotate90,
+        2 => DisplayRotation::Rotate180,
+        _ => DisplayRotation::Rotate270,
+    }
 }
 
 pub fn sleep_renderer(display: &mut EpdDisplay) {

@@ -5,6 +5,7 @@ use embedded_graphics::geometry::Dimensions;
 use u8g2_fonts::FontRenderer;
 use u8g2_fonts::fonts;
 use u8g2_fonts::types::{FontColor, HorizontalAlignment, VerticalPosition};
+use core::sync::atomic::{AtomicU8, Ordering};
 
 use crate::display::EpdDisplay;
 
@@ -14,8 +15,16 @@ pub const DISPLAY_HEIGHT: u32 = 264;
 pub const FONT_SIZE: u32 = 16;
 pub const PROGRESS_AREA_HEIGHT: u32 = 20;
 
-pub fn visual_width() -> u32 { DISPLAY_WIDTH }
-pub fn visual_height() -> u32 { DISPLAY_HEIGHT }
+/// 默认朝向旋转号：176x264 默认 Rotate0(原生竖屏)。
+const DEFAULT_ROT_NUM: u8 = 0;
+static ROTATE_STATE: AtomicU8 = AtomicU8::new(0);
+
+pub fn set_rotation_state(r: u8) { ROTATE_STATE.store(r % 4, Ordering::Relaxed); }
+fn cur_rot_num() -> u8 { (DEFAULT_ROT_NUM.wrapping_add(ROTATE_STATE.load(Ordering::Relaxed))) % 4 }
+fn swapped() -> bool { cur_rot_num() % 2 == 1 }
+
+pub fn visual_width() -> u32 { if swapped() { DISPLAY_HEIGHT } else { DISPLAY_WIDTH } }
+pub fn visual_height() -> u32 { if swapped() { DISPLAY_WIDTH } else { DISPLAY_HEIGHT } }
 
 /// Effective text area width — subtract one ZH char width to prevent the
 /// last character on each line from being clipped (ZH_WIDTH overestimates
@@ -28,8 +37,13 @@ pub fn page_lines() -> u32 {
     (visual_height() - PROGRESS_AREA_HEIGHT) / FONT_SIZE - 1
 }
 
-pub fn current_rotation(flipped: bool) -> DisplayRotation {
-    if flipped { DisplayRotation::Rotate180 } else { DisplayRotation::Rotate0 }
+pub fn current_rotation() -> DisplayRotation {
+    match cur_rot_num() {
+        0 => DisplayRotation::Rotate0,
+        1 => DisplayRotation::Rotate90,
+        2 => DisplayRotation::Rotate180,
+        _ => DisplayRotation::Rotate270,
+    }
 }
 
 pub fn sleep_renderer(display: &mut EpdDisplay) {

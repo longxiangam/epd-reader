@@ -320,9 +320,12 @@ pub fn clock_restored() -> bool {
 }
 
 pub async fn save_time_to_rtc() {
-    unsafe {
-        core::ptr::addr_of_mut!(WHEN_SLEEP_TIME_TIMESTAMP)
-            .write(get_clock().unwrap().now().await.unix_timestamp() as u64);
+    // 阅读模式无 NTP/无时钟 → get_clock() 为 None；此时跳过（WHEN_SLEEP_TIME_TIMESTAMP 保留旧值）。
+    if let Some(clock) = get_clock() {
+        unsafe {
+            core::ptr::addr_of_mut!(WHEN_SLEEP_TIME_TIMESTAMP)
+                .write(clock.now().await.unix_timestamp() as u64);
+        }
     }
 }
 
