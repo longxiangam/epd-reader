@@ -90,7 +90,10 @@ pub struct ReadPage {
     ttf_offset: u32,
     ttf_end: u32,
     ttf_file_len: u32,
-    ttf_hist: Vec<u32, 32>,
+    /// 全书页索引：每页的起始字节偏移（进书时一次性建好）。
+    ttf_page_starts: Vec<u32, 1000>,
+    /// 当前在 ttf_page_starts 中的索引。
+    ttf_page_idx: u32,
     ttf_px: f32,
     /// 行间距（像素，叠加在 fi.line_height 之上）。
     line_gap: i32,
@@ -262,6 +265,53 @@ impl ReadPage {
         } else if let Some(prev) = self.ttf_hist.pop() {
             self.ttf_offset = prev;
             self.ttf_end = prev;
+        } else if self.ttf_offset > 0 && !self.books_dir_ptr.is_null() && !self.font_file_ptr.is_null() {
+            // 历史空了：从 offset 0 重新分页，找到当前页的前一页边界
+            let book_name = self.menus.as_ref()
+                .and_then(|m| m.get(self.choose_index as usize))
+                .cloned();
+            if let Some(book_name) = book_name {
+                let bd: &mut ActualDirectory<'_> = unsafe { &mut *self.books_dir_ptr };
+                let file_name = format!("{}.txt", book_name);
+                let short_name = SdMount::find_entry_by_name(bd, &file_name).map(|e| e.name);
+                if let Some(sn) = short_name {
+                    if let Ok(mut bf) = bd.open_file_in_dir(sn, embedded_sdmmc::Mode::ReadOnly) {
+                        let ff: &mut ActualFile = unsafe { &mut *self.font_file_ptr };
+                        if let Some(ws) = self.ttf_ws.as_mut() {
+                            if let Some(fi) = crate::ttf_sd::open_font(ff, ws) {
+                                let line_h = fi.line_height(self.ttf_px) + self.line_gap;
+                                let text_area_h = super::visual_height() as i32
+                                    - super::PROGRESS_AREA_HEIGHT as i32 - 2;
+                                let max_lines = ((text_area_h / line_h).max(1)) as u32;
+                                let actual_line_h = text_area_h / max_lines as i32;
+                                let max_w = super::text_width() as i32;
+                                // 从 offset 0 逐页扫描，直到找到当前页的前一页
+                                let mut search = 0u32;
+                                let mut found = false;
+                                while search < self.ttf_offset {
+                                    let consumed = crate::ttf_sd::compute_page_consumed(
+                                        &mut bf, ff, &fi, ws, search,
+                                        self.ttf_px, max_w, actual_line_h, max_lines,
+                                    );
+                                    if consumed == 0 { break; }
+                                    let next_start = search + consumed;
+                                    if next_start >= self.ttf_offset {
+                                        self.ttf_offset = search;
+                                        self.ttf_end = search;
+                                        found = true;
+                                        break;
+                                    }
+                                    search = next_start;
+                                }
+                                if found {
+                                    let _ = self.ttf_hist.push(0); // 占位：允许再回退到第一页
+                                }
+                            }
+                        }
+                        bf.close();
+                    }
+                }
+            }
         }
         unsafe {
             *core::ptr::addr_of_mut!(TTF_RESUME_OFFSET) = self.ttf_offset.min(self.ttf_file_len);
@@ -1084,18 +1134,26 @@ impl Page for ReadPage {
                                 self.books_dir_ptr =
                                     core::ptr::addr_of_mut!(books_dir) as *mut ActualDirectory<'static>;
 
-                                // 扫描 .ttf 文件进 font_list
+                                // 扫描 .ttf 文件进 font_list（长文件名 + 短文件名回退）
                                 {
                                     let mut fonts_found: Vec<String<32>, 10> = Vec::new();
                                     let mut storage = [0u8; 512];
                                     let mut lfn_buffer = embedded_sdmmc::LfnBuffer::new(&mut storage);
-                                    let _ = books_dir.iterate_dir_lfn(&mut lfn_buffer, |_dir, lfn| {
-                                        if let Some(name) = lfn {
-                                            let b = name.as_bytes();
-                                            if b.len() >= 4
-                                                && b[b.len() - 4..].eq_ignore_ascii_case(b".ttf")
-                                            {
-                                                if let Ok(s) = String::<32>::from_str(name) {
+                                    let _ = books_dir.iterate_dir_lfn(&mut lfn_buffer, |dir, lfn| {
+                                        let name_opt: Option<alloc::string::String> = if let Some(lfn_name) = lfn {
+                                            if is_ttf(lfn_name) { Some(alloc::string::String::from(lfn_name)) } else { None }
+                                        } else {
+                                            // 短文件名回退：dir.name 是 ShortFileName
+                                            if dir.name.extension().eq_ignore_ascii_case(b"TTF") {
+                                                let base = dir.name.base_name();
+                                                let mut s = alloc::string::String::from_utf8(alloc::vec::Vec::from(base)).unwrap_or_default();
+                                                s.push_str(".TTF");
+                                                Some(s)
+                                            } else { None }
+                                        };
+                                        if let Some(name) = name_opt {
+                                            if name.len() <= 32 {
+                                                if let Ok(s) = String::<32>::from_str(&name) {
                                                     let _ = fonts_found.push(s);
                                                 }
                                             }
