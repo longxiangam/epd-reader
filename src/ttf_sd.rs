@@ -3,7 +3,6 @@
 //! 自实现 TTF 解析（表目录→cmap→loca→hmtx→glyf）逐字形从 SD seek+read，
 //! 二次曲线展平 + 奇偶扫描线填充。所有工作区缓冲打包进 `TtfWs`，**堆分配**
 //! （进阅读分配、退出释放），与 WiFi 的堆内存运行期互斥，不再常驻 .bss。
-#![cfg(feature = "ttf_spike")]
 #![allow(dead_code)]
 
 use alloc::alloc::{alloc, dealloc, Layout};
@@ -49,10 +48,10 @@ pub struct FontInfo {
 }
 
 impl FontInfo {
-    /// 行高 = (升部 + |降部|) 缩放 + 1px 间隙。比 px+4 紧，能多排几行铺满屏。
+    /// 行高基线 = (升部 + |降部|) 缩放（不含行间隙；间隙由调用方 line_gap 控制）。
     pub fn line_height(&self, px: f32) -> i32 {
         let h = (self.ascent as i32 - self.descent as i32) as f32 * px / self.units_per_em as f32;
-        h as i32 + 1
+        h as i32
     }
 }
 
@@ -87,9 +86,6 @@ pub struct TtfWs {
     pub gc_next: usize,
     /// 缓存已解析的 FontInfo（首次 open_font 填充）；Some 时 open_font 直接返回，不再读 SD。
     pub fi: Option<FontInfo>,
-    /// 诊断：本次 paginate_render 的缓存命中/未命中计数（翻页提速排查用）。
-    pub dbg_hits: u32,
-    pub dbg_miss: u32,
 }
 
 /// 堆上分配并清零一个 TtfWs（直接 Layout 分配，避免 Box::new 的栈临时量）。
@@ -598,6 +594,13 @@ fn cache_lookup(ws: &TtfWs, gid: u16) -> Option<usize> {
     }
     None
 }
+/// 清空字形缓存（改字号/旋转后调用：旧位图尺寸/方向已失效）。
+pub fn cache_clear(ws: &mut TtfWs) {
+    for i in 0..GC_N {
+        ws.gc_gid[i] = 0xFFFF; // 不可能是真实 gid（< num_glyphs）
+    }
+    ws.gc_next = 0;
+}
 fn cache_store(ws: &mut TtfWs, gid: u16, w: u8, h: u8, yoff: i16) -> usize {
     let slot = ws.gc_next;
     ws.gc_next = (slot + 1) % GC_N;
@@ -690,8 +693,6 @@ pub fn paginate_render<D: DrawTarget<Color = BinaryColor>>(
     book_len: usize, px: f32, top_left: Point, max_w: i32, line_h: i32, max_lines: u32,
 ) -> usize {
     if max_lines == 0 { return 0; }
-    ws.dbg_hits = 0;
-    ws.dbg_miss = 0;
     let sc = px / fi.units_per_em as f32; // advance 布局用（每字一次，f32 可接受）
     let sc_q8 = (px * 256.0 / fi.units_per_em as f32) as i32; // 光栅化定点（无 FPU 提速）
     let left = top_left.x;
@@ -723,10 +724,8 @@ pub fn paginate_render<D: DrawTarget<Color = BinaryColor>>(
             pen_y += line_h;
         }
         if let Some(slot) = cache_lookup(ws, gid) {
-            ws.dbg_hits += 1;
             blit_slot(ws, display, slot, pen_x, pen_y + ws.gc_yoff[slot] as i32);
         } else if let Some((npt, ncon, bbox)) = parse_glyph(f, fi, gid, ws) {
-            ws.dbg_miss += 1;
             let x0 = bbox[0] as i32;
             let x1 = bbox[2] as i32;
             let ymax = bbox[3] as i32;

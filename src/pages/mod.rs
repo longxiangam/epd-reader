@@ -91,8 +91,7 @@ pub async fn main_task(spawner:Spawner){
 }
 
 /// 阅读模式入口（重启分模式）：阅读模式启动时由 main 直接 spawn，独占堆做 TTF。
-/// ReadPage 退出（running=false）即离开阅读 → 清模式标志 → software_reset 回正常模式。
-#[cfg(feature = "ttf_spike")]
+/// ReadPage 退出（running=false）即离开阅读 → 清模式标志 → reboot_sleep 回正常模式。
 #[embassy_executor::task]
 pub async fn reading_task(spawner: Spawner) {
     // 等显示任务就绪：reading_task 启动比显示任务初始化(EPD init)快，若不等，

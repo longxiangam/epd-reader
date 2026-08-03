@@ -29,7 +29,6 @@ mod flash_sleep;
 mod location;
 #[cfg(feature = "ttf_spike")]
 mod ttf_spike;
-#[cfg(feature = "ttf_spike")]
 mod ttf_sd;
 
 extern crate alloc;
@@ -98,19 +97,6 @@ async fn main(spawner: Spawner) -> ! {
             esp_alloc::MemoryCapability::Internal.into(),
         ));
     }
-    // 诊断：堆（dram2）与主栈区大小，确认堆栈不再争抢
-    unsafe extern "C" {
-        static _stack_end: u8;
-        static _stack_start: u8;
-    }
-    let stack_region = unsafe {
-        core::ptr::addr_of!(_stack_start) as usize - core::ptr::addr_of!(_stack_end) as usize
-    };
-    println!(
-        "[boot] heap(dram2)={}KB free, main stack region={}KB",
-        esp_alloc::HEAP.free() / 1024,
-        stack_region / 1024
-    );
 
     // TTF spike：基准 run() 会阻塞启动数秒，暂不在 boot 调用；
     // 改为在主页直接渲染矢量字做端到端验证（见 main_page render）。
@@ -231,9 +217,8 @@ async fn main(spawner: Spawner) -> ! {
     let rtc_io = static_cell::make_static!(rtc_pin);
     add_rtcio(rtc_io, WakeupLevel::Low).await;
 
-    // 重启分模式（ttf_spike）：阅读模式启动时不初始化 WiFi，独占整块堆做 TTF（大字形缓存）。
-    // 模式标志存 flash（rtc_fast 不跨 software_reset）；直接进 reading_task。
-    #[cfg(feature = "ttf_spike")]
+    // 重启分模式：阅读模式启动时不初始化 WiFi，独占整块堆做 TTF（大字形缓存）。
+    // 模式标志存 rtc_fast（跨 reboot_sleep 深睡保留）；直接进 reading_task。
     {
         let reading_mode = unsafe { *core::ptr::addr_of!(crate::pages::read::READING_MODE) };
         if reading_mode {

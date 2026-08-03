@@ -1,7 +1,6 @@
 mod page;
 pub use page::ReadPage;
 pub(crate) use page::PAGE_INDEX;
-#[cfg(feature = "ttf_spike")]
 pub(crate) use page::READING_MODE;
 
 #[cfg(feature = "epd2in7")]

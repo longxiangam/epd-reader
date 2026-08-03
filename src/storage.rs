@@ -203,6 +203,8 @@ const STOCK_STORAGE_OFFSET:usize = TIMER_LOG_END_OFFSET;
 
 const DISPLAY_STORAGE_OFFSET:usize = STOCK_STORAGE_OFFSET + size_of::<StockStorage>();
 
+const READING_SETTINGS_OFFSET:usize = DISPLAY_STORAGE_OFFSET + size_of::<DisplayStorage>();
+
 /// 屏幕显示配置：快刷多少次后触发一次全刷（清残影）。
 /// 独立分区追加在末尾，不动既有结构 → 既有数据不偏移、不丢失，无需 bump INIT_TAG。
 /// 旧固件未写入此分区时读取为 flash 原始字节，由 display 侧 clamp 到平台默认值。
@@ -210,6 +212,34 @@ const DISPLAY_STORAGE_OFFSET:usize = STOCK_STORAGE_OFFSET + size_of::<StockStora
 pub struct DisplayStorage{
     /// 0 表示未配置，display 侧回退到平台默认（epd2in7=20，其余=5）
     pub full_refresh_times:u32,
+}
+
+/// 阅读排版设置（跨会话持久化）：字号、行距、旋转、字体文件名。
+/// 追加在末尾，不动既有结构。
+#[derive(Debug, Clone, Copy)]
+pub struct ReadingSettings {
+    pub ttf_px: u8,
+    pub line_gap: u8,
+    pub rotate: u8,
+    /// null 结尾的字体文件名（如 b"font.ttf\0..."）
+    pub font_name: [u8; 32],
+}
+
+impl Default for ReadingSettings {
+    fn default() -> Self {
+        let mut font_name = [0u8; 32];
+        let name = b"font.ttf";
+        font_name[..name.len()].copy_from_slice(name);
+        Self { ttf_px: 20, line_gap: 1, rotate: 0, font_name }
+    }
+}
+
+impl ReadingSettings {
+    /// 取 font_name 的 &str（到首个 \0 或全长）。
+    pub fn font_name_str(&self) -> &str {
+        let len = self.font_name.iter().position(|&b| b == 0).unwrap_or(self.font_name.len());
+        core::str::from_utf8(&self.font_name[..len]).unwrap_or("font.ttf")
+    }
 }
 
 
@@ -223,6 +253,7 @@ impl_storage!(OtherStorage, OTHER_STORAGE_OFFSET);
 impl_storage!(ErrorLogStorage, ERROR_LOG_OFFSET);
 impl_storage!(StockStorage, STOCK_STORAGE_OFFSET);
 impl_storage!(DisplayStorage, DISPLAY_STORAGE_OFFSET);
+impl_storage!(ReadingSettings, READING_SETTINGS_OFFSET);
 
 // 为 HolidayStorage 手动实现 NvsStorage，使用分块写入避免栈溢出
 impl NvsStorage for HolidayStorage {
@@ -285,4 +316,5 @@ pub fn init_storage_area(){
     StockStorage::default().write();
     // 0 = 未配置，display 侧回退到平台默认（无需在此处区分 feature）
     DisplayStorage::default().write();
+    ReadingSettings::default().write();
 }

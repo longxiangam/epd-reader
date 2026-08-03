@@ -1,9 +1,10 @@
 use alloc::boxed::Box;
 use alloc::format;
+use core::str::FromStr;
 use embassy_executor::Spawner;
-use embassy_time::{Duration, Instant, Timer};
+use embassy_time::{Duration, Timer};
 use embedded_graphics::Drawable;
-use embedded_graphics::prelude::{Dimensions, Point, Size};
+use embedded_graphics::prelude::{Point, Size};
 use embedded_graphics::primitives::{PrimitiveStyleBuilder, Rectangle, StrokeAlignment};
 use embedded_graphics::prelude::Primitive;
 use epd_waveshare::color::{Black, Color, White};
@@ -16,7 +17,7 @@ use u8g2_fonts::fonts;
 use u8g2_fonts::types::{FontColor, HorizontalAlignment, VerticalPosition};
 use crate::display::{display_mut, RENDER_CHANNEL, RenderInfo};
 use crate::{display, epd2in9_txt, event};
-use crate::epd2in9_txt::{BookPages, TxtReader};
+use crate::epd2in9_txt::TxtReader;
 use crate::event::EventType;
 use crate::pages::Page;
 use crate::sd_mount::{ActualDirectory, ActualFile, SD_MOUNT, SdMount, BOOK_NAME_MAX};
@@ -24,7 +25,6 @@ use crate::sleep::to_sleep_tips;
 use crate::storage::NvsStorage;
 use crate::widgets::list_widget::ListWidget;
 
-const PAGES_VEC_MAX: usize = epd2in9_txt::PAGES_VEC_MAX;
 const LOG_VEC_MAX: usize = epd2in9_txt::LOG_VEC_MAX;
 const ONE_PAGE_CONTENT_LEN: usize = epd2in9_txt::ONE_PAGE_CONTENT_LEN;
 
@@ -39,12 +39,26 @@ fn accel_step(tick: u32) -> u32 {
     else { 400 }
 }
 
-const MENU_ITEMS: &[&str] = &["返回书单", "收藏书签", "打开书签", "删除书签", "跳转页码", "旋转屏幕", "重建索引", "睡眠", "取消"];
+/// 判断文件名是否为 .ttf（大小写不敏感）。
+fn is_ttf(name: &str) -> bool {
+    let b = name.as_bytes();
+    b.len() >= 4 && b[b.len() - 4..].eq_ignore_ascii_case(b".ttf")
+}
+
+// 菜单项：0=返回书单 1=收藏书签 2=打开书签 3=删除书签 4=跳转进度
+//         5=排版 6=字体 7=旋转屏幕 8=睡眠 else=取消
+const MENU_ITEMS: &[&str] = &[
+    "返回书单", "收藏书签", "打开书签", "删除书签", "跳转进度",
+    "排版", "字体", "旋转屏幕", "睡眠", "取消",
+];
 
 enum MenuState {
     Closed,
     Popup { menu_index: u32 },
-    JumpInput { input_num: u32 },
+    JumpInput { input_pct: u8 },
+    /// 排版：px/gap 为进入时的快照（供“长按取消”还原），实时值在 self.ttf_px / self.line_gap。
+    Layout { px: u8, gap: u8 },
+    FontList { font_index: u32 },
     BookmarkList { bm_index: u32, deleting: bool },
 }
 
@@ -52,47 +66,45 @@ pub struct ReadPage {
     running: bool,
     reading: bool,
     need_render: bool,
-    change_page: bool,
-
-    force_indexing: bool,
-    indexing: bool,
-    indexing_process: f32,
-
     choose_index: u32,
-    open_file_name: String<BOOK_NAME_MAX>,
     menus: Option<Vec<String<BOOK_NAME_MAX>, 40>>,
-    book_pages: Option<BookPages>,
     log_vec: Option<Vec<u32, LOG_VEC_MAX>>,
-    page_index: u32,
-    page_content: String<ONE_PAGE_CONTENT_LEN>,
     menu_state: MenuState,
     save_bookmark_flag: bool,
     delete_bookmark_flag: bool,
+    /// 翻页/跳转后写 .log[0]（持久化阅读位置到 SD，防掉电丢失）。
+    need_save_position: bool,
     need_load_preview: bool,
     bookmark_preview: String<ONE_PAGE_CONTENT_LEN>,
-    /// 屏幕旋转状态（0..3，相对默认依次向右 +90°）：0=默认(竖), 1/3=横屏, 2=倒竖。
+    /// 屏幕旋转状态（0..3，相对默认依次向右 +90°）。
     rotate: u8,
     exit_selected: bool,
     jump_accel: u32,
     book_progress: Vec<String<16>, 40>,
-    /// run() 里 books_dir 的裸指针（绕过 Page::render 无参 trait 限制，供 TTF 渲染打开字体）。
+    /// run() 里 books_dir 的裸指针（绕过 Page::render 无参 trait 限制）。
     /// 仅在 run() 作用域内有效（设置于打开 books_dir 后、退出前置空）。
     books_dir_ptr: *mut ActualDirectory<'static>,
-    /// run() 里 font.ttf 文件句柄的裸指针（整个阅读会话复用同一句柄，避免每页重复
-    /// open + 目录扫描）。指向 run() 里的 ttf_font_file 局部，仅 run() 作用域内有效。
+    /// 字体文件句柄的裸指针（整个阅读会话复用同一句柄，换字体时重开）。
     font_file_ptr: *mut ActualFile<'static>,
-    /// TTF 动态分页状态（ttf_spike 路径）：按字节偏移即时分页。
+    /// TTF 动态分页状态：按字节偏移即时分页。
     ttf_offset: u32,
     ttf_end: u32,
     ttf_file_len: u32,
     ttf_hist: Vec<u32, 32>,
     ttf_px: f32,
+    /// 行间距（像素，叠加在 fi.line_height 之上）。
+    line_gap: i32,
     /// TTF 渲染工作区（堆分配，进阅读创建、退出释放）。
-    #[cfg(feature = "ttf_spike")]
     ttf_ws: Option<&'static mut crate::ttf_sd::TtfWs>,
-    /// 续读标志：get_page_vec 据此保留预置的 ttf_offset（不清零）。
-    #[cfg(feature = "ttf_spike")]
+    /// 续读标志：get_page_vec 据此保留预置的 ttf_offset（不清零），
+    /// get_log_vec 据此跳过 .log[0] 还原（rtc_fast 的 TTF_RESUME_OFFSET 是权威）。
     ttf_resume: bool,
+    /// 当前字体文件名。
+    font_name: String<32>,
+    /// SD 卡上可用的 .ttf 列表（进 run 时扫描一次）。
+    font_list: Vec<String<32>, 10>,
+    /// 换字体标志：run 循环据此重开字体 + 清字形/字体表缓存。
+    need_reload_font: bool,
 }
 
 impl ReadPage {
@@ -100,231 +112,213 @@ impl ReadPage {
         self.running = false;
     }
 
+    /// 把当前 ttf_px/line_gap/rotate/font_name 打包写进 ReadingSettings（flash）。
+    fn save_reading_settings(&self) {
+        let mut s = crate::storage::ReadingSettings {
+            ttf_px: ((self.ttf_px as i32).max(12).min(40)) as u8,
+            line_gap: self.line_gap.max(0).min(255) as u8,
+            rotate: self.rotate,
+            font_name: [0u8; 32],
+        };
+        let bytes = self.font_name.as_bytes();
+        let n = bytes.len().min(s.font_name.len());
+        s.font_name[..n].copy_from_slice(&bytes[..n]);
+        let _ = s.write();
+    }
+
+    /// 跳到指定字节偏移（跳转进度/书签）。清历史、保存续读偏移、触发渲染。
+    fn jump_to_offset(&mut self, off: u64) {
+        let off = off.min(self.ttf_file_len as u64) as u32;
+        self.ttf_offset = off;
+        self.ttf_end = off;
+        self.ttf_hist.clear();
+        unsafe {
+            *core::ptr::addr_of_mut!(TTF_RESUME_OFFSET) = off;
+        }
+        self.need_save_position = true;
+        self.need_render = true;
+    }
+
+    /// 打开选中的书 .txt：取文件长度、初始化 TTF 分页状态。
+    /// ttf_resume=true（重启分模式续读）：保留预置偏移（夹到 file_len），不清 ttf_resume。
+    /// 否则（新开书）：偏移归零，由 get_log_vec 从 .log[0] 还原上次位置。
     async fn get_page_vec(&mut self, books_dir: &mut ActualDirectory<'_>) {
-        let book_name = self.menus.as_ref().unwrap()[self.choose_index as usize].clone();
-
+        let book_name = match self.menus.as_ref().and_then(|m| m.get(self.choose_index as usize)) {
+            Some(n) => n.clone(),
+            None => return,
+        };
         let file_name = format!("{}.txt", book_name);
-        let mut need_index = false;
-        let mut file_len = 0;
-        let mut book_pages = None;
-
-        let book_short_name = match SdMount::find_entry_by_name(books_dir, &file_name) {
-            Some(entry) => entry.name,
+        let file_len = match SdMount::find_entry_by_name(books_dir, &file_name) {
+            Some(entry) => {
+                let short = entry.name;
+                match books_dir.open_file_in_dir(short, embedded_sdmmc::Mode::ReadOnly) {
+                    Ok(mut f) => {
+                        let l = f.length();
+                        f.close();
+                        l
+                    }
+                    Err(_) => return,
+                }
+            }
             None => {
                 println!("Book not found: {}", file_name);
                 return;
             }
         };
-
-        {
-            let my_file = books_dir.open_file_in_dir(book_short_name.clone(), embedded_sdmmc::Mode::ReadOnly).unwrap();
-            file_len = my_file.length();
-            my_file.close();
-        }
-
         println!("file len:{}", file_len);
-        {
-            let my_file_index = SdMount::open_idx_file(books_dir, &book_short_name, embedded_sdmmc::Mode::ReadOnly);
-            if let Ok(mut mfi) = my_file_index {
-                println!("idx len:{}", mfi.length());
-                if mfi.length() == 0 {
-                    need_index = true;
-                } else {
-                    println!("entry read pages");
-                    book_pages = Some(BookPages::new(mfi.length()));
-
-                    if let Some(ref mut b) = book_pages {
-                        if b.total_page == 0 {
-                            need_index = true;
-                        } else if b.get_end_page_position(&mut mfi) != file_len {
-                            need_index = true;
-                        }
-                        println!("book_pages:{:?}", *b);
-                    }
-                }
-                mfi.close();
-            } else {
-                need_index = true;
-            }
-        }
-        if need_index || self.force_indexing {
-            self.indexing = true;
-            let self_ptr = Self::mut_to_ptr(self);
-            let short_name_clone = book_short_name.clone();
-            let dw = super::text_width();
-            let dl = super::page_lines();
-            book_pages = TxtReader::generate_pages(books_dir, book_name.as_str(), &short_name_clone, dw, dl, |process| {
-                return Box::pin(async move {
-                    let mut_ref: &mut Self = Self::mut_by_ptr(Some(self_ptr)).unwrap();
-                    mut_ref.indexing_process = process;
-                    mut_ref.need_render = true;
-                    mut_ref.render().await;
-                    Timer::after_millis(500).await;
-                });
-            }).await;
-
-            self.need_render = true;
-            self.force_indexing = false;
-            self.indexing = false;
-        }
-
-        self.book_pages = book_pages;
-
-        // TTF 动态分页：换新书重置到开头；续读（ttf_resume）保留预置偏移
-        #[cfg(feature = "ttf_spike")]
-        {
-            self.ttf_file_len = file_len;
-            if self.ttf_resume {
-                self.ttf_resume = false;
-                // ttf_offset 已由 ReadPage::new 从 TTF_RESUME_OFFSET 预置；夹到文件长度内
-                if self.ttf_offset > file_len { self.ttf_offset = 0; }
-                self.ttf_end = self.ttf_offset;
-            } else {
+        self.ttf_file_len = file_len;
+        if self.ttf_resume {
+            // 续读：保留预置偏移（夹到文件长度内），不清 ttf_resume（get_log_vec 据此跳过 log[0] 覆盖）
+            if self.ttf_offset > file_len {
                 self.ttf_offset = 0;
-                self.ttf_end = 0;
             }
-            self.ttf_hist.clear();
+            self.ttf_end = self.ttf_offset;
+        } else {
+            self.ttf_offset = 0;
+            self.ttf_end = 0;
         }
+        self.ttf_hist.clear();
     }
 
+    /// 读 .log 进 log_vec。ttf_resume：跳过 .log[0] 还原（rtc_fast 权威），清 ttf_resume。
+    /// 否则：用 .log[0] 还原 ttf_offset（夹到 file_len）。
     async fn get_log_vec(&mut self, books_dir: &mut ActualDirectory<'_>) {
-        let book_name = self.menus.as_ref().unwrap()[self.choose_index as usize].clone();
-        let file_name = format!("{}.txt", book_name);
-
-        let book_short_name = match SdMount::find_entry_by_name(books_dir, &file_name) {
-            Some(entry) => entry.name,
+        let book_name = match self.menus.as_ref().and_then(|m| m.get(self.choose_index as usize)) {
+            Some(n) => n.clone(),
             None => return,
         };
-        {
-            let my_file = SdMount::open_log_file(books_dir, &book_short_name, embedded_sdmmc::Mode::ReadOnly);
-            if let Ok(mut f) = my_file {
-                self.log_vec = Some(TxtReader::read_log(&mut f));
-                if let Some(ref lv) = self.log_vec {
-                    if lv.len() > 0 {
-                        self.page_index = lv[0];
-                    }
-                }
-                f.close();
-            } else {
-                self.log_vec = Some(Vec::new());
+        let file_name = format!("{}.txt", book_name);
+        let short_name = match SdMount::find_entry_by_name(books_dir, &file_name) {
+            Some(e) => e.name,
+            None => return,
+        };
+        let log_file = SdMount::open_log_file(books_dir, &short_name, embedded_sdmmc::Mode::ReadOnly);
+        if let Ok(mut f) = log_file {
+            self.log_vec = Some(TxtReader::read_log(&mut f));
+            f.close();
+        } else {
+            self.log_vec = Some(Vec::new());
+        }
+        if self.ttf_resume {
+            // 续读：rtc_fast 的 TTF_RESUME_OFFSET 是权威的，不被 .log[0] 覆盖
+            self.ttf_resume = false;
+        } else if let Some(ref lv) = self.log_vec {
+            if let Some(&off) = lv.first() {
+                self.ttf_offset = off.min(self.ttf_file_len);
+                self.ttf_end = self.ttf_offset;
             }
         }
     }
 
-    async fn get_page_content(&mut self, books_dir: &mut ActualDirectory<'_>) {
-        let book_name = self.menus.as_ref().unwrap()[self.choose_index as usize].clone();
-        let begin_secs = Instant::now().as_secs();
-        println!("begin_time:{}", begin_secs);
-
-        let file_name = format!("{}.txt", book_name);
-
-        let book_short_name = match SdMount::find_entry_by_name(books_dir, &file_name) {
-            Some(entry) => entry.name,
-            None => return,
-        };
-
-        if let Some(bp) = self.book_pages.as_mut() {
-            let mut begin = 0;
-            let mut end = 0;
-            {
-                let index_file = SdMount::open_idx_file(books_dir, &book_short_name, embedded_sdmmc::Mode::ReadOnly);
-                if let Ok(mut index_file) = index_file {
-                    (begin, end) = bp.get_page_content_position(&mut index_file);
-                }
-            }
-            {
-                let my_file = books_dir.open_file_in_dir(book_short_name.clone(), embedded_sdmmc::Mode::ReadOnly);
-                if let Ok(mut my_file) = my_file {
-                    self.page_content = TxtReader::get_page_content(&mut my_file, begin, end, super::text_width());
-                    my_file.close();
-                }
-            }
-            {
-                let logfile = SdMount::open_log_file(books_dir, &book_short_name, embedded_sdmmc::Mode::ReadWriteCreateOrTruncate);
-                if let Ok(mut f) = logfile {
-                    if self.log_vec.is_none() {
-                        self.log_vec = Some(Vec::new());
-                    }
-                    epd2in9_txt::TxtReader::save_log(&mut f, self.log_vec.as_mut().unwrap(), self.page_index as u32, false);
-                    f.close();
-                } else {
-                    println!("log error:{:#?}", logfile.unwrap_err());
-                }
-            }
-        }
-    }
-
+    /// 书单每本书的阅读进度（字节偏移 ÷ .txt 长度 → "X%"）。
     fn load_book_progress(&mut self, books_dir: &mut ActualDirectory<'_>) {
         self.book_progress.clear();
         if let Some(ref menus) = self.menus {
             for book_name in menus.iter() {
                 let file_name = alloc::format!("{}.txt", book_name);
-                let short_name = match SdMount::find_entry_by_name(books_dir, &file_name) {
-                    Some(entry) => entry.name,
+                let (offset, total) = match SdMount::find_entry_by_name(books_dir, &file_name) {
+                    Some(entry) => {
+                        let short = entry.name;
+                        let total = match books_dir.open_file_in_dir(short.clone(), embedded_sdmmc::Mode::ReadOnly) {
+                            Ok(mut f) => {
+                                let l = f.length();
+                                f.close();
+                                l
+                            }
+                            Err(_) => 0,
+                        };
+                        let offset = match SdMount::open_log_file(books_dir, &short, embedded_sdmmc::Mode::ReadOnly) {
+                            Ok(mut f) => {
+                                let log = TxtReader::read_log(&mut f);
+                                f.close();
+                                log.first().copied().unwrap_or(0)
+                            }
+                            Err(_) => 0,
+                        };
+                        (offset, total)
+                    }
                     None => {
                         let _ = self.book_progress.push(String::new());
                         continue;
                     }
                 };
-                let current_page: u32 = {
-                    let log_result = SdMount::open_log_file(books_dir, &short_name, embedded_sdmmc::Mode::ReadOnly);
-                    if let Ok(mut f) = log_result {
-                        let log = TxtReader::read_log(&mut f);
-                        f.close();
-                        if !log.is_empty() { log[0] } else { 0 }
-                    } else { 0 }
-                };
-                let total_page: u32 = {
-                    let idx_result = SdMount::open_idx_file(books_dir, &short_name, embedded_sdmmc::Mode::ReadOnly);
-                    if let Ok(f) = idx_result {
-                        let len = f.length();
-                        f.close();
-                        len / 4
-                    } else { 0 }
-                };
                 let mut s: String<16> = String::new();
-                if total_page > 0 {
+                if total > 0 {
                     use core::fmt::Write;
-                    let _ = write!(s, "{}%", current_page * 100 / total_page);
+                    let _ = write!(s, "{}%", offset * 100 / total);
                 }
                 let _ = self.book_progress.push(s);
             }
         }
     }
 
-    async fn do_change_page(&mut self, page_index: u32) {
-        if self.book_pages.is_none() { return; }
+    /// TTF 翻页：next 把 ttf_end 推为新一页起点（旧 offset 入栈），prev 出栈回上一页。
+    async fn do_change_page(&mut self, next: bool) {
+        if next {
+            if self.ttf_end < self.ttf_file_len {
+                let _ = self.ttf_hist.push(self.ttf_offset);
+                self.ttf_offset = self.ttf_end;
+            }
+        } else if let Some(prev) = self.ttf_hist.pop() {
+            self.ttf_offset = prev;
+            self.ttf_end = prev;
+        }
+        unsafe {
+            *core::ptr::addr_of_mut!(TTF_RESUME_OFFSET) = self.ttf_offset.min(self.ttf_file_len);
+        }
+        self.need_save_position = true;
+        self.need_render = true;
+    }
 
-        // TTF 动态分页：按字节偏移翻页，绕过 page_index/.idx。调用方传 page_index±1
-        // 来区分下一页/上一页（加速长按也只翻一页；跳页/书签在 ttf 路径暂不可用）。
-        #[cfg(feature = "ttf_spike")]
-        if self.reading {
-            if page_index > self.page_index {
-                if self.ttf_end < self.ttf_file_len {
-                    let _ = self.ttf_hist.push(self.ttf_offset);
-                    self.ttf_offset = self.ttf_end;
-                }
-            } else if page_index < self.page_index {
-                if let Some(prev) = self.ttf_hist.pop() {
-                    self.ttf_offset = prev;
-                    self.ttf_end = prev;
-                }
-            }
-            self.need_render = true;
-            // 翻页后保存续读偏移（跨复位/深睡续读）
-            unsafe {
-                *core::ptr::addr_of_mut!(TTF_RESUME_OFFSET) = self.ttf_offset.min(self.ttf_file_len);
-            }
+    /// 预加载下一页字形：渲染完当前页后提前光栅化进缓存（不画），下次翻页直接 blit。
+    async fn preload_next_page(&mut self) {
+        let ttf_end = self.ttf_end;
+        let ttf_file_len = self.ttf_file_len;
+        let ttf_px = self.ttf_px;
+        let line_gap = self.line_gap;
+        let bd_ptr = self.books_dir_ptr;
+        let font_ptr = self.font_file_ptr;
+        let vh = super::visual_height();
+        let book_name = match self
+            .menus
+            .as_ref()
+            .and_then(|m| m.get(self.choose_index as usize))
+            .cloned()
+        {
+            Some(n) => n,
+            None => return,
+        };
+        if ttf_file_len == 0 || ttf_end >= ttf_file_len || bd_ptr.is_null() {
             return;
         }
-
-        if page_index >= self.book_pages.as_ref().unwrap().total_page {
-            self.page_index = self.book_pages.as_ref().unwrap().total_page;
-        } else {
-            self.page_index = page_index;
+        if let Some(ws) = self.ttf_ws.as_mut() {
+            let bd: &mut ActualDirectory<'_> = unsafe { &mut *bd_ptr };
+            let file_name = format!("{}.txt", book_name);
+            let short_name = SdMount::find_entry_by_name(bd, &file_name).map(|e| e.name);
+            // ① 读下一页字节
+            let mut n = 0usize;
+            if let Some(sn) = short_name {
+                if let Ok(mut bf) = bd.open_file_in_dir(sn, embedded_sdmmc::Mode::ReadOnly) {
+                    n = crate::ttf_sd::read_book_chunk(&mut bf, ttf_end, ws);
+                    bf.close();
+                }
+            }
+            // ② 预加载字形（只缓存不画），复用会话级字体句柄
+            if n > 0 && !font_ptr.is_null() {
+                let ff: &mut ActualFile = unsafe { &mut *font_ptr };
+                if let Some(fi) = crate::ttf_sd::open_font(ff, ws) {
+                    let text_area_h = vh as i32 - super::PROGRESS_AREA_HEIGHT as i32 - 2;
+                    let base_h = (fi.line_height(ttf_px) + line_gap).max(1);
+                    let max_lines = ((text_area_h / base_h) as u32).max(1);
+                    let line_h = text_area_h / max_lines as i32;
+                    crate::ttf_sd::preload_glyphs(
+                        ff, &fi, ws, n, ttf_px,
+                        super::text_width() as i32, line_h, max_lines,
+                    )
+                    .await;
+                }
+            }
         }
-        self.change_page = true;
-        self.need_render = true;
     }
 
     fn render_menu_overlay(&self, display: &mut crate::display::EpdDisplay) {
@@ -336,6 +330,13 @@ impl ReadPage {
         let menu_item_height: u32 = 24;
         let menu_padding: u32 = 8;
 
+        let box_style = PrimitiveStyleBuilder::new()
+            .fill_color(White)
+            .stroke_color(Black)
+            .stroke_alignment(StrokeAlignment::Outside)
+            .stroke_width(2)
+            .build();
+
         match self.menu_state {
             MenuState::Popup { menu_index } => {
                 let page_info_height: u32 = 18;
@@ -343,32 +344,23 @@ impl ReadPage {
                 let menu_x = ((vw - menu_width) / 2) as i32;
                 let menu_y = ((vh - menu_height) / 2) as i32;
 
-                let rect = Rectangle::new(
-                    Point::new(menu_x, menu_y),
-                    Size::new(menu_width, menu_height),
-                );
-                let style = PrimitiveStyleBuilder::new()
-                    .fill_color(White)
-                    .stroke_color(Black)
-                    .stroke_alignment(StrokeAlignment::Outside)
-                    .stroke_width(2)
-                    .build();
-                rect.into_styled(style).draw(display).ok();
+                Rectangle::new(Point::new(menu_x, menu_y), Size::new(menu_width, menu_height))
+                    .into_styled(box_style)
+                    .draw(display)
+                    .ok();
 
                 for (i, label) in MENU_ITEMS.iter().enumerate() {
                     let item_y = menu_y + menu_padding as i32 + (i as u32 * menu_item_height) as i32;
                     let is_selected = i as u32 == menu_index;
-
                     if is_selected {
-                        let highlight = Rectangle::new(
+                        Rectangle::new(
                             Point::new(menu_x + 4, item_y),
                             Size::new(menu_width - 8, menu_item_height),
-                        );
-                        highlight.into_styled(
-                            PrimitiveStyleBuilder::new().fill_color(Black).build()
-                        ).draw(display).ok();
+                        )
+                        .into_styled(PrimitiveStyleBuilder::new().fill_color(Black).build())
+                        .draw(display)
+                        .ok();
                     }
-
                     let prefix = if is_selected { "> " } else { "  " };
                     let text_color = if is_selected { FontColor::Transparent(White) } else { FontColor::Transparent(Black) };
                     font.render_aligned(
@@ -378,78 +370,224 @@ impl ReadPage {
                         HorizontalAlignment::Left,
                         text_color,
                         display,
-                    ).ok();
+                    )
+                    .ok();
                 }
 
-                if let Some(ref bp) = self.book_pages {
-                    let total = bp.total_page;
-                    if total > 0 {
-                        let current = if self.page_index > total { total } else { self.page_index };
-                        let page_text_y = menu_y + menu_height as i32 - menu_padding as i32;
-                        font.render_aligned(
-                            format_args!("{}/{}", current, total),
-                            Point::new(menu_x + menu_width as i32 / 2, page_text_y),
-                            VerticalPosition::Bottom,
-                            HorizontalAlignment::Center,
-                            FontColor::Transparent(Black),
-                            display,
-                        ).ok();
-                    }
+                if self.ttf_file_len > 0 {
+                    let pct = self.ttf_offset.min(self.ttf_file_len) * 100 / self.ttf_file_len;
+                    let page_text_y = menu_y + menu_height as i32 - menu_padding as i32;
+                    font.render_aligned(
+                        format_args!("{}%", pct),
+                        Point::new(menu_x + menu_width as i32 / 2, page_text_y),
+                        VerticalPosition::Bottom,
+                        HorizontalAlignment::Center,
+                        FontColor::Transparent(Black),
+                        display,
+                    )
+                    .ok();
                 }
             }
-            MenuState::JumpInput { input_num } => {
-                let jump_height: u32 = 90;
+            MenuState::JumpInput { input_pct } => {
+                let jump_height: u32 = 100;
                 let jump_x = ((vw - menu_width) / 2) as i32;
                 let jump_y = ((vh - jump_height) / 2) as i32;
                 let center_x = (vw / 2) as i32;
 
-                let rect = Rectangle::new(
-                    Point::new(jump_x, jump_y),
-                    Size::new(menu_width, jump_height),
-                );
-                let style = PrimitiveStyleBuilder::new()
-                    .fill_color(White)
-                    .stroke_color(Black)
-                    .stroke_alignment(StrokeAlignment::Outside)
-                    .stroke_width(2)
-                    .build();
-                rect.into_styled(style).draw(display).ok();
+                Rectangle::new(Point::new(jump_x, jump_y), Size::new(menu_width, jump_height))
+                    .into_styled(box_style)
+                    .draw(display)
+                    .ok();
 
                 font.render_aligned(
-                    "跳转页码",
+                    "跳转进度",
                     Point::new(center_x, jump_y + 22),
                     VerticalPosition::Center,
                     HorizontalAlignment::Center,
                     FontColor::Transparent(Black),
                     display,
-                ).ok();
+                )
+                .ok();
 
-                let total = self.book_pages.as_ref().map(|b| b.total_page).unwrap_or(0);
                 font.render_aligned(
-                    format_args!("{} / {}", input_num, total),
-                    Point::new(center_x, jump_y + 48),
+                    format_args!("{}%", input_pct),
+                    Point::new(center_x, jump_y + 50),
                     VerticalPosition::Center,
                     HorizontalAlignment::Center,
                     FontColor::Transparent(Black),
                     display,
-                ).ok();
+                )
+                .ok();
+
+                // 进度条预览
+                let bar_y = jump_y + 70;
+                let bar_w = menu_width as i32 - 24;
+                Rectangle::new(Point::new(jump_x + 12, bar_y), Size::new(bar_w as u32, 4))
+                    .into_styled(
+                        PrimitiveStyleBuilder::new().fill_color(White).stroke_color(Black).stroke_width(1).build(),
+                    )
+                    .draw(display)
+                    .ok();
+                let fw = (bar_w as u32 * input_pct as u32 / 100) as i32;
+                if fw > 0 {
+                    Rectangle::new(Point::new(jump_x + 12, bar_y), Size::new(fw as u32, 4))
+                        .into_styled(PrimitiveStyleBuilder::new().fill_color(Black).build())
+                        .draw(display)
+                        .ok();
+                }
+            }
+            MenuState::Layout { .. } => {
+                let h: u32 = 120;
+                let x = ((vw - menu_width) / 2) as i32;
+                let y = ((vh - h) / 2) as i32;
+                let cx = x + menu_width as i32 / 2;
+
+                Rectangle::new(Point::new(x, y), Size::new(menu_width, h))
+                    .into_styled(box_style)
+                    .draw(display)
+                    .ok();
 
                 font.render_aligned(
-                    "1+ 2- 3确认 长按取消",
-                    Point::new(center_x, jump_y + 72),
+                    "排版设置",
+                    Point::new(cx, y + 18),
                     VerticalPosition::Center,
                     HorizontalAlignment::Center,
                     FontColor::Transparent(Black),
                     display,
-                ).ok();
+                )
+                .ok();
+                font.render_aligned(
+                    format_args!("字号: {}", self.ttf_px as i32),
+                    Point::new(cx, y + 48),
+                    VerticalPosition::Center,
+                    HorizontalAlignment::Center,
+                    FontColor::Transparent(Black),
+                    display,
+                )
+                .ok();
+                font.render_aligned(
+                    format_args!("行距: {}", self.line_gap),
+                    Point::new(cx, y + 74),
+                    VerticalPosition::Center,
+                    HorizontalAlignment::Center,
+                    FontColor::Transparent(Black),
+                    display,
+                )
+                .ok();
+                font.render_aligned(
+                    "1/2字号 长按行距 3保存",
+                    Point::new(cx, y + h as i32 - 14),
+                    VerticalPosition::Center,
+                    HorizontalAlignment::Center,
+                    FontColor::Transparent(Black),
+                    display,
+                )
+                .ok();
+            }
+            MenuState::FontList { font_index } => {
+                let count = self.font_list.len() as u32;
+                let h = vh - 20;
+                let x = ((vw - menu_width) / 2) as i32;
+                let y: i32 = 10;
+                let cx = x + menu_width as i32 / 2;
+
+                Rectangle::new(Point::new(x, y), Size::new(menu_width, h))
+                    .into_styled(box_style)
+                    .draw(display)
+                    .ok();
+
+                font.render_aligned(
+                    "选择字体",
+                    Point::new(cx, y + 14),
+                    VerticalPosition::Center,
+                    HorizontalAlignment::Center,
+                    FontColor::Transparent(Black),
+                    display,
+                )
+                .ok();
+                let sep_y = y + 28;
+                Rectangle::new(Point::new(x + 4, sep_y), Size::new(menu_width - 8, 1))
+                    .into_styled(PrimitiveStyleBuilder::new().fill_color(Black).build())
+                    .draw(display)
+                    .ok();
+
+                let item_h: i32 = 22;
+                let list_top = sep_y + 4;
+                let list_bottom = y + h as i32 - 24; // 预留提示行
+                let list_h = (list_bottom - list_top).max(0);
+                let visible = if item_h > 0 { (list_h / item_h) as u32 } else { 1 }.max(1);
+                let scroll_offset: u32 = if count <= visible {
+                    0
+                } else if font_index >= count {
+                    count - visible
+                } else if font_index >= visible {
+                    font_index - visible + 1
+                } else {
+                    0
+                };
+
+                if count == 0 {
+                    font.render_aligned(
+                        "未找到字体",
+                        Point::new(cx, (list_top + list_bottom) / 2),
+                        VerticalPosition::Center,
+                        HorizontalAlignment::Center,
+                        FontColor::Transparent(Black),
+                        display,
+                    )
+                    .ok();
+                }
+
+                for vi in 0..visible {
+                    let fi = scroll_offset + vi;
+                    if fi >= count {
+                        break;
+                    }
+                    let name = &self.font_list[fi as usize];
+                    let iy = list_top + vi as i32 * item_h;
+                    let is_sel = fi == font_index;
+                    let is_cur = name.as_str() == self.font_name.as_str();
+                    if is_sel {
+                        Rectangle::new(
+                            Point::new(x + 3, iy),
+                            Size::new(menu_width - 6, item_h as u32),
+                        )
+                        .into_styled(PrimitiveStyleBuilder::new().fill_color(Black).build())
+                        .draw(display)
+                        .ok();
+                    }
+                    let color = if is_sel { FontColor::Transparent(White) } else { FontColor::Transparent(Black) };
+                    let prefix = if is_sel { "> " } else { "  " };
+                    let mark = if is_cur { " ✓" } else { "" };
+                    font.render_aligned(
+                        format_args!("{}{}{}", prefix, name, mark),
+                        Point::new(x + menu_padding as i32, iy + item_h / 2),
+                        VerticalPosition::Center,
+                        HorizontalAlignment::Left,
+                        color,
+                        display,
+                    )
+                    .ok();
+                }
+
+                font.render_aligned(
+                    "1/2选择 3确认 长按取消",
+                    Point::new(cx, y + h as i32 - 12),
+                    VerticalPosition::Center,
+                    HorizontalAlignment::Center,
+                    FontColor::Transparent(Black),
+                    display,
+                )
+                .ok();
             }
             MenuState::BookmarkList { bm_index, deleting } => {
-                let bookmarks: Vec<u32, LOG_VEC_MAX> = self.log_vec.as_ref()
+                let bookmarks: Vec<u32, LOG_VEC_MAX> = self
+                    .log_vec
+                    .as_ref()
                     .map(|lv| lv.iter().skip(1).copied().collect())
                     .unwrap_or_default();
                 let bm_count = bookmarks.len() as u32;
 
-                // 布局：上方书签列表占 1/3 高度，下方预览占 2/3 高度（预览与屏幕同宽）
                 let margin: i32 = 8;
                 let gap: i32 = 6;
                 let total_h = vh as i32 - margin * 2;
@@ -461,7 +599,6 @@ impl ReadPage {
                 let preview_x: i32 = 0;
                 let preview_y = margin + list_h + gap;
 
-                // 书签列表框（描边内置，避免溢出框外）
                 Rectangle::new(Point::new(list_x, list_y), Size::new(menu_width, list_h as u32))
                     .into_styled(
                         PrimitiveStyleBuilder::new()
@@ -471,9 +608,9 @@ impl ReadPage {
                             .stroke_width(2)
                             .build(),
                     )
-                    .draw(display).ok();
+                    .draw(display)
+                    .ok();
 
-                // 标题 + 分隔线
                 let title_h: i32 = 18;
                 let title = if deleting { "删除书签" } else { "书签列表" };
                 font.render_aligned(
@@ -483,23 +620,23 @@ impl ReadPage {
                     HorizontalAlignment::Center,
                     FontColor::Transparent(Black),
                     display,
-                ).ok();
+                )
+                .ok();
                 let sep_y = list_y + 4 + title_h;
                 Rectangle::new(Point::new(list_x + 4, sep_y), Size::new(menu_width - 8, 1))
                     .into_styled(PrimitiveStyleBuilder::new().fill_color(Black).build())
-                    .draw(display).ok();
+                    .draw(display)
+                    .ok();
 
-                // 取消行（固定在列表底部，确保位于框内）
+                // 取消行（固定底部）
                 let cancel_h: i32 = menu_item_height as i32;
                 let cancel_y = list_y + list_h - 4 - cancel_h;
                 let is_cancel_selected = bm_index >= bm_count;
                 if is_cancel_selected {
-                    Rectangle::new(
-                        Point::new(list_x + 3, cancel_y),
-                        Size::new(menu_width - 6, menu_item_height),
-                    )
-                    .into_styled(PrimitiveStyleBuilder::new().fill_color(Black).build())
-                    .draw(display).ok();
+                    Rectangle::new(Point::new(list_x + 3, cancel_y), Size::new(menu_width - 6, menu_item_height))
+                        .into_styled(PrimitiveStyleBuilder::new().fill_color(Black).build())
+                        .draw(display)
+                        .ok();
                 }
                 let cancel_color = if is_cancel_selected { FontColor::Transparent(White) } else { FontColor::Transparent(Black) };
                 let cancel_prefix = if is_cancel_selected { "> " } else { "  " };
@@ -510,86 +647,79 @@ impl ReadPage {
                     HorizontalAlignment::Left,
                     cancel_color,
                     display,
-                ).ok();
+                )
+                .ok();
 
-                // 书签滚动区域：标题下方 → 取消行上方
+                // 书签滚动区
                 let scroll_top = sep_y + 2;
                 let scroll_bottom = cancel_y - 2;
                 let scroll_h = (scroll_bottom - scroll_top).max(0);
                 let item_h_i = menu_item_height as i32;
-                let sb_w: i32 = 3;          // 滚动条宽度
+                let sb_w: i32 = 3;
                 let sb_x = list_right - sb_w - 4;
                 let text_left = list_x + menu_padding as i32;
                 let text_right = sb_x - 4;
-                let max_visible = if item_h_i > 0 { (scroll_h / item_h_i) as u32 } else { 1 };
-                let max_visible = max_visible.max(1);
+                let max_visible = if item_h_i > 0 { (scroll_h / item_h_i) as u32 } else { 1 }.max(1);
 
-                // 滚动偏移：保证选中项可见
                 let scroll_offset: u32 = if bm_count <= max_visible {
                     0
                 } else if is_cancel_selected {
                     bm_count - max_visible
+                } else if bm_index > bm_count - max_visible {
+                    bm_count - max_visible
+                } else if bm_index >= max_visible {
+                    bm_index - max_visible + 1
                 } else {
-                    let max_off = bm_count - max_visible;
-                    if bm_index > max_off {
-                        max_off
-                    } else if bm_index >= max_visible {
-                        bm_index - max_visible + 1
-                    } else {
-                        0
-                    }
+                    0
                 };
 
-                // 可见书签
                 for vi in 0..max_visible {
                     let bi = scroll_offset + vi;
                     if bi >= bm_count {
                         break;
                     }
-                    let page = bookmarks[bi as usize];
+                    let off = bookmarks[bi as usize];
                     let item_y = scroll_top + (vi as i32) * item_h_i;
                     let is_selected = bi == bm_index;
-
                     if is_selected {
                         Rectangle::new(
                             Point::new(list_x + 3, item_y),
                             Size::new((text_right - list_x - 3) as u32, menu_item_height),
                         )
                         .into_styled(PrimitiveStyleBuilder::new().fill_color(Black).build())
-                        .draw(display).ok();
+                        .draw(display)
+                        .ok();
                     }
                     let text_color = if is_selected { FontColor::Transparent(White) } else { FontColor::Transparent(Black) };
                     let prefix = if is_selected { "> " } else { "  " };
                     let delete_mark = if deleting && is_selected { " ×" } else { "" };
+                    let pct = if self.ttf_file_len > 0 { off * 100 / self.ttf_file_len } else { 0 };
                     font.render_aligned(
-                        format_args!("{}第{}页{}", prefix, page, delete_mark),
+                        format_args!("{}{}%{}", prefix, pct, delete_mark),
                         Point::new(text_left, item_y + item_h_i / 2),
                         VerticalPosition::Center,
                         HorizontalAlignment::Left,
                         text_color,
                         display,
-                    ).ok();
+                    )
+                    .ok();
                 }
 
-                // 滚动条（书签数超过可见区时显示）
                 if bm_count > max_visible && scroll_h > 0 {
                     Rectangle::new(Point::new(sb_x, scroll_top), Size::new(sb_w as u32, scroll_h as u32))
                         .into_styled(
-                            PrimitiveStyleBuilder::new()
-                                .fill_color(White)
-                                .stroke_color(Black)
-                                .stroke_width(1)
-                                .build(),
+                            PrimitiveStyleBuilder::new().fill_color(White).stroke_color(Black).stroke_width(1).build(),
                         )
-                        .draw(display).ok();
+                        .draw(display)
+                        .ok();
                     let thumb_h = ((scroll_h as u32 * max_visible) / bm_count).max(6).min(scroll_h as u32);
                     let thumb_y = scroll_top + ((scroll_h as u32 * scroll_offset) / bm_count) as i32;
                     Rectangle::new(Point::new(sb_x, thumb_y), Size::new(sb_w as u32, thumb_h))
                         .into_styled(PrimitiveStyleBuilder::new().fill_color(Black).build())
-                        .draw(display).ok();
+                        .draw(display)
+                        .ok();
                 }
 
-                // 暂无书签
                 if bm_count == 0 {
                     font.render_aligned(
                         "暂无书签",
@@ -598,10 +728,11 @@ impl ReadPage {
                         HorizontalAlignment::Center,
                         FontColor::Transparent(Black),
                         display,
-                    ).ok();
+                    )
+                    .ok();
                 }
 
-                // 预览区域（全屏宽，2/3 高度）
+                // 预览区（全屏宽，2/3 高）
                 Rectangle::new(Point::new(preview_x, preview_y), Size::new(vw, preview_h as u32))
                     .into_styled(
                         PrimitiveStyleBuilder::new()
@@ -611,9 +742,14 @@ impl ReadPage {
                             .stroke_width(1)
                             .build(),
                     )
-                    .draw(display).ok();
+                    .draw(display)
+                    .ok();
 
-                if bm_count > 0 && bm_index < bm_count && !self.bookmark_preview.is_empty() && preview_h > 12 {
+                if bm_count > 0
+                    && bm_index < bm_count
+                    && !self.bookmark_preview.is_empty()
+                    && preview_h > 12
+                {
                     use embedded_graphics::draw_target::DrawTargetExt;
                     let clip = Rectangle::new(
                         Point::new(preview_x + 4, preview_y + 4),
@@ -627,138 +763,86 @@ impl ReadPage {
                         HorizontalAlignment::Left,
                         FontColor::Transparent(Black),
                         &mut clipped_display,
-                    ).ok();
+                    )
+                    .ok();
                 }
             }
             MenuState::Closed => {}
         }
     }
 
+    /// 底部字节偏移百分比进度条。
     fn render_progress(&self, display: &mut crate::display::EpdDisplay) {
-        if self.book_pages.is_some() {
-            // ttf 路径用字节偏移百分比；否则用页码
-            #[cfg(feature = "ttf_spike")]
-            let (total, current) = (self.ttf_file_len, self.ttf_offset.min(self.ttf_file_len));
-            #[cfg(not(feature = "ttf_spike"))]
-            let (total, current) = {
-                let total = self.book_pages.as_ref().unwrap().total_page;
-                let current = if self.page_index > total { total } else { self.page_index };
-                (total, current)
-            };
-            if total == 0 { return; }
-            let vw = super::visual_width();
-            let vh = super::visual_height();
-            let bar_height: u32 = 3;
-            let margin: i32 = 2;
-            let bottom = vh as i32;
-            let bar_y = bottom - bar_height as i32 - margin;
-            let bar_full_width = vw as i32 - margin * 2;
+        let total = self.ttf_file_len;
+        if total == 0 {
+            return;
+        }
+        let current = self.ttf_offset.min(total);
+        let vw = super::visual_width();
+        let vh = super::visual_height();
+        let bar_height: u32 = 3;
+        let margin: i32 = 2;
+        let bar_y = vh as i32 - bar_height as i32 - margin;
+        let bar_full_width = vw as i32 - margin * 2;
 
-            let bg = Rectangle::new(
-                Point::new(margin, bar_y),
-                Size::new(bar_full_width as u32, bar_height),
-            );
-            bg.into_styled(
-                PrimitiveStyleBuilder::new().fill_color(White).stroke_color(Black).stroke_width(1).build()
-            ).draw(display).ok();
+        Rectangle::new(Point::new(margin, bar_y), Size::new(bar_full_width as u32, bar_height))
+            .into_styled(
+                PrimitiveStyleBuilder::new().fill_color(White).stroke_color(Black).stroke_width(1).build(),
+            )
+            .draw(display)
+            .ok();
 
-            let filled_width = if total > 0 {
-                ((current as u64 * bar_full_width as u64) / total as u64) as u32
-            } else {
-                0
-            };
-            if filled_width > 0 {
-                let filled = Rectangle::new(
-                    Point::new(margin, bar_y),
-                    Size::new(filled_width, bar_height),
-                );
-                filled.into_styled(PrimitiveStyleBuilder::new().fill_color(Black).build()).draw(display).ok();
-            }
+        let filled_width = ((current as u64 * bar_full_width as u64) / total as u64) as u32;
+        if filled_width > 0 {
+            Rectangle::new(Point::new(margin, bar_y), Size::new(filled_width, bar_height))
+                .into_styled(PrimitiveStyleBuilder::new().fill_color(Black).build())
+                .draw(display)
+                .ok();
         }
     }
-
-    /// 预加载下一页字形：渲染完当前页后，提前把下一页的字光栅化进缓存（不画），
-    /// 下次翻页大部分字命中缓存 → 直接 blit。
-    #[cfg(feature = "ttf_spike")]
-    async fn preload_next_page(&mut self) {
-        let ttf_end = self.ttf_end;
-        let ttf_file_len = self.ttf_file_len;
-        let ttf_px = self.ttf_px;
-        let bd_ptr = self.books_dir_ptr;
-        let font_ptr = self.font_file_ptr;
-        if ttf_file_len == 0 || ttf_end >= ttf_file_len || bd_ptr.is_null() { return; }
-        let book_name = match self.menus.as_ref().and_then(|m| m.get(self.choose_index as usize)) {
-            Some(n) => n.clone(),
-            None => return,
-        };
-        if let Some(ws) = self.ttf_ws.as_mut() {
-            let bd: &mut ActualDirectory<'_> = unsafe { &mut *bd_ptr };
-            let file_name = format!("{}.txt", book_name);
-            let short_name =
-                crate::sd_mount::SdMount::find_entry_by_name(bd, &file_name).map(|e| e.name);
-            // ① 读下一页字节
-            let mut n = 0usize;
-            if let Some(sn) = short_name {
-                if let Ok(mut bf) = bd.open_file_in_dir(sn, embedded_sdmmc::Mode::ReadOnly) {
-                    n = crate::ttf_sd::read_book_chunk(&mut bf, ttf_end, ws);
-                    bf.close();
-                }
-            }
-            // ② 预加载字形（只缓存不画），复用会话级 font.ttf 句柄
-            if n > 0 && !font_ptr.is_null() {
-                let ff: &mut ActualFile = unsafe { &mut *font_ptr };
-                if let Some(fi) = crate::ttf_sd::open_font(ff, ws) {
-                    let line_h = fi.line_height(ttf_px);
-                    let max_lines = ((super::visual_height() as i32
-                        - super::PROGRESS_AREA_HEIGHT as i32 - 1) / line_h) as u32;
-                    crate::ttf_sd::preload_glyphs(
-                        ff, &fi, ws, n, ttf_px,
-                        super::text_width() as i32, line_h, max_lines,
-                    ).await;
-                }
-            }
-        }
-    }
-
 }
 
 #[ram(unstable(rtc_fast))]
 pub(crate) static mut PAGE_INDEX: Option<u32> = None;
 
 /// 本次启动是否进阅读模式（true=跳过 WiFi，独占堆做 TTF）。
-/// rtc_fast：跨深睡保留（模式切换用 reboot_sleep 短深睡，不走 software_reset）。
-#[cfg(feature = "ttf_spike")]
+/// rtc_fast：跨 reboot_sleep 深睡保留。
 #[ram(unstable(rtc_fast))]
 pub(crate) static mut READING_MODE: bool = false;
 
 /// 跨复位续读的字节偏移（配合 PAGE_INDEX 标记的书）。rtc_fast：跨深睡保留。
-#[cfg(feature = "ttf_spike")]
 #[ram(unstable(rtc_fast))]
 static mut TTF_RESUME_OFFSET: u32 = 0;
 
 impl Page for ReadPage {
     fn new() -> Self {
+        // 读取排版设置（clamp 防止 flash 未初始化时的乱码值）
+        let settings = crate::storage::ReadingSettings::read().unwrap_or_default();
+        let ttf_px = settings.ttf_px.max(12).min(40) as f32;
+        let line_gap = (settings.line_gap as i32).max(0).min(10);
+        let rotate = settings.rotate % 4;
+        let mut font_name: String<32> = String::new();
+        let fname = settings.font_name_str();
+        if is_ttf(fname) {
+            let _ = font_name.push_str(fname);
+        } else {
+            let _ = font_name.push_str("font.ttf");
+        }
+
         let mut temp = Self {
             running: false,
             reading: false,
             need_render: false,
-            change_page: false,
-            force_indexing: false,
-            indexing: false,
-            indexing_process: 0.0,
             choose_index: 0,
-            open_file_name: Default::default(),
             menus: None,
-            book_pages: None,
             log_vec: None,
-            page_index: 0,
-            page_content: Default::default(),
             menu_state: MenuState::Closed,
             save_bookmark_flag: false,
             delete_bookmark_flag: false,
+            need_save_position: false,
             need_load_preview: false,
-            bookmark_preview: Default::default(),
-            rotate: 0,
+            bookmark_preview: String::new(),
+            rotate,
             exit_selected: false,
             jump_accel: 0,
             book_progress: Vec::new(),
@@ -768,25 +852,22 @@ impl Page for ReadPage {
             ttf_end: 0,
             ttf_file_len: 0,
             ttf_hist: Vec::new(),
-            ttf_px: 20.0,
-            #[cfg(feature = "ttf_spike")]
+            ttf_px,
+            line_gap,
             ttf_ws: None,
-            #[cfg(feature = "ttf_spike")]
             ttf_resume: false,
+            font_name,
+            font_list: Vec::new(),
+            need_reload_font: false,
         };
 
         unsafe {
             if let Some(v) = *core::ptr::addr_of!(PAGE_INDEX) {
                 temp.choose_index = v;
-                temp.change_page = true;
                 temp.reading = true;
-                temp.book_pages = None;
                 // 续读：恢复跨复位保存的字节偏移（重启分模式下从上次位置继续）
-                #[cfg(feature = "ttf_spike")]
-                {
-                    temp.ttf_offset = *core::ptr::addr_of!(TTF_RESUME_OFFSET);
-                    temp.ttf_resume = true;
-                }
+                temp.ttf_offset = *core::ptr::addr_of!(TTF_RESUME_OFFSET);
+                temp.ttf_resume = true;
             }
         }
 
@@ -803,175 +884,151 @@ impl Page for ReadPage {
                 let vh = super::visual_height();
                 let center = Point::new(vw as i32 / 2, vh as i32 / 2);
 
-                if self.indexing {
+                if !self.reading {
+                    // 书单列表
+                    if let Some(ref menus) = self.menus {
+                        let mut all_items: Vec<&str, 20> = Vec::new();
+                        let _ = all_items.push("退出");
+                        for item in menus.iter() {
+                            if all_items.push(item.as_str()).is_err() {
+                                break;
+                            }
+                        }
+                        let widget_index = if self.exit_selected { 0usize } else { self.choose_index as usize + 1 };
+                        let widget_index = widget_index.min(all_items.len().saturating_sub(1));
+
+                        let mut list_widget = ListWidget::new(Point::new(0, 0), Black, White, Size::new(vw, vh), all_items);
+                        list_widget.choose(widget_index);
+                        let _ = list_widget.draw(display);
+
+                        if self.book_progress.len() == menus.len() {
+                            let font: FontRenderer = FontRenderer::new::<fonts::u8g2_font_wqy16_t_gb2312>();
+                            let font = font.with_ignore_unknown_chars(true);
+                            let item_height: u32 = 20;
+                            let scroll_width: u32 = 10;
+                            let total_widget_items = self.book_progress.len() + 1;
+                            let content_h = total_widget_items as u32 * item_height;
+                            let scroll_offset: i32 = if content_h <= vh {
+                                0
+                            } else {
+                                let half = vh / 2;
+                                let max_off = content_h - vh;
+                                let cy = widget_index as u32 * item_height;
+                                if cy <= half {
+                                    0
+                                } else if cy >= max_off + half {
+                                    max_off as i32
+                                } else {
+                                    (cy - half) as i32
+                                }
+                            };
+                            for bi in 0..self.book_progress.len() {
+                                if self.book_progress[bi].is_empty() {
+                                    continue;
+                                }
+                                let item_y = (bi as i32 + 1) * item_height as i32 - scroll_offset;
+                                if item_y < 0 || item_y + item_height as i32 > vh as i32 {
+                                    continue;
+                                }
+                                font.render_aligned(
+                                    self.book_progress[bi].as_str(),
+                                    Point::new((vw - scroll_width - 5) as i32, item_y + 5),
+                                    VerticalPosition::Top,
+                                    HorizontalAlignment::Right,
+                                    FontColor::Transparent(Black),
+                                    display,
+                                )
+                                .ok();
+                            }
+                        }
+                    }
+                } else {
+                    // 阅读态：TTF 即时分页渲染
                     let font: FontRenderer = FontRenderer::new::<fonts::u8g2_font_wqy15_t_gb2312>();
                     let font = font.with_ignore_unknown_chars(true);
-                    let _ = font.render_aligned(
-                        format_args!("正在创建索引，\n 已创建索引进度：{:.2}%", self.indexing_process),
-                        center,
-                        VerticalPosition::Center,
-                        HorizontalAlignment::Center,
-                        FontColor::Transparent(Black),
-                        display,
-                    );
-                    println!("显示进度：{}", self.indexing_process);
-                    crate::sleep::refresh_active_time().await;
-                } else {
-                    if !self.reading {
-                        if let Some(ref menus) = self.menus {
-                            let mut all_items: Vec<&str, 20> = Vec::new();
-                            let _ = all_items.push("退出");
-                            for item in menus.iter() {
-                                if all_items.push(item.as_str()).is_err() { break; }
-                            }
-                            let widget_index = if self.exit_selected { 0usize } else { self.choose_index as usize + 1 };
-                            let widget_index = widget_index.min(all_items.len().saturating_sub(1));
 
-                            let mut list_widget = ListWidget::new(Point::new(0, 0), Black, White, Size::new(vw, vh), all_items);
-                            list_widget.choose(widget_index);
-                            let _ = list_widget.draw(display);
+                    let is_last = self.ttf_file_len > 0 && self.ttf_offset >= self.ttf_file_len;
+                    if is_last {
+                        let _ = font.render_aligned(
+                            "已是最后一页",
+                            center,
+                            VerticalPosition::Center,
+                            HorizontalAlignment::Center,
+                            FontColor::Transparent(Black),
+                            display,
+                        );
+                    } else {
+                        let ttf_offset = self.ttf_offset;
+                        let ttf_px = self.ttf_px;
+                        let line_gap = self.line_gap;
+                        let bd_ptr = self.books_dir_ptr;
+                        let font_ptr = self.font_file_ptr;
+                        let book_name = self
+                            .menus
+                            .as_ref()
+                            .and_then(|m| m.get(self.choose_index as usize))
+                            .cloned();
 
-                            if self.book_progress.len() == menus.len() {
-                                let font: FontRenderer = FontRenderer::new::<fonts::u8g2_font_wqy16_t_gb2312>();
-                                let font = font.with_ignore_unknown_chars(true);
-                                let item_height: u32 = 20;
-                                let scroll_width: u32 = 10;
-                                let total_widget_items = self.book_progress.len() + 1;
-                                let content_h = total_widget_items as u32 * item_height;
-                                let scroll_offset: i32 = if content_h <= vh { 0 } else {
-                                    let half = vh / 2;
-                                    let max_off = content_h - vh;
-                                    let cy = widget_index as u32 * item_height;
-                                    if cy <= half { 0 }
-                                    else if cy >= max_off + half { max_off as i32 }
-                                    else { (cy - half) as i32 }
-                                };
-                                for bi in 0..self.book_progress.len() {
-                                    if self.book_progress[bi].is_empty() { continue; }
-                                    let item_y = (bi as i32 + 1) * item_height as i32 - scroll_offset;
-                                    if item_y < 0 || item_y + item_height as i32 > vh as i32 { continue; }
-                                    font.render_aligned(
-                                        self.book_progress[bi].as_str(),
-                                        Point::new((vw - scroll_width - 5) as i32, item_y + 5),
-                                        VerticalPosition::Top,
-                                        HorizontalAlignment::Right,
-                                        FontColor::Transparent(Black),
-                                        display,
-                                    ).ok();
+                        // 渲染结果：Some(消费字节数) 成功；None 失败。
+                        let mut result: Option<u32> = None;
+                        if let (Some(ws), Some(book_name)) = (self.ttf_ws.as_mut(), book_name) {
+                            if !bd_ptr.is_null() {
+                                let bd: &mut ActualDirectory<'_> = unsafe { &mut *bd_ptr };
+                                let file_name = format!("{}.txt", book_name);
+                                let short_name =
+                                    SdMount::find_entry_by_name(bd, &file_name).map(|e| e.name);
+                                let mut n = 0usize;
+                                if let Some(sn) = short_name {
+                                    if let Ok(mut bf) =
+                                        bd.open_file_in_dir(sn, embedded_sdmmc::Mode::ReadOnly)
+                                    {
+                                        n = crate::ttf_sd::read_book_chunk(&mut bf, ttf_offset, ws);
+                                        bf.close();
+                                    }
+                                }
+                                if n > 0 && !font_ptr.is_null() {
+                                    let ff: &mut ActualFile = unsafe { &mut *font_ptr };
+                                    if let Some(fi) = crate::ttf_sd::open_font(ff, ws) {
+                                        let text_area_h = vh as i32
+                                            - super::PROGRESS_AREA_HEIGHT as i32 - 2;
+                                        let base_h = (fi.line_height(ttf_px) + line_gap).max(1);
+                                        let max_lines = ((text_area_h / base_h) as u32).max(1);
+                                        let line_h = text_area_h / max_lines as i32;
+                                        let consumed = crate::ttf_sd::paginate_render(
+                                            ff, &fi, ws, display, n, ttf_px,
+                                            Point::new(super::text_left_margin(), 2),
+                                            super::text_width() as i32, line_h, max_lines,
+                                        );
+                                        result = Some(consumed as u32);
+                                    }
                                 }
                             }
                         }
-                    } else if self.book_pages.is_some() {
-                        let font: FontRenderer = FontRenderer::new::<fonts::u8g2_font_wqy15_t_gb2312>();
-                        let font = font.with_ignore_unknown_chars(true);
-                        display.clear_buffer(Color::White);
-                        {
-                            #[cfg(feature = "ttf_spike")]
-                            let is_last =
-                                self.ttf_file_len > 0 && self.ttf_offset >= self.ttf_file_len;
-                            #[cfg(not(feature = "ttf_spike"))]
-                            let is_last =
-                                self.page_index == self.book_pages.as_ref().unwrap().total_page;
-                            if is_last {
+
+                        match result {
+                            Some(consumed) => {
+                                self.ttf_end = ttf_offset + consumed;
+                            }
+                            None => {
+                                let msg = if self.ttf_ws.is_none() {
+                                    "TTF 内存不足"
+                                } else {
+                                    "TTF 渲染失败"
+                                };
                                 let _ = font.render_aligned(
-                                    "已是最后一页",
+                                    msg,
                                     center,
                                     VerticalPosition::Center,
                                     HorizontalAlignment::Center,
                                     FontColor::Transparent(Black),
                                     display,
                                 );
-                            } else {
-                                #[cfg(feature = "ttf_spike")]
-                                {
-                                    // TTF 动态分页：读 .txt 一页字节 → 用字体即时分页+渲染（工作区在堆 ttf_ws）
-                                    let mut drew = false;
-                                    let bd_ptr = self.books_dir_ptr;
-                                    let font_ptr = self.font_file_ptr;
-                                    let ttf_offset = self.ttf_offset;
-                                    let ttf_px = self.ttf_px;
-                                    let book_name = self
-                                        .menus
-                                        .as_ref()
-                                        .and_then(|m| m.get(self.choose_index as usize))
-                                        .cloned();
-                                    if let (Some(ws), Some(book_name)) = (self.ttf_ws.as_mut(), book_name) {
-                                        if !bd_ptr.is_null() {
-                                            let bd: &mut ActualDirectory<'_> =
-                                                unsafe { &mut *bd_ptr };
-                                            let file_name = format!("{}.txt", book_name);
-                                            let short_name =
-                                                crate::sd_mount::SdMount::find_entry_by_name(bd, &file_name)
-                                                    .map(|e| e.name);
-                                            let mut n = 0usize;
-                                            if let Some(sn) = short_name {
-                                                if let Ok(mut bf) = bd.open_file_in_dir(
-                                                    sn,
-                                                    embedded_sdmmc::Mode::ReadOnly,
-                                                ) {
-                                                    n = crate::ttf_sd::read_book_chunk(
-                                                        &mut bf, ttf_offset, ws,
-                                                    );
-                                                    bf.close();
-                                                }
-                                            }
-                                            let mut consumed = 0usize;
-                                            let mut font_ok = false;
-                                            if n > 0 && !font_ptr.is_null() {
-                                                let ff: &mut ActualFile = unsafe { &mut *font_ptr };
-                                                if let Some(fi) = crate::ttf_sd::open_font(ff, ws)
-                                                {
-                                                    let line_h = fi.line_height(ttf_px);
-                                                    let max_lines = ((super::visual_height() as i32
-                                                        - super::PROGRESS_AREA_HEIGHT as i32
-                                                        - 1)
-                                                        / line_h) as u32;
-                                                    consumed = crate::ttf_sd::paginate_render(
-                                                        ff, &fi, ws, display, n, ttf_px,
-                                                        Point::new(super::text_left_margin(), 2),
-                                                        super::text_width() as i32, line_h,
-                                                        max_lines,
-                                                    );
-                                                    font_ok = true;
-                                                }
-                                            }
-                                            if font_ok {
-                                                self.ttf_end = ttf_offset + consumed as u32;
-                                                drew = true;
-                                            }
-                                        }
-                                    }
-                                    if !drew {
-                                        // TTF 失败：在屏幕上显示错误原因（不再画空白）
-                                        let msg = if self.ttf_ws.is_none() {
-                                            "TTF 内存不足\n堆分配失败\n请退出后重试"
-                                        } else {
-                                            "TTF 渲染失败\n请检查:\nbooks/font.ttf\nbooks/*.txt"
-                                        };
-                                        let _ = font.render_aligned(
-                                            msg,
-                                            center,
-                                            VerticalPosition::Center,
-                                            HorizontalAlignment::Center,
-                                            FontColor::Transparent(Black),
-                                            display,
-                                        );
-                                    }
-                                }
-                                #[cfg(not(feature = "ttf_spike"))]
-                                let _ = font.render_aligned(
-                                    self.page_content.as_str(),
-                                    Point::new(super::text_left_margin(), 2),
-                                    VerticalPosition::Top,
-                                    HorizontalAlignment::Left,
-                                    FontColor::Transparent(Black),
-                                    display,
-                                );
                             }
                         }
-                        self.render_progress(display);
                     }
+                    self.render_progress(display);
                 }
+
                 if self.reading && !matches!(self.menu_state, MenuState::Closed) {
                     self.render_menu_overlay(display);
                 }
@@ -987,23 +1044,22 @@ impl Page for ReadPage {
             super::set_rotation_state(self.rotate);
             display.set_rotation(super::current_rotation());
         }
+
         // 阅读模式（重启分模式）：本启动未初始化 WiFi，堆几乎全空给 TTF。
-        // 分配 TtfWs 工作区（大缓存 GC_N=256）。
-        #[cfg(feature = "ttf_spike")]
-        {
-            self.ttf_ws = None;
-            let mut tries = 0u32;
-            while self.ttf_ws.is_none() && tries < 8 {
-                self.ttf_ws = crate::ttf_sd::alloc_ws();
-                if self.ttf_ws.is_none() {
-                    tries += 1;
-                    embassy_time::Timer::after(embassy_time::Duration::from_millis(200)).await;
-                }
-            }
+        // 分配 TtfWs 工作区（大缓存）。重试 8 次等堆就绪。
+        self.ttf_ws = None;
+        let mut tries = 0u32;
+        while self.ttf_ws.is_none() && tries < 8 {
+            self.ttf_ws = crate::ttf_sd::alloc_ws();
             if self.ttf_ws.is_none() {
-                println!("[read ttf] alloc_ws 失败，回退点阵");
+                tries += 1;
+                Timer::after(Duration::from_millis(200)).await;
             }
         }
+        if self.ttf_ws.is_none() {
+            println!("[read ttf] alloc_ws 失败");
+        }
+
         self.running = true;
         self.need_render = true;
 
@@ -1025,72 +1081,143 @@ impl Page for ReadPage {
                                 };
                                 self.menus = Some(books);
                                 self.load_book_progress(&mut books_dir);
-                                // 记录 books_dir 裸指针，供 TTF 渲染（render 无参）打开字体；仅此作用域内有效
                                 self.books_dir_ptr =
                                     core::ptr::addr_of_mut!(books_dir) as *mut ActualDirectory<'static>;
 
-                                // TTF：整个阅读会话只开一次 font.ttf，复用同一句柄（避免每页重复 open + 目录扫描）。
-                                // open_file_by_name 返回的 File 借自 books_dir，但实际只依赖 volume_mgr
-                                // （整个阅读期有效），故把生命周期擦除为 'static，存进 run() 局部 ttf_font_file，
-                                // 随 books_dir 作用域一起释放。
-                                #[cfg(feature = "ttf_spike")]
-                                let mut ttf_font_file: Option<ActualFile<'static>> = None;
-                                #[cfg(feature = "ttf_spike")]
+                                // 扫描 .ttf 文件进 font_list
                                 {
-                                    if let Ok(f) = crate::sd_mount::SdMount::open_file_by_name(
-                                        &mut books_dir,
-                                        "font.ttf",
-                                        embedded_sdmmc::Mode::ReadOnly,
-                                    ) {
-                                        let f_static: ActualFile<'static> =
-                                            unsafe { core::mem::transmute(f) };
-                                        ttf_font_file = Some(f_static);
-                                    } else {
-                                        println!("[read ttf] font.ttf 打开失败");
-                                    }
-                                    self.font_file_ptr = match ttf_font_file.as_mut() {
-                                        Some(f) => f as *mut ActualFile<'static>,
-                                        None => core::ptr::null_mut(),
-                                    };
+                                    let mut fonts_found: Vec<String<32>, 10> = Vec::new();
+                                    let mut storage = [0u8; 512];
+                                    let mut lfn_buffer = embedded_sdmmc::LfnBuffer::new(&mut storage);
+                                    let _ = books_dir.iterate_dir_lfn(&mut lfn_buffer, |_dir, lfn| {
+                                        if let Some(name) = lfn {
+                                            let b = name.as_bytes();
+                                            if b.len() >= 4
+                                                && b[b.len() - 4..].eq_ignore_ascii_case(b".ttf")
+                                            {
+                                                if let Ok(s) = String::<32>::from_str(name) {
+                                                    let _ = fonts_found.push(s);
+                                                }
+                                            }
+                                        }
+                                    });
+                                    self.font_list = fonts_found;
+                                }
+                                // font_name 不在列表里则回退到第一个可用字体
+                                if !self.font_list.is_empty()
+                                    && !self.font_list.iter().any(|f| f.as_str() == self.font_name.as_str())
+                                {
+                                    self.font_name = self.font_list[0].clone();
                                 }
 
+                                // 打开字体句柄（整个会话复用，换字体时由 need_reload_font 重开）
+                                let mut ttf_font_file: Option<ActualFile<'static>> = None;
+                                let fname = self.font_name.as_str();
+                                if let Ok(f) = SdMount::open_file_by_name(
+                                    &mut books_dir,
+                                    fname,
+                                    embedded_sdmmc::Mode::ReadOnly,
+                                ) {
+                                    // 句柄实际只依赖 volume_mgr（整个阅读期有效），擦除生命周期为 'static。
+                                    let f_static: ActualFile<'static> = unsafe { core::mem::transmute(f) };
+                                    ttf_font_file = Some(f_static);
+                                } else {
+                                    println!("[read ttf] {} 打开失败", fname);
+                                }
+                                self.font_file_ptr = match ttf_font_file.as_mut() {
+                                    Some(f) => f as *mut ActualFile<'static>,
+                                    None => core::ptr::null_mut(),
+                                };
+
                                 loop {
-                                    if !self.running { break; }
-                                    if self.menus.as_ref().unwrap().len() > 0 {
-                                        if self.book_pages.is_none() {
+                                    if !self.running {
+                                        break;
+                                    }
+                                    if self.menus.as_ref().map(|m| m.len()).unwrap_or(0) > 0 {
+                                        if self.ttf_file_len == 0 {
                                             self.get_page_vec(&mut books_dir).await;
                                             self.get_log_vec(&mut books_dir).await;
                                         }
-                                        if self.change_page {
-                                            self.change_page = false;
-                                            #[cfg(not(feature = "ttf_spike"))]
-                                            {
-                                                self.book_pages.as_mut().unwrap().set_current_page(self.page_index);
-                                                self.get_page_content(&mut books_dir).await;
-                                            }
-                                            // ttf 路径不用 page_content：render 直接从 ttf_offset 读字节
-                                        }
                                     }
 
+                                    // 收藏书签（当前位置字节偏移）
                                     if self.save_bookmark_flag {
                                         self.save_bookmark_flag = false;
                                         let book_name = self.menus.as_ref().unwrap()[self.choose_index as usize].clone();
                                         let file_name = format!("{}.txt", book_name);
                                         if let Some(entry) = SdMount::find_entry_by_name(&mut books_dir, &file_name) {
                                             let short_name = entry.name;
-                                            let logfile = SdMount::open_log_file(&mut books_dir, &short_name, embedded_sdmmc::Mode::ReadWriteCreateOrTruncate);
+                                            let logfile = SdMount::open_log_file(
+                                                &mut books_dir,
+                                                &short_name,
+                                                embedded_sdmmc::Mode::ReadWriteCreateOrTruncate,
+                                            );
                                             if let Ok(mut f) = logfile {
                                                 if self.log_vec.is_none() {
                                                     self.log_vec = Some(Vec::new());
                                                 }
                                                 if let Some(ref mut lv) = self.log_vec {
-                                                    TxtReader::save_log(&mut f, lv, self.page_index, true);
+                                                    TxtReader::save_log(&mut f, lv, self.ttf_offset, true);
                                                 }
                                                 f.close();
                                             }
                                         }
+                                        self.need_render = true;
                                     }
 
+                                    // 持久化阅读位置到 .log[0]
+                                    if self.need_save_position {
+                                        self.need_save_position = false;
+                                        if self.ttf_file_len > 0 {
+                                            let book_name = self.menus.as_ref().unwrap()[self.choose_index as usize].clone();
+                                            let file_name = format!("{}.txt", book_name);
+                                            if let Some(entry) = SdMount::find_entry_by_name(&mut books_dir, &file_name) {
+                                                let short_name = entry.name;
+                                                let logfile = SdMount::open_log_file(
+                                                    &mut books_dir,
+                                                    &short_name,
+                                                    embedded_sdmmc::Mode::ReadWriteCreateOrTruncate,
+                                                );
+                                                if let Ok(mut f) = logfile {
+                                                    if self.log_vec.is_none() {
+                                                        self.log_vec = Some(Vec::new());
+                                                    }
+                                                    if let Some(ref mut lv) = self.log_vec {
+                                                        TxtReader::save_log(&mut f, lv, self.ttf_offset, false);
+                                                    }
+                                                    f.close();
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    // 换字体：重开句柄 + 清字形缓存 + 清字体表缓存（fi）
+                                    if self.need_reload_font {
+                                        self.need_reload_font = false;
+                                        ttf_font_file.take();
+                                        let fname = self.font_name.as_str();
+                                        if let Ok(f) = SdMount::open_file_by_name(
+                                            &mut books_dir,
+                                            fname,
+                                            embedded_sdmmc::Mode::ReadOnly,
+                                        ) {
+                                            let f_static: ActualFile<'static> =
+                                                unsafe { core::mem::transmute(f) };
+                                            ttf_font_file = Some(f_static);
+                                            self.font_file_ptr = ttf_font_file.as_mut().unwrap() as *mut ActualFile<'static>;
+                                            if let Some(ws) = self.ttf_ws.as_mut() {
+                                                crate::ttf_sd::cache_clear(ws);
+                                                ws.fi = None; // 强制重新解析新字体的表目录/度量
+                                            }
+                                            self.ttf_end = self.ttf_offset.min(self.ttf_file_len);
+                                        } else {
+                                            println!("[read ttf] 重开字体失败: {}", fname);
+                                            self.font_file_ptr = core::ptr::null_mut();
+                                        }
+                                        self.need_render = true;
+                                    }
+
+                                    // 删除书签
                                     if self.delete_bookmark_flag {
                                         self.delete_bookmark_flag = false;
                                         if let Some(ref mut lv) = self.log_vec {
@@ -1105,7 +1232,11 @@ impl Page for ReadPage {
                                                 let file_name = format!("{}.txt", book_name);
                                                 if let Some(entry) = SdMount::find_entry_by_name(&mut books_dir, &file_name) {
                                                     let short_name = entry.name;
-                                                    let logfile = SdMount::open_log_file(&mut books_dir, &short_name, embedded_sdmmc::Mode::ReadWriteCreateOrTruncate);
+                                                    let logfile = SdMount::open_log_file(
+                                                        &mut books_dir,
+                                                        &short_name,
+                                                        embedded_sdmmc::Mode::ReadWriteCreateOrTruncate,
+                                                    );
                                                     if let Ok(mut f) = logfile {
                                                         TxtReader::save_log_raw(&mut f, lv);
                                                         f.close();
@@ -1123,49 +1254,37 @@ impl Page for ReadPage {
                                         self.need_render = true;
                                     }
 
+                                    // 加载书签预览（读 .txt 在该书签偏移处的开头一段）
                                     if self.need_load_preview {
                                         self.need_load_preview = false;
                                         self.bookmark_preview.clear();
-                                        let bm_page = match self.menu_state {
-                                            MenuState::BookmarkList { bm_index, .. } => {
-                                                self.log_vec.as_ref()
-                                                    .and_then(|lv| lv.iter().skip(1).nth(bm_index as usize).copied())
-                                            },
+                                        let bm_off = match self.menu_state {
+                                            MenuState::BookmarkList { bm_index, .. } => self
+                                                .log_vec
+                                                .as_ref()
+                                                .and_then(|lv| lv.iter().skip(1).nth(bm_index as usize).copied()),
                                             _ => None,
                                         };
-                                        if let Some(page) = bm_page {
-                                            if self.book_pages.is_some() {
-                                                let book_name = self.menus.as_ref().unwrap()[self.choose_index as usize].clone();
-                                                let file_name = format!("{}.txt", book_name);
-                                                if let Some(entry) = SdMount::find_entry_by_name(&mut books_dir, &file_name) {
-                                                    let short_name = entry.name;
-                                                    let page_pos = {
-                                                        let idx_file = SdMount::open_idx_file(&mut books_dir, &short_name, embedded_sdmmc::Mode::ReadOnly);
-                                                        if let Ok(idx_file) = idx_file {
-                                                            let begin_pos = if page == 0 { 0u32 } else {
-                                                                idx_file.seek_from_start((page - 1) * 4);
-                                                                let mut buf = [0u8; 4];
-                                                                let _ = idx_file.read(&mut buf);
-                                                                ((buf[0] as u32) << 24) | ((buf[1] as u32) << 16) | ((buf[2] as u32) << 8) | buf[3] as u32
-                                                            };
-                                                            idx_file.seek_from_start(page * 4);
-                                                            let mut buf = [0u8; 4];
-                                                            let end_pos = if idx_file.read(&mut buf).unwrap_or(0) == 4 {
-                                                                ((buf[0] as u32) << 24) | ((buf[1] as u32) << 16) | ((buf[2] as u32) << 8) | buf[3] as u32
-                                                            } else { 0 };
-                                                            idx_file.close();
-                                                            Some((begin_pos, end_pos))
-                                                        } else { None }
-                                                    };
-
-                                                    if let Some((begin_pos, end_pos)) = page_pos {
-                                                        if end_pos > begin_pos {
-                                                            let my_file = books_dir.open_file_in_dir(short_name, embedded_sdmmc::Mode::ReadOnly);
-                                                            if let Ok(mut my_file) = my_file {
-                                                                self.bookmark_preview = TxtReader::get_page_content(&mut my_file, begin_pos, end_pos, super::text_width());
-                                                                my_file.close();
-                                                            }
+                                        if let Some(off) = bm_off {
+                                            let book_name = self.menus.as_ref().unwrap()[self.choose_index as usize].clone();
+                                            let file_name = format!("{}.txt", book_name);
+                                            if let Some(entry) = SdMount::find_entry_by_name(&mut books_dir, &file_name) {
+                                                if let Ok(mut f) = books_dir.open_file_in_dir(
+                                                    entry.name,
+                                                    embedded_sdmmc::Mode::ReadOnly,
+                                                ) {
+                                                    let _ = f.seek_from_start(off);
+                                                    let mut buf = [0u8; 512];
+                                                    let mut got = 0usize;
+                                                    while got < buf.len() {
+                                                        match f.read(&mut buf[got..]) {
+                                                            Ok(0) | Err(_) => break,
+                                                            Ok(n) => got += n,
                                                         }
+                                                    }
+                                                    f.close();
+                                                    if let Ok(s) = core::str::from_utf8(&buf[..got]) {
+                                                        let _ = self.bookmark_preview.push_str(s);
                                                     }
                                                 }
                                             }
@@ -1179,40 +1298,80 @@ impl Page for ReadPage {
                                     let did_render = self.need_render;
                                     self.render().await;
 
-                                    // 仅在实际渲染后（翻页）预加载一次下一页字形，不是每 tick 都跑
-                                    #[cfg(feature = "ttf_spike")]
-                                    if did_render && matches!(self.menu_state, MenuState::Closed) && self.reading {
+                                    // 仅在实际渲染后（翻页）预加载一次下一页字形
+                                    if did_render
+                                        && matches!(self.menu_state, MenuState::Closed)
+                                        && self.reading
+                                    {
                                         self.preload_next_page().await;
                                     }
 
                                     if matches!(self.menu_state, MenuState::Closed) {
-                                        let sleep_storage = crate::storage::SleepStorage::read().unwrap_or_default();
+                                        let sleep_storage =
+                                            crate::storage::SleepStorage::read().unwrap_or_default();
                                         let read_sleep_seconds = if sleep_storage.read_sleep_seconds > 0 {
                                             sleep_storage.read_sleep_seconds
                                         } else {
                                             120
                                         };
-                                        to_sleep_tips(Duration::from_secs(0), Duration::from_secs(read_sleep_seconds), true).await;
+                                        to_sleep_tips(
+                                            Duration::from_secs(0),
+                                            Duration::from_secs(read_sleep_seconds),
+                                            true,
+                                        )
+                                        .await;
                                     }
 
                                     Timer::after_millis(50).await;
+                                }
+
+                                // 退出：保存阅读位置到 .log[0]
+                                if self.reading && self.ttf_file_len > 0 {
+                                    let book_name = self
+                                        .menus
+                                        .as_ref()
+                                        .and_then(|m| m.get(self.choose_index as usize))
+                                        .cloned();
+                                    if let Some(book_name) = book_name {
+                                        let file_name = format!("{}.txt", book_name);
+                                        if let Some(entry) =
+                                            SdMount::find_entry_by_name(&mut books_dir, &file_name)
+                                        {
+                                            let short_name = entry.name;
+                                            if let Ok(mut f) = SdMount::open_log_file(
+                                                &mut books_dir,
+                                                &short_name,
+                                                embedded_sdmmc::Mode::ReadWriteCreateOrTruncate,
+                                            ) {
+                                                if self.log_vec.is_none() {
+                                                    self.log_vec = Some(Vec::new());
+                                                }
+                                                if let Some(ref mut lv) = self.log_vec {
+                                                    TxtReader::save_log(&mut f, lv, self.ttf_offset, false);
+                                                }
+                                                f.close();
+                                            }
+                                        }
+                                    }
                                 }
                             } else {
                                 println!("books dir not found");
                                 self.menus = Some(Vec::new());
                                 loop {
-                                    if !self.running { break; }
+                                    if !self.running {
+                                        break;
+                                    }
                                     self.render().await;
                                     Timer::after_millis(50).await;
                                 }
                             }
-                        },
+                        }
                         Err(er) => {
-                            println!("open volume:{:?}", er);
+                            println!("open root:{:?}", er);
                             display::show_error("打开主目录失败", true).await;
-                        },
+                        }
                     }
-                },
+                }
                 Err(e) => {
                     println!("open volume:{:?}", e);
                     display::show_error("读取分区失败", true).await;
@@ -1221,19 +1380,15 @@ impl Page for ReadPage {
         }
         display::set_sleep_renderer(None);
         self.books_dir_ptr = core::ptr::null_mut();
-        #[cfg(feature = "ttf_spike")]
-        {
-            self.font_file_ptr = core::ptr::null_mut();
-        }
-        // 退出阅读：释放 TTF 工作区 + 保存续读偏移（reading_task 随后会 software_reset 回正常模式）
-        #[cfg(feature = "ttf_spike")]
-        {
-            if let Some(ws) = self.ttf_ws.take() {
-                unsafe { crate::ttf_sd::free_ws(ws as *mut _); }
-            }
+        self.font_file_ptr = core::ptr::null_mut();
+        // 释放 TTF 工作区 + 保存续读偏移（reading_task 随后 reboot_sleep 回正常模式）
+        if let Some(ws) = self.ttf_ws.take() {
             unsafe {
-                *core::ptr::addr_of_mut!(TTF_RESUME_OFFSET) = self.ttf_offset.min(self.ttf_file_len);
+                crate::ttf_sd::free_ws(ws as *mut _);
             }
+        }
+        unsafe {
+            *core::ptr::addr_of_mut!(TTF_RESUME_OFFSET) = self.ttf_offset.min(self.ttf_file_len);
         }
         if let Some(display) = display_mut() {
             display.set_rotation(DisplayRotation::Rotate0);
@@ -1243,23 +1398,26 @@ impl Page for ReadPage {
     async fn bind_event(&mut self) {
         event::clear().await;
 
-        // Key3 long: open/close menu / exit
+        // Key3 long: 退出当前态 / 退出阅读
         event::on_target(EventType::KeyLongEnd(3), Self::mut_to_ptr(self), move |info| {
             return Box::pin(async move {
                 let mut_ref: &mut Self = Self::mut_by_ptr(info.ptr).unwrap();
                 match mut_ref.menu_state {
-                    MenuState::JumpInput { .. } => {
+                    MenuState::JumpInput { .. }
+                    | MenuState::Layout { .. }
+                    | MenuState::FontList { .. }
+                    | MenuState::BookmarkList { .. } => {
+                        // 子菜单内长按 3：统一退回 Popup（取消当前操作）
                         mut_ref.menu_state = MenuState::Popup { menu_index: 0 };
-                        mut_ref.need_render = true;
-                    }
-                    MenuState::BookmarkList { .. } => {
-                        mut_ref.menu_state = MenuState::Popup { menu_index: 0 };
+                        mut_ref.bookmark_preview.clear();
                         mut_ref.need_render = true;
                     }
                     _ => {
                         if mut_ref.reading {
                             mut_ref.reading = false;
-                            unsafe { core::ptr::addr_of_mut!(PAGE_INDEX).write(None); }
+                            unsafe {
+                                core::ptr::addr_of_mut!(PAGE_INDEX).write(None);
+                            }
                             mut_ref.menu_state = MenuState::Closed;
                             mut_ref.need_render = true;
                         } else {
@@ -1268,9 +1426,10 @@ impl Page for ReadPage {
                     }
                 }
             });
-        }).await;
+        })
+        .await;
 
-        // Key3 short: open/close menu / select / confirm jump / toggle reading
+        // Key3 short: 打开菜单 / 选择 / 确认
         event::on_target(EventType::KeyShort(3), Self::mut_to_ptr(self), move |info| {
             return Box::pin(async move {
                 let mut_ref: &mut Self = Self::mut_by_ptr(info.ptr).unwrap();
@@ -1278,10 +1437,15 @@ impl Page for ReadPage {
                     MenuState::Popup { menu_index } => {
                         match menu_index {
                             0 => {
+                                // 返回书单
                                 mut_ref.reading = false;
-                                unsafe { core::ptr::addr_of_mut!(PAGE_INDEX).write(None); }
+                                unsafe {
+                                    core::ptr::addr_of_mut!(PAGE_INDEX).write(None);
+                                }
                             }
-                            1 => { mut_ref.save_bookmark_flag = true; }
+                            1 => {
+                                mut_ref.save_bookmark_flag = true;
+                            }
                             2 => {
                                 mut_ref.menu_state = MenuState::BookmarkList { bm_index: 0, deleting: false };
                                 mut_ref.need_load_preview = true;
@@ -1295,40 +1459,81 @@ impl Page for ReadPage {
                                 return;
                             }
                             4 => {
-                                mut_ref.menu_state = MenuState::JumpInput { input_num: mut_ref.page_index };
+                                // 跳转进度（百分比）
+                                let pct = if mut_ref.ttf_file_len > 0 {
+                                    mut_ref.ttf_offset.min(mut_ref.ttf_file_len) * 100 / mut_ref.ttf_file_len
+                                } else {
+                                    0
+                                };
+                                mut_ref.menu_state = MenuState::JumpInput { input_pct: pct as u8 };
                                 mut_ref.jump_accel = 0;
                                 mut_ref.need_render = true;
                                 return;
                             }
                             5 => {
+                                // 排版：快照当前值供“长按取消”还原
+                                mut_ref.menu_state = MenuState::Layout {
+                                    px: mut_ref.ttf_px as u8,
+                                    gap: mut_ref.line_gap as u8,
+                                };
+                                mut_ref.need_render = true;
+                                return;
+                            }
+                            6 => {
+                                mut_ref.menu_state = MenuState::FontList { font_index: 0 };
+                                mut_ref.need_render = true;
+                                return;
+                            }
+                            7 => {
+                                // 旋转屏幕
                                 mut_ref.rotate = (mut_ref.rotate + 1) % 4;
                                 super::set_rotation_state(mut_ref.rotate);
                                 if let Some(display) = display_mut() {
                                     display.set_rotation(super::current_rotation());
                                 }
+                                mut_ref.save_reading_settings();
                             }
-                            6 => {
-                                mut_ref.force_indexing = true;
-                                mut_ref.book_pages = None;
-                            }
-                            7 => {
+                            8 => {
                                 crate::sleep::refresh_active_time().await;
                                 crate::sleep::to_sleep_tips(Duration::from_secs(0), Duration::from_secs(0), true).await;
                                 return;
                             }
-                            _ => {}
+                            _ => {} // 9 = 取消
                         }
                         mut_ref.menu_state = MenuState::Closed;
                         mut_ref.need_render = true;
                     }
-                    MenuState::JumpInput { input_num } => {
-                        mut_ref.do_change_page(input_num).await;
+                    MenuState::JumpInput { input_pct } => {
+                        // 确认跳转
+                        let off = input_pct as u64 * mut_ref.ttf_file_len as u64 / 100;
+                        mut_ref.jump_to_offset(off);
+                        mut_ref.menu_state = MenuState::Closed;
+                        mut_ref.need_render = true;
+                    }
+                    MenuState::Layout { .. } => {
+                        // 确认排版：保存到 flash 并关闭
+                        mut_ref.save_reading_settings();
+                        mut_ref.menu_state = MenuState::Closed;
+                        mut_ref.need_render = true;
+                    }
+                    MenuState::FontList { font_index } => {
+                        // 确认字体
+                        if let Some(name) = mut_ref.font_list.get(font_index as usize) {
+                            mut_ref.font_name = name.clone();
+                            mut_ref.save_reading_settings();
+                            mut_ref.need_reload_font = true;
+                        }
                         mut_ref.menu_state = MenuState::Closed;
                         mut_ref.need_render = true;
                     }
                     MenuState::BookmarkList { bm_index, deleting } => {
-                        let bm_count = mut_ref.log_vec.as_ref().map(|lv| if lv.len() > 0 { lv.len() - 1 } else { 0 }).unwrap_or(0) as u32;
+                        let bm_count = mut_ref
+                            .log_vec
+                            .as_ref()
+                            .map(|lv| if lv.len() > 0 { lv.len() - 1 } else { 0 })
+                            .unwrap_or(0) as u32;
                         if bm_index >= bm_count {
+                            // 取消
                             mut_ref.menu_state = MenuState::Popup { menu_index: 0 };
                             mut_ref.bookmark_preview.clear();
                             mut_ref.need_render = true;
@@ -1338,7 +1543,7 @@ impl Page for ReadPage {
                         } else if let Some(ref lv) = mut_ref.log_vec {
                             let bookmarks: Vec<u32, LOG_VEC_MAX> = lv.iter().skip(1).copied().collect();
                             if (bm_index as usize) < bookmarks.len() {
-                                mut_ref.do_change_page(bookmarks[bm_index as usize]).await;
+                                mut_ref.jump_to_offset(bookmarks[bm_index as usize] as u64);
                             }
                             mut_ref.menu_state = MenuState::Closed;
                             mut_ref.need_render = true;
@@ -1351,54 +1556,67 @@ impl Page for ReadPage {
                         } else if mut_ref.exit_selected {
                             mut_ref.back().await;
                         } else {
+                            // 打开选中书：从头/上次位置开始
                             mut_ref.reading = true;
-                            mut_ref.change_page = true;
-                            mut_ref.page_index = 0;
-                            mut_ref.book_pages = None;
+                            mut_ref.ttf_file_len = 0;
+                            mut_ref.ttf_offset = 0;
+                            mut_ref.ttf_end = 0;
                             unsafe {
                                 core::ptr::addr_of_mut!(PAGE_INDEX).write(Some(mut_ref.choose_index));
-                                // 新书从头开始（清除上一本的续读偏移）
-                                #[cfg(feature = "ttf_spike")]
-                                { core::ptr::addr_of_mut!(TTF_RESUME_OFFSET).write(0); }
+                                // 新书从头（清除上一本续读偏移）
+                                core::ptr::addr_of_mut!(TTF_RESUME_OFFSET).write(0);
                             }
                             mut_ref.need_render = true;
                         }
                     }
                 }
             });
-        }).await;
+        })
+        .await;
 
-        // Key1 long hold: scroll down / accelerating jump
+        // Key1 long hold: 向下滚动 / 加速跳转 / 下一项
         event::on_target(EventType::KeyLongIng(1), Self::mut_to_ptr(self), move |info| {
             return Box::pin(async move {
                 let mut_ref: &mut Self = Self::mut_by_ptr(info.ptr).unwrap();
                 match mut_ref.menu_state {
                     MenuState::Popup { ref mut menu_index } => {
-                        if *menu_index < (MENU_ITEMS.len() - 1) as u32 {
-                            *menu_index += 1;
-                        } else {
-                            *menu_index = 0;
-                        }
+                        *menu_index = (*menu_index + 1) % MENU_ITEMS.len() as u32;
                         mut_ref.need_render = true;
                         Timer::after_millis(200).await;
                     }
-                    MenuState::JumpInput { ref mut input_num } => {
-                        let max_page = mut_ref.book_pages.as_ref().map(|b| b.total_page).unwrap_or(9999);
+                    MenuState::JumpInput { ref mut input_pct } => {
                         let step = accel_step(mut_ref.jump_accel);
                         mut_ref.jump_accel += 1;
-                        if *input_num + step <= max_page {
-                            *input_num += step;
-                        } else {
-                            *input_num = max_page;
-                        }
+                        let np = (*input_pct as u32).saturating_add(step).min(100);
+                        *input_pct = np as u8;
                         mut_ref.need_render = true;
                         Timer::after_millis(75).await;
                     }
+                    MenuState::Layout { .. } => {
+                        // 长按：行距 +1（实时）
+                        mut_ref.line_gap = (mut_ref.line_gap + 1).min(10);
+                        mut_ref.need_render = true;
+                        Timer::after_millis(150).await;
+                    }
+                    MenuState::FontList { ref mut font_index } => {
+                        let max = mut_ref.font_list.len() as u32;
+                        if max > 0 {
+                            *font_index = (*font_index + 1) % max;
+                            mut_ref.need_render = true;
+                            Timer::after_millis(150).await;
+                        }
+                    }
                     MenuState::BookmarkList { ref mut bm_index, deleting } => {
-                        let bm_count = mut_ref.log_vec.as_ref().map(|lv| if lv.len() > 0 { lv.len() - 1 } else { 0 }).unwrap_or(0) as u32;
+                        let bm_count = mut_ref
+                            .log_vec
+                            .as_ref()
+                            .map(|lv| if lv.len() > 0 { lv.len() - 1 } else { 0 })
+                            .unwrap_or(0) as u32;
                         if *bm_index < bm_count {
                             *bm_index += 1;
-                            if !deleting { mut_ref.need_load_preview = true; }
+                            if !deleting {
+                                mut_ref.need_load_preview = true;
+                            }
                             mut_ref.need_render = true;
                             Timer::after_millis(200).await;
                         }
@@ -1421,40 +1639,48 @@ impl Page for ReadPage {
                             Timer::after_millis(200).await;
                         }
                     }
-                    _ => {}
                 }
             });
-        }).await;
+        })
+        .await;
 
-        // Key2 long hold: scroll up / accelerating jump
+        // Key2 long hold: 向上滚动 / 加速跳转 / 上一项
         event::on_target(EventType::KeyLongIng(2), Self::mut_to_ptr(self), move |info| {
             return Box::pin(async move {
                 let mut_ref: &mut Self = Self::mut_by_ptr(info.ptr).unwrap();
                 match mut_ref.menu_state {
                     MenuState::Popup { ref mut menu_index } => {
-                        if *menu_index > 0 {
-                            *menu_index -= 1;
-                        } else {
-                            *menu_index = (MENU_ITEMS.len() - 1) as u32;
-                        }
+                        *menu_index = (*menu_index + MENU_ITEMS.len() as u32 - 1) % MENU_ITEMS.len() as u32;
                         mut_ref.need_render = true;
                         Timer::after_millis(200).await;
                     }
-                    MenuState::JumpInput { ref mut input_num } => {
+                    MenuState::JumpInput { ref mut input_pct } => {
                         let step = accel_step(mut_ref.jump_accel);
                         mut_ref.jump_accel += 1;
-                        if *input_num >= step {
-                            *input_num -= step;
-                        } else {
-                            *input_num = 0;
-                        }
+                        let np = (*input_pct as u32).saturating_sub(step);
+                        *input_pct = np as u8;
                         mut_ref.need_render = true;
                         Timer::after_millis(75).await;
+                    }
+                    MenuState::Layout { .. } => {
+                        mut_ref.line_gap = (mut_ref.line_gap - 1).max(0);
+                        mut_ref.need_render = true;
+                        Timer::after_millis(150).await;
+                    }
+                    MenuState::FontList { ref mut font_index } => {
+                        let max = mut_ref.font_list.len() as u32;
+                        if max > 0 {
+                            *font_index = (*font_index + max - 1) % max;
+                            mut_ref.need_render = true;
+                            Timer::after_millis(150).await;
+                        }
                     }
                     MenuState::BookmarkList { ref mut bm_index, deleting } => {
                         if *bm_index > 0 {
                             *bm_index -= 1;
-                            if !deleting { mut_ref.need_load_preview = true; }
+                            if !deleting {
+                                mut_ref.need_load_preview = true;
+                            }
                             mut_ref.need_render = true;
                             Timer::after_millis(200).await;
                         }
@@ -1483,43 +1709,58 @@ impl Page for ReadPage {
                             }
                         }
                     }
-                    _ => {}
                 }
             });
-        }).await;
+        })
+        .await;
 
-        // Key1 short: menu down / jump +1 / next page / next book
+        // Key1 short: 向下 / +1 / 下一页 / 下一本
         event::on_target(EventType::KeyShort(1), Self::mut_to_ptr(self), move |info| {
             return Box::pin(async move {
                 let mut_ref: &mut Self = Self::mut_by_ptr(info.ptr).unwrap();
                 match mut_ref.menu_state {
                     MenuState::Popup { ref mut menu_index } => {
-                        if *menu_index < (MENU_ITEMS.len() - 1) as u32 {
-                            *menu_index += 1;
-                        } else {
-                            *menu_index = 0;
+                        *menu_index = (*menu_index + 1) % MENU_ITEMS.len() as u32;
+                        mut_ref.need_render = true;
+                    }
+                    MenuState::JumpInput { ref mut input_pct } => {
+                        *input_pct = (*input_pct + 1).min(100);
+                        mut_ref.jump_accel = 0;
+                        mut_ref.need_render = true;
+                    }
+                    MenuState::Layout { .. } => {
+                        // 字号 +2（实时：改值 + 清字形缓存 + 重渲染）
+                        let np = (mut_ref.ttf_px + 2.0).min(40.0);
+                        mut_ref.ttf_px = np;
+                        if let Some(ws) = mut_ref.ttf_ws.as_mut() {
+                            crate::ttf_sd::cache_clear(ws);
                         }
                         mut_ref.need_render = true;
                     }
-                    MenuState::JumpInput { ref mut input_num } => {
-                        let max_page = mut_ref.book_pages.as_ref().map(|b| b.total_page).unwrap_or(9999);
-                        if *input_num < max_page {
-                            *input_num += 1;
-                            mut_ref.jump_accel = 0;
+                    MenuState::FontList { ref mut font_index } => {
+                        let max = mut_ref.font_list.len() as u32;
+                        if max > 0 {
+                            *font_index = (*font_index + 1) % max;
                             mut_ref.need_render = true;
                         }
                     }
                     MenuState::BookmarkList { ref mut bm_index, deleting } => {
-                        let bm_count = mut_ref.log_vec.as_ref().map(|lv| if lv.len() > 0 { lv.len() - 1 } else { 0 }).unwrap_or(0) as u32;
+                        let bm_count = mut_ref
+                            .log_vec
+                            .as_ref()
+                            .map(|lv| if lv.len() > 0 { lv.len() - 1 } else { 0 })
+                            .unwrap_or(0) as u32;
                         if *bm_index < bm_count {
                             *bm_index += 1;
-                            if !deleting { mut_ref.need_load_preview = true; }
+                            if !deleting {
+                                mut_ref.need_load_preview = true;
+                            }
                             mut_ref.need_render = true;
                         }
                     }
                     MenuState::Closed => {
                         if mut_ref.reading {
-                            mut_ref.do_change_page(mut_ref.page_index + 1).await;
+                            mut_ref.do_change_page(true).await;
                         } else if mut_ref.exit_selected {
                             mut_ref.exit_selected = false;
                             mut_ref.choose_index = 0;
@@ -1538,40 +1779,50 @@ impl Page for ReadPage {
                     }
                 }
             });
-        }).await;
+        })
+        .await;
 
-        // Key2 short: menu up / jump -1 / prev page / prev book
+        // Key2 short: 向上 / -1 / 上一页 / 上一本
         event::on_target(EventType::KeyShort(2), Self::mut_to_ptr(self), move |info| {
             return Box::pin(async move {
                 let mut_ref: &mut Self = Self::mut_by_ptr(info.ptr).unwrap();
                 match mut_ref.menu_state {
                     MenuState::Popup { ref mut menu_index } => {
-                        if *menu_index > 0 {
-                            *menu_index -= 1;
-                        } else {
-                            *menu_index = (MENU_ITEMS.len() - 1) as u32;
+                        *menu_index = (*menu_index + MENU_ITEMS.len() as u32 - 1) % MENU_ITEMS.len() as u32;
+                        mut_ref.need_render = true;
+                    }
+                    MenuState::JumpInput { ref mut input_pct } => {
+                        *input_pct = input_pct.saturating_sub(1);
+                        mut_ref.jump_accel = 0;
+                        mut_ref.need_render = true;
+                    }
+                    MenuState::Layout { .. } => {
+                        let np = (mut_ref.ttf_px - 2.0).max(12.0);
+                        mut_ref.ttf_px = np;
+                        if let Some(ws) = mut_ref.ttf_ws.as_mut() {
+                            crate::ttf_sd::cache_clear(ws);
                         }
                         mut_ref.need_render = true;
                     }
-                    MenuState::JumpInput { ref mut input_num } => {
-                        if *input_num > 0 {
-                            *input_num -= 1;
-                            mut_ref.jump_accel = 0;
+                    MenuState::FontList { ref mut font_index } => {
+                        let max = mut_ref.font_list.len() as u32;
+                        if max > 0 {
+                            *font_index = (*font_index + max - 1) % max;
                             mut_ref.need_render = true;
                         }
                     }
                     MenuState::BookmarkList { ref mut bm_index, deleting } => {
                         if *bm_index > 0 {
                             *bm_index -= 1;
-                            if !deleting { mut_ref.need_load_preview = true; }
+                            if !deleting {
+                                mut_ref.need_load_preview = true;
+                            }
                             mut_ref.need_render = true;
                         }
                     }
                     MenuState::Closed => {
                         if mut_ref.reading {
-                            if mut_ref.page_index > 0 {
-                                mut_ref.do_change_page(mut_ref.page_index - 1).await;
-                            }
+                            mut_ref.do_change_page(false).await;
                         } else if mut_ref.exit_selected {
                             let max = mut_ref.menus.as_ref().map(|m| m.len()).unwrap_or(0);
                             if max > 0 {
@@ -1590,6 +1841,7 @@ impl Page for ReadPage {
                     }
                 }
             });
-        }).await;
+        })
+        .await;
     }
 }
