@@ -1382,7 +1382,26 @@ impl Page for ReadPage {
                                                         }
                                                     }
                                                     f.close();
-                                                    if let Ok(s) = core::str::from_utf8(&buf[..got]) {
+                                                    // 截到 UTF-8 字符边界：512 字节中文几乎必然在
+                                                    // 多字节字符中间截断（512%3=2），from_utf8 全有或全无，
+                                                    // 不截就会整段失败 → 预览空白。
+                                                    let mut start = 0usize;
+                                                    while start < got && (buf[start] & 0xC0) == 0x80 {
+                                                        start += 1; // 跳过开头可能的续字节碎片
+                                                    }
+                                                    let mut end = got;
+                                                    while end > start {
+                                                        let b = buf[end - 1];
+                                                        if (b & 0xC0) == 0x80 {
+                                                            end -= 1; // 末尾续字节
+                                                            continue;
+                                                        }
+                                                        if (b & 0x80) != 0 {
+                                                            end -= 1; // 不完整的起始字节
+                                                        }
+                                                        break;
+                                                    }
+                                                    if let Ok(s) = core::str::from_utf8(&buf[start..end]) {
                                                         let _ = self.bookmark_preview.push_str(s);
                                                     }
                                                 }
