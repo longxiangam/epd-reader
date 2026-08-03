@@ -90,10 +90,14 @@ pub struct ReadPage {
     ttf_offset: u32,
     ttf_end: u32,
     ttf_file_len: u32,
-    /// 全书页索引：每页的起始字节偏移（进书时一次性建好）。
-    ttf_page_starts: Vec<u32, 1000>,
-    /// 当前在 ttf_page_starts 中的索引。
-    ttf_page_idx: u32,
+    /// 后退历史栈：访问过的页起始偏移（栈顶=最近一页）。前进时压栈，后退时弹栈，O(1)。
+    /// 栈空时（刚进入/跳转后第一次后退）退化为局部逆推 find_prev_start（只回扫几页）。
+    /// 不预建全书索引——动态分页前进天生 O(1)，后退靠历史栈，进书零延迟。
+    ttf_hist: Vec<u32, 256>,
+    /// 当前页已是最后一页（渲染时由 offset+consumed>=file_len 判定）。
+    ttf_at_end: bool,
+    /// 在最后一页仍按前进时显示一次"已是最后一页"提示（渲染后清）。
+    ttf_last_hint: bool,
     ttf_px: f32,
     /// 行间距（像素，叠加在 fi.line_height 之上）。
     line_gap: i32,
@@ -132,18 +136,11 @@ impl ReadPage {
     /// 跳到指定字节偏移（跳转进度/书签）。清历史、保存续读偏移、触发渲染。
     fn jump_to_offset(&mut self, off: u64) {
         let off = off.min(self.ttf_file_len as u64) as u32;
+        // 大跳转后历史失效，清空；后退退化为局部逆推。
+        self.ttf_hist.clear();
         self.ttf_offset = off;
         self.ttf_end = off;
-        // 在页索引中找最近的页
-        if !self.ttf_page_starts.is_empty() {
-            let mut idx = 0u32;
-            for i in 0..self.ttf_page_starts.len() {
-                if self.ttf_page_starts[i] <= off { idx = i as u32; } else { break; }
-            }
-            self.ttf_page_idx = idx;
-            self.ttf_offset = self.ttf_page_starts[idx as usize];
-            self.ttf_end = self.ttf_offset;
-        }
+        self.ttf_at_end = false;
         unsafe {
             *core::ptr::addr_of_mut!(TTF_RESUME_OFFSET) = off;
         }
@@ -189,8 +186,7 @@ impl ReadPage {
             self.ttf_offset = 0;
             self.ttf_end = 0;
         }
-        self.ttf_page_starts.clear();
-        self.ttf_page_idx = 0;
+        self.ttf_hist.clear();
     }
 
     /// 读 .log 进 log_vec。ttf_resume：跳过 .log[0] 还原（rtc_fast 权威），清 ttf_resume。
@@ -265,24 +261,94 @@ impl ReadPage {
         }
     }
 
-    /// TTF 翻页：用页索引直接索引加减，O(1)。
+    /// TTF 翻页。前进 O(1)（offset←end）；后退 O(1)（历史栈弹栈），
+    /// 栈空时（刚进入/跳转后第一次后退）局部逆推上一页起始，只回扫几页，绝不扫全书。
     async fn do_change_page(&mut self, next: bool) {
-        let total = self.ttf_page_starts.len() as u32;
-        if total == 0 { return; }
         if next {
-            if self.ttf_page_idx + 1 < total {
-                self.ttf_page_idx += 1;
+            // 前进：已在最后一页则提示一次，不前进
+            if self.ttf_at_end {
+                self.ttf_last_hint = true;
+                self.need_render = true;
+                return;
             }
-        } else if self.ttf_page_idx > 0 {
-            self.ttf_page_idx -= 1;
+            let _ = self.ttf_hist.push(self.ttf_offset);
+            self.ttf_offset = self.ttf_end;
+        } else {
+            // 后退：历史栈优先（精确，与前进对称）
+            if let Some(prev) = self.ttf_hist.pop() {
+                if prev >= self.ttf_offset {
+                    return; // 已到开头，翻不动
+                }
+                self.ttf_offset = prev;
+            } else {
+                // 栈空：局部逆推上一页起始（近似，回扫几页）
+                let prev = self.find_prev_page_start();
+                if prev >= self.ttf_offset {
+                    return; // 已在开头
+                }
+                self.ttf_offset = prev;
+            }
+            self.ttf_at_end = false;
         }
-        self.ttf_offset = self.ttf_page_starts[self.ttf_page_idx as usize];
         self.ttf_end = self.ttf_offset;
         unsafe {
             *core::ptr::addr_of_mut!(TTF_RESUME_OFFSET) = self.ttf_offset;
         }
         self.need_save_position = true;
         self.need_render = true;
+    }
+
+    /// 局部逆推当前页的上一页起始偏移（历史栈空时用）：从 cur 往前回退一段，
+    /// 逐页 compute_page_consumed 扫到 cur，取最后那个 < cur 的页起始。只扫几页，不扫全书。
+    fn find_prev_page_start(&mut self) -> u32 {
+        let cur = self.ttf_offset;
+        if cur == 0 || self.ttf_file_len == 0 || self.font_file_ptr.is_null() {
+            return 0;
+        }
+        let book_name = match self
+            .menus
+            .as_ref()
+            .and_then(|m| m.get(self.choose_index as usize))
+            .cloned()
+        {
+            Some(n) => n,
+            None => return 0,
+        };
+        let bd_ptr = self.books_dir_ptr;
+        let font_ptr = self.font_file_ptr;
+        let ttf_px = self.ttf_px;
+        let line_gap = self.line_gap;
+        let file_len = self.ttf_file_len;
+        let Some(ws) = self.ttf_ws.as_mut() else { return 0; };
+        if bd_ptr.is_null() {
+            return 0;
+        }
+        let bd: &mut ActualDirectory<'_> = unsafe { &mut *bd_ptr };
+        let file_name = format!("{}.txt", book_name);
+        let Some(sn) = SdMount::find_entry_by_name(bd, &file_name).map(|e| e.name) else {
+            return 0;
+        };
+        let Ok(mut bf) = bd.open_file_in_dir(sn, embedded_sdmmc::Mode::ReadOnly) else {
+            return 0;
+        };
+        let ff: &mut ActualFile = unsafe { &mut *font_ptr };
+        let prev = match crate::ttf_sd::open_font(ff, ws) {
+            Some(fi) => {
+                let text_area_h =
+                    super::visual_height() as i32 - super::PROGRESS_AREA_HEIGHT as i32 - 2;
+                let base_h = (fi.line_height(ttf_px) + line_gap).max(1);
+                let max_lines = ((text_area_h / base_h) as u32).max(1);
+                let line_h = text_area_h / max_lines as i32;
+                let mw = super::text_width() as i32;
+                let p = crate::ttf_sd::find_prev_start(
+                    &mut bf, ff, &fi, ws, cur, file_len, ttf_px, mw, line_h, max_lines,
+                );
+                Some(p)
+            }
+            None => None,
+        };
+        bf.close();
+        prev.unwrap_or(0)
     }
 
     /// 预加载下一页字形：渲染完当前页后提前光栅化进缓存（不画），下次翻页直接 blit。
@@ -866,8 +932,9 @@ impl Page for ReadPage {
             ttf_offset: 0,
             ttf_end: 0,
             ttf_file_len: 0,
-            ttf_page_starts: Vec::new(),
-            ttf_page_idx: 0,
+            ttf_hist: Vec::new(),
+            ttf_at_end: false,
+            ttf_last_hint: false,
             ttf_px,
             line_gap,
             ttf_ws: None,
@@ -963,9 +1030,81 @@ impl Page for ReadPage {
                     let font: FontRenderer = FontRenderer::new::<fonts::u8g2_font_wqy15_t_gb2312>();
                     let font = font.with_ignore_unknown_chars(true);
 
-                    let is_last = self.ttf_page_starts.len() > 0
-                        && (self.ttf_page_idx as usize + 1) >= self.ttf_page_starts.len();
-                    if is_last {
+                    let ttf_offset = self.ttf_offset;
+                    let ttf_file_len = self.ttf_file_len;
+                    let ttf_px = self.ttf_px;
+                    let line_gap = self.line_gap;
+                    let bd_ptr = self.books_dir_ptr;
+                    let font_ptr = self.font_file_ptr;
+                    let book_name = self
+                        .menus
+                        .as_ref()
+                        .and_then(|m| m.get(self.choose_index as usize))
+                        .cloned();
+
+                    // 渲染结果：Some(消费字节数) 成功；None 失败。
+                    let mut result: Option<u32> = None;
+                    if let (Some(ws), Some(book_name)) = (self.ttf_ws.as_mut(), book_name) {
+                        if !bd_ptr.is_null() {
+                            let bd: &mut ActualDirectory<'_> = unsafe { &mut *bd_ptr };
+                            let file_name = format!("{}.txt", book_name);
+                            let short_name =
+                                SdMount::find_entry_by_name(bd, &file_name).map(|e| e.name);
+                            let mut n = 0usize;
+                            if let Some(sn) = short_name {
+                                if let Ok(mut bf) =
+                                    bd.open_file_in_dir(sn, embedded_sdmmc::Mode::ReadOnly)
+                                {
+                                    n = crate::ttf_sd::read_book_chunk(&mut bf, ttf_offset, ws);
+                                    bf.close();
+                                }
+                            }
+                            if n > 0 && !font_ptr.is_null() {
+                                let ff: &mut ActualFile = unsafe { &mut *font_ptr };
+                                if let Some(fi) = crate::ttf_sd::open_font(ff, ws) {
+                                    let text_area_h = vh as i32
+                                        - super::PROGRESS_AREA_HEIGHT as i32 - 2;
+                                    let base_h = (fi.line_height(ttf_px) + line_gap).max(1);
+                                    let max_lines = ((text_area_h / base_h) as u32).max(1);
+                                    let line_h = text_area_h / max_lines as i32;
+                                    let consumed = crate::ttf_sd::paginate_render(
+                                        ff, &fi, ws, display, n, ttf_px,
+                                        Point::new(super::text_left_margin(), 2),
+                                        super::text_width() as i32, line_h, max_lines,
+                                    );
+                                    result = Some(consumed as u32);
+                                }
+                            }
+                        }
+                    }
+
+                    match result {
+                        Some(consumed) => {
+                            self.ttf_end = ttf_offset + consumed;
+                            // 当前页已是最后一页：下一页起点 >= 文件末尾
+                            self.ttf_at_end = ttf_file_len > 0
+                                && ttf_offset + consumed >= ttf_file_len;
+                        }
+                        None => {
+                            let msg = if self.ttf_ws.is_none() {
+                                "TTF 内存不足"
+                            } else {
+                                "TTF 渲染失败"
+                            };
+                            let _ = font.render_aligned(
+                                msg,
+                                center,
+                                VerticalPosition::Center,
+                                HorizontalAlignment::Center,
+                                FontColor::Transparent(Black),
+                                display,
+                            );
+                        }
+                    }
+
+                    // 在最后一页仍按了前进：在当前页上叠一行提示（页内容保留），提示后清标志
+                    if self.ttf_last_hint {
+                        self.ttf_last_hint = false;
                         let _ = font.render_aligned(
                             "已是最后一页",
                             center,
@@ -974,74 +1113,6 @@ impl Page for ReadPage {
                             FontColor::Transparent(Black),
                             display,
                         );
-                    } else {
-                        let ttf_offset = self.ttf_offset;
-                        let ttf_px = self.ttf_px;
-                        let line_gap = self.line_gap;
-                        let bd_ptr = self.books_dir_ptr;
-                        let font_ptr = self.font_file_ptr;
-                        let book_name = self
-                            .menus
-                            .as_ref()
-                            .and_then(|m| m.get(self.choose_index as usize))
-                            .cloned();
-
-                        // 渲染结果：Some(消费字节数) 成功；None 失败。
-                        let mut result: Option<u32> = None;
-                        if let (Some(ws), Some(book_name)) = (self.ttf_ws.as_mut(), book_name) {
-                            if !bd_ptr.is_null() {
-                                let bd: &mut ActualDirectory<'_> = unsafe { &mut *bd_ptr };
-                                let file_name = format!("{}.txt", book_name);
-                                let short_name =
-                                    SdMount::find_entry_by_name(bd, &file_name).map(|e| e.name);
-                                let mut n = 0usize;
-                                if let Some(sn) = short_name {
-                                    if let Ok(mut bf) =
-                                        bd.open_file_in_dir(sn, embedded_sdmmc::Mode::ReadOnly)
-                                    {
-                                        n = crate::ttf_sd::read_book_chunk(&mut bf, ttf_offset, ws);
-                                        bf.close();
-                                    }
-                                }
-                                if n > 0 && !font_ptr.is_null() {
-                                    let ff: &mut ActualFile = unsafe { &mut *font_ptr };
-                                    if let Some(fi) = crate::ttf_sd::open_font(ff, ws) {
-                                        let text_area_h = vh as i32
-                                            - super::PROGRESS_AREA_HEIGHT as i32 - 2;
-                                        let base_h = (fi.line_height(ttf_px) + line_gap).max(1);
-                                        let max_lines = ((text_area_h / base_h) as u32).max(1);
-                                        let line_h = text_area_h / max_lines as i32;
-                                        let consumed = crate::ttf_sd::paginate_render(
-                                            ff, &fi, ws, display, n, ttf_px,
-                                            Point::new(super::text_left_margin(), 2),
-                                            super::text_width() as i32, line_h, max_lines,
-                                        );
-                                        result = Some(consumed as u32);
-                                    }
-                                }
-                            }
-                        }
-
-                        match result {
-                            Some(consumed) => {
-                                self.ttf_end = ttf_offset + consumed;
-                            }
-                            None => {
-                                let msg = if self.ttf_ws.is_none() {
-                                    "TTF 内存不足"
-                                } else {
-                                    "TTF 渲染失败"
-                                };
-                                let _ = font.render_aligned(
-                                    msg,
-                                    center,
-                                    VerticalPosition::Center,
-                                    HorizontalAlignment::Center,
-                                    FontColor::Transparent(Black),
-                                    display,
-                                );
-                            }
-                        }
                     }
                     self.render_progress(display);
                 }
@@ -1154,68 +1225,6 @@ impl Page for ReadPage {
                                     None => core::ptr::null_mut(),
                                 };
 
-                                // 一次性建立全书页索引（所有页的起始字节偏移）
-                                if self.ttf_page_starts.is_empty()
-                                    && self.ttf_file_len > 0
-                                    && !self.font_file_ptr.is_null()
-                                {
-                                    let ff2: &mut ActualFile =
-                                        unsafe { &mut *self.font_file_ptr };
-                                    if let Some(ws) = self.ttf_ws.as_mut() {
-                                        if let Some(fi) =
-                                            crate::ttf_sd::open_font(ff2, ws)
-                                        {
-                                            let line_h =
-                                                fi.line_height(self.ttf_px) + self.line_gap;
-                                            let tah = super::visual_height() as i32
-                                                - super::PROGRESS_AREA_HEIGHT as i32
-                                                - 2;
-                                            let ml = ((tah / line_h).max(1)) as u32;
-                                            let alh = tah / ml as i32;
-                                            let mw = super::text_width() as i32;
-                                            let bn = self.menus.as_ref().and_then(|m| {
-                                                m.get(self.choose_index as usize)
-                                            }).cloned();
-                                            if let Some(bn) = bn {
-                                                let bd3: &mut ActualDirectory<'_> =
-                                                    unsafe { &mut *self.books_dir_ptr };
-                                                let fn3 = format!("{}.txt", bn);
-                                                let sn3 = SdMount::find_entry_by_name(bd3, &fn3)
-                                                    .map(|e| e.name);
-                                                if let Some(sn3) = sn3 {
-                                                    if let Ok(mut bf3) = bd3.open_file_in_dir(
-                                                        sn3,
-                                                        embedded_sdmmc::Mode::ReadOnly,
-                                                    ) {
-                                                        let _ = self.ttf_page_starts.push(0);
-                                                        let mut off = 0u32;
-                                                        loop {
-                                                            let c = crate::ttf_sd::compute_page_consumed(
-                                                                &mut bf3, ff2, &fi, ws, off,
-                                                                self.ttf_px, mw, alh, ml,
-                                                            );
-                                                            if c == 0 { break; }
-                                                            off += c;
-                                                            if off >= self.ttf_file_len { break; }
-                                                            if self.ttf_page_starts.push(off).is_err() { break; }
-                                                        }
-                                                        bf3.close();
-                                                        // 根据续读偏移定位当前页索引
-                                                        for i in 0..self.ttf_page_starts.len() {
-                                                            if self.ttf_page_starts[i] <= self.ttf_offset {
-                                                                self.ttf_page_idx = i as u32;
-                                                            } else { break; }
-                                                        }
-                                                        println!("[read] 页索引: {} 页, 当前第 {} 页",
-                                                            self.ttf_page_starts.len(),
-                                                            self.ttf_page_idx + 1);
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-
                                 loop {
                                     if !self.running {
                                         break;
@@ -1296,6 +1305,9 @@ impl Page for ReadPage {
                                                 crate::ttf_sd::cache_clear(ws);
                                                 ws.fi = None; // 强制重新解析新字体的表目录/度量
                                             }
+                                            // 不同字体的 advance/行高不同 → 页边界会变，历史栈作废
+                                            self.ttf_hist.clear();
+                                            self.ttf_at_end = false;
                                             self.ttf_end = self.ttf_offset.min(self.ttf_file_len);
                                         } else {
                                             println!("[read ttf] 重开字体失败: {}", fname);

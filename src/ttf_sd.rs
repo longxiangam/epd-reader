@@ -735,8 +735,8 @@ pub fn paginate_render<D: DrawTarget<Color = BinaryColor>>(
     i
 }
 
-/// 干跑分页（不渲染不缓存）：从 offset 读一页字节，计算一页消费多少字节。
-/// 用于向前回退翻页时从 offset 0 重新扫描找到前一页边界。
+/// 干跑分页（不渲染不缓存）：从 offset 读一页字节，计算这一页消费多少字节。
+/// find_prev_start 用它逐页回扫定位上一页边界；普通翻页前进不调用它（直接用渲染返回的 consumed）。
 pub fn compute_page_consumed(
     book_f: &mut ActualFile, font_f: &mut ActualFile, fi: &FontInfo, ws: &mut TtfWs,
     offset: u32, px: f32, max_w: i32, line_h: i32, max_lines: u32,
@@ -772,6 +772,48 @@ pub fn compute_page_consumed(
         i += clen;
     }
     i as u32
+}
+
+/// 局部逆推：返回 cur_start 上一页的起始偏移（历史栈空、需后退时用）。
+/// 从 cur_start 往前回退一段，逐页 compute_page_consumed 扫到 cur_start，
+/// 取最后一个 < cur_start 的页起始；回退不足则翻倍扩大，直至 0。只扫几页，绝不扫全书。
+///
+/// 注：回退起点 est 是任意偏移（非从 0 起的真页边界），故结果可能与真边界差 <1 页；
+/// UTF-8 自同步使首字碎片仅 1 字节，整体误差可接受（仅"栈空后退"这一罕见路径）。
+/// 正常阅读后退走历史栈弹栈，精确；只有刚进入/跳转后第一次后退会走到这里。
+pub fn find_prev_start(
+    book_f: &mut ActualFile, font_f: &mut ActualFile, fi: &FontInfo, ws: &mut TtfWs,
+    cur_start: u32, _file_len: u32, px: f32, max_w: i32, line_h: i32, max_lines: u32,
+) -> u32 {
+    if cur_start == 0 || max_lines == 0 {
+        return 0;
+    }
+    let mut step: u32 = 3072; // 起步回退 ~1.5 页（一页约 2KB），不足再翻倍
+    loop {
+        let est = cur_start.saturating_sub(step);
+        let mut off = est;
+        let mut last = est;
+        let mut reached = false;
+        while off < cur_start {
+            let c = compute_page_consumed(book_f, font_f, fi, ws, off, px, max_w, line_h, max_lines);
+            if c == 0 {
+                break;
+            }
+            last = off;
+            off = off.saturating_add(c);
+            if off >= cur_start {
+                reached = true;
+                break;
+            }
+        }
+        if reached && last < cur_start {
+            return last;
+        }
+        if est == 0 {
+            return 0; // 已到文件头仍定位不到，回第一页
+        }
+        step = step.saturating_mul(2);
+    }
 }
 
 /// 预加载：扫描 ws.book_buf[..book_len] 的字形，**只缓存不画**（加速下一次翻页）。
