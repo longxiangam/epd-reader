@@ -14,7 +14,9 @@ use esp_println::println;
 use heapless::{String, Vec};
 use u8g2_fonts::FontRenderer;
 use u8g2_fonts::fonts;
+use u8g2_fonts::U8g2TextStyle;
 use u8g2_fonts::types::{FontColor, HorizontalAlignment, VerticalPosition};
+use embedded_text::TextBox;
 use crate::display::{display_mut, RENDER_CHANNEL, RenderInfo};
 use crate::{display, epd2in9_txt, event};
 use crate::epd2in9_txt::TxtReader;
@@ -837,15 +839,10 @@ impl ReadPage {
                         Size::new(vw - 8, (preview_h - 8) as u32),
                     );
                     let mut clipped_display = display.clipped(&clip);
-                    font.render_aligned(
-                        self.bookmark_preview.as_str(),
-                        Point::new(preview_x + 6, preview_y + 14),
-                        VerticalPosition::Top,
-                        HorizontalAlignment::Left,
-                        FontColor::Transparent(Black),
-                        &mut clipped_display,
-                    )
-                    .ok();
+                    // TextBox 按裁剪区宽度自动换行（render_aligned 不换行，只能看到一行）
+                    let style = U8g2TextStyle::new(fonts::u8g2_font_wqy15_t_gb2312, Black);
+                    let _ = TextBox::new(self.bookmark_preview.as_str(), clip, style)
+                        .draw(&mut clipped_display);
                 }
             }
             MenuState::Closed => {}
