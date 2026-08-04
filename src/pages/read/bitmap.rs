@@ -160,9 +160,62 @@ pub fn compute_consumed_bitmap(
     i
 }
 
-/// 局部逆推：返回 cur_start 上一页的起始偏移（历史栈空、需后退时用）。
-/// 从 cur_start 往前回退一段，读 chunk 进 buf，逐页 compute_consumed_bitmap 扫到 cur_start，
-/// 取最后那个 < cur_start 的页起始。只扫几页，绝不扫全书。
+/// 读 off 处一页字节，返回从 off 起一页消费多少字节。
+fn consumed_at_bitmap(
+    book_f: &mut ActualFile, buf: &mut [u8], off: u32,
+    max_w: i32, full_w: i32, half_w: i32, max_lines: u32,
+) -> u32 {
+    let _ = book_f.seek_from_start(off);
+    let mut got = 0usize;
+    while got < buf.len() {
+        match book_f.read(&mut buf[got..]) {
+            Ok(0) | Err(_) => break,
+            Ok(k) => got += k,
+        }
+    }
+    compute_consumed_bitmap(buf, got, max_w, full_w, half_w, max_lines) as u32
+}
+
+/// 把 off 对齐到 ≤ off 的最近 UTF-8 字符起始（读最多 4 字节回退到非续字节）。
+/// 半字符起点会把续字节当满宽 FFFD 扭曲页大小，测试前必须对齐到字符起点。
+fn align_down_char(book_f: &mut ActualFile, off: u32) -> u32 {
+    if off == 0 {
+        return 0;
+    }
+    let back = if off > 3 { 3 } else { off };
+    let start = off - back;
+    let want = (back + 1) as usize;
+    let mut tmp = [0u8; 4];
+    let _ = book_f.seek_from_start(start);
+    let mut got = 0usize;
+    while got < want {
+        match book_f.read(&mut tmp[got..want]) {
+            Ok(0) | Err(_) => break,
+            Ok(k) => got += k,
+        }
+    }
+    let mut pos = off;
+    loop {
+        let idx = (pos - start) as usize;
+        if idx >= got {
+            return start;
+        }
+        if (tmp[idx] & 0xC0) != 0x80 {
+            return pos; // 非续字节 = 字符起始
+        }
+        if pos == 0 {
+            return 0;
+        }
+        pos -= 1;
+    }
+}
+
+/// 返回 cur_start 上一页的准确起始偏移（历史栈空、需后退时用）。二分+字符对齐+≤，快且稳。
+///
+/// 真页边界 pk-1 满足 pk-1 + 一页消费 ≤ cur_start 且最接近（该页在 cur_start 处或之前结束）。
+/// 二分（仅在字符对齐点测）缩小范围，再从 hi 向下找首个字符对齐的 P-true = pk-1。
+/// **用 ≤ 非 ==**：== 在 consumed 偶有 ±1 字节误差（缓冲边界等）时命中不到 → 返回 0 → 跳第一页；
+/// ≤ 必有解（lo 兜底），永不跳页。字符对齐保证首字不截断。只扫 ~几十页，正常后退走历史栈不经过这里。
 pub fn find_prev_start_bitmap(
     book_f: &mut ActualFile,
     buf: &mut [u8],
@@ -176,41 +229,34 @@ pub fn find_prev_start_bitmap(
     if cur_start == 0 || max_lines == 0 {
         return 0;
     }
-    let mut step: u32 = 3072;
-    loop {
-        let est = cur_start.saturating_sub(step);
-        let mut off = est;
-        let mut last = est;
-        let mut reached = false;
-        while off < cur_start {
-            let _ = book_f.seek_from_start(off);
-            let mut got = 0usize;
-            while got < buf.len() {
-                match book_f.read(&mut buf[got..]) {
-                    Ok(0) | Err(_) => break,
-                    Ok(k) => got += k,
-                }
-            }
-            if got == 0 {
-                break;
-            }
-            let c = compute_consumed_bitmap(buf, got, max_w, full_w, half_w, max_lines) as u32;
-            if c == 0 {
-                break;
-            }
-            last = off;
-            off = off.saturating_add(c);
-            if off >= cur_start {
-                reached = true;
-                break;
-            }
+    // 二分（字符对齐 mid）：最大 X 使 X+consumed(X) ≤ cur_start。lo 始终保持 P-true。
+    let mut lo: u32 = 0;
+    let mut hi: u32 = cur_start;
+    while lo + 16 < hi {
+        let mid = align_down_char(book_f, (lo + hi) / 2);
+        if mid <= lo {
+            break;
         }
-        if reached && last < cur_start {
-            return last;
+        let c = consumed_at_bitmap(book_f, buf, mid, max_w, full_w, half_w, max_lines);
+        if c > 0 && mid + c <= cur_start {
+            lo = mid;
+        } else {
+            hi = mid;
         }
-        if est == 0 {
-            return 0;
-        }
-        step = step.saturating_mul(2);
     }
+    // 精化（字符对齐、≤）：从 hi 向下找首个 P-true = 最大字符对齐 P-true = pk-1
+    let mut x = align_down_char(book_f, hi);
+    let mut steps = 0u32;
+    while steps < 32 {
+        let c = consumed_at_bitmap(book_f, buf, x, max_w, full_w, half_w, max_lines);
+        if c > 0 && x + c <= cur_start {
+            return x;
+        }
+        if x == 0 {
+            break;
+        }
+        x = align_down_char(book_f, x - 1);
+        steps += 1;
+    }
+    lo // 兜底：lo 是字符对齐 P-true（二分保证），绝不返回 0-失败
 }

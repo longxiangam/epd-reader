@@ -774,13 +774,44 @@ pub fn compute_page_consumed(
     i as u32
 }
 
-/// 局部逆推：返回 cur_start 上一页的起始偏移（历史栈空、需后退时用）。
-/// 从 cur_start 往前回退一段，逐页 compute_page_consumed 扫到 cur_start，
-/// 取最后一个 < cur_start 的页起始；回退不足则翻倍扩大，直至 0。只扫几页，绝不扫全书。
+/// 把 off 对齐到 ≤ off 的最近 UTF-8 字符起始（读最多 4 字节回退到非续字节）。
+fn align_down_char(book_f: &mut ActualFile, off: u32) -> u32 {
+    if off == 0 {
+        return 0;
+    }
+    let back = if off > 3 { 3 } else { off };
+    let start = off - back;
+    let want = (back + 1) as usize;
+    let mut tmp = [0u8; 4];
+    let _ = book_f.seek_from_start(start);
+    let mut got = 0usize;
+    while got < want {
+        match book_f.read(&mut tmp[got..want]) {
+            Ok(0) | Err(_) => break,
+            Ok(k) => got += k,
+        }
+    }
+    let mut pos = off;
+    loop {
+        let idx = (pos - start) as usize;
+        if idx >= got {
+            return start;
+        }
+        if (tmp[idx] & 0xC0) != 0x80 {
+            return pos;
+        }
+        if pos == 0 {
+            return 0;
+        }
+        pos -= 1;
+    }
+}
+
+/// 返回 cur_start 上一页的准确起始偏移（历史栈空、需后退时用）。二分+字符对齐+≤，快且稳。
 ///
-/// 注：回退起点 est 是任意偏移（非从 0 起的真页边界），故结果可能与真边界差 <1 页；
-/// UTF-8 自同步使首字碎片仅 1 字节，整体误差可接受（仅"栈空后退"这一罕见路径）。
-/// 正常阅读后退走历史栈弹栈，精确；只有刚进入/跳转后第一次后退会走到这里。
+/// 真页边界 pk-1 满足 pk-1 + 一页消费 ≤ cur_start 且最接近。二分（字符对齐点）缩小范围，
+/// 再从 hi 向下找首个字符对齐 P-true = pk-1。**用 ≤ 非 ==**：== 在 consumed 偶有 ±1 字节
+/// 误差时命中不到 → 返回 0 → 跳第一页；≤ 必有解（lo 兜底），永不跳页。字符对齐保证不截断。
 pub fn find_prev_start(
     book_f: &mut ActualFile, font_f: &mut ActualFile, fi: &FontInfo, ws: &mut TtfWs,
     cur_start: u32, _file_len: u32, px: f32, max_w: i32, line_h: i32, max_lines: u32,
@@ -788,32 +819,34 @@ pub fn find_prev_start(
     if cur_start == 0 || max_lines == 0 {
         return 0;
     }
-    let mut step: u32 = 3072; // 起步回退 ~1.5 页（一页约 2KB），不足再翻倍
-    loop {
-        let est = cur_start.saturating_sub(step);
-        let mut off = est;
-        let mut last = est;
-        let mut reached = false;
-        while off < cur_start {
-            let c = compute_page_consumed(book_f, font_f, fi, ws, off, px, max_w, line_h, max_lines);
-            if c == 0 {
-                break;
-            }
-            last = off;
-            off = off.saturating_add(c);
-            if off >= cur_start {
-                reached = true;
-                break;
-            }
+    let mut lo: u32 = 0;
+    let mut hi: u32 = cur_start;
+    while lo + 16 < hi {
+        let mid = align_down_char(book_f, (lo + hi) / 2);
+        if mid <= lo {
+            break;
         }
-        if reached && last < cur_start {
-            return last;
+        let c = compute_page_consumed(book_f, font_f, fi, ws, mid, px, max_w, line_h, max_lines);
+        if c > 0 && mid + c <= cur_start {
+            lo = mid;
+        } else {
+            hi = mid;
         }
-        if est == 0 {
-            return 0; // 已到文件头仍定位不到，回第一页
-        }
-        step = step.saturating_mul(2);
     }
+    let mut x = align_down_char(book_f, hi);
+    let mut steps = 0u32;
+    while steps < 32 {
+        let c = compute_page_consumed(book_f, font_f, fi, ws, x, px, max_w, line_h, max_lines);
+        if c > 0 && x + c <= cur_start {
+            return x;
+        }
+        if x == 0 {
+            break;
+        }
+        x = align_down_char(book_f, x - 1);
+        steps += 1;
+    }
+    lo
 }
 
 /// 预加载：扫描 ws.book_buf[..book_len] 的字形，**只缓存不画**（加速下一次翻页）。

@@ -267,6 +267,12 @@ impl ReadPage {
                 self.ttf_end = self.ttf_offset;
             }
         }
+        // 同步续读偏移到 rtc_fast：打开书时 TTF_RESUME_OFFSET 被清 0、由 .log[0] 还原了
+        // ttf_offset，此处补回，保证"睡眠唤醒"(用 TTF_RESUME_OFFSET) 与当前页一致，
+        // 否则未翻页直接睡眠会回到第一页。
+        unsafe {
+            *core::ptr::addr_of_mut!(TTF_RESUME_OFFSET) = self.ttf_offset;
+        }
     }
 
     /// 书单每本书的阅读进度（字节偏移 ÷ .txt 长度 → "X%"）。
