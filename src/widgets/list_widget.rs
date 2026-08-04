@@ -200,7 +200,7 @@ impl <C> Drawable for  ListItemWidget<C>  where C:PixelColor{
         }
 
        /* let mut style =
-            U8g2TextStyle::new(fonts::u8g2_font_wqy12_t_gb2312b, self.front_color);
+            U8g2TextStyle::new(fonts::u8g2_font_wqy12_t_gb2312, self.front_color);
         Text::new(self.label, self.position, style )
             .draw(target);*/
 

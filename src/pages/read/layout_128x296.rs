@@ -13,7 +13,8 @@ pub const DISPLAY_WIDTH: u32 = 296;
 pub const DISPLAY_HEIGHT: u32 = 128;
 
 pub const FONT_SIZE: u32 = 16;
-pub const PROGRESS_AREA_HEIGHT: u32 = 20;
+// 底部进度条预留：条高3+边距，约8px（旧值20浪费近一行高度）
+pub const PROGRESS_AREA_HEIGHT: u32 = 8;
 
 /// 默认朝向旋转号：128x296 默认 Rotate90(竖屏)。
 const DEFAULT_ROT_NUM: u8 = 1;
@@ -46,7 +47,7 @@ pub fn sleep_renderer(display: &mut EpdDisplay) {
     display.clear_buffer(Color::White);
     let drawn = crate::flash_sleep::draw_sleep_image(display);
     if !drawn {
-        let font: FontRenderer = FontRenderer::new::<fonts::u8g2_font_wqy15_t_gb2312>();
+        let font: FontRenderer = FontRenderer::new::<fonts::u8g2_font_wqy14_t_gb2312>();
         let font = font.with_ignore_unknown_chars(true);
         let center = Point::new(
             display.bounding_box().size.width as i32 / 2,

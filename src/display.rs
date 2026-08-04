@@ -284,7 +284,7 @@ pub fn display_mut()->Option<&'static mut EpdDisplay>{
 pub async fn show_error(error:&str, need_clear:bool) {
     embassy_time::Timer::after_secs(1).await;
     if let Some(display) = display_mut() {
-        let font: FontRenderer = FontRenderer::new::<fonts::u8g2_font_wqy15_t_gb2312>();
+        let font: FontRenderer = FontRenderer::new::<fonts::u8g2_font_wqy14_t_gb2312>();
         let font = font.with_ignore_unknown_chars(true);
 
         if need_clear {
@@ -317,7 +317,7 @@ pub async fn show_sleep() {
             display.clear_buffer(Color::White);
             let drawn = crate::flash_sleep::draw_sleep_image(display);
             if !drawn {
-                let font: FontRenderer = FontRenderer::new::<fonts::u8g2_font_wqy15_t_gb2312>();
+                let font: FontRenderer = FontRenderer::new::<fonts::u8g2_font_wqy14_t_gb2312>();
                 let font = font.with_ignore_unknown_chars(true);
                 let _ = font.render_aligned(
                     "睡眠中",

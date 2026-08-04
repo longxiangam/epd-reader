@@ -184,7 +184,7 @@ where
 
         draw_icon(self.icon_type, self.icon_center(), icon_color, target)?;
 
-        let font: FontRenderer = FontRenderer::new::<fonts::u8g2_font_wqy12_t_gb2312b>();
+        let font: FontRenderer = FontRenderer::new::<fonts::u8g2_font_wqy12_t_gb2312>();
         let _ = font.render_aligned(
             format_args!("{}", self.label.as_str()),
             self.title_position(),

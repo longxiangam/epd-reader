@@ -50,7 +50,7 @@ where
             let weather_w = w - weather_x;
             let day_count = weather.daily.len() as i32;
             let col_w = weather_w / day_count.max(1);
-            let font_small: FontRenderer = FontRenderer::new::<fonts::u8g2_font_wqy12_t_gb2312b>();
+            let font_small: FontRenderer = FontRenderer::new::<fonts::u8g2_font_wqy12_t_gb2312>();
             let icon_size: u32 = 32;
 
             for (i, one) in weather.daily.iter().enumerate() {

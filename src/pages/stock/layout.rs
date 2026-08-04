@@ -21,7 +21,7 @@ where
     let h = data.h;
 
     let font_mid: FontRenderer = FontRenderer::new::<fonts::u8g2_font_wqy16_t_gb2312>();
-    let font_small: FontRenderer = FontRenderer::new::<fonts::u8g2_font_wqy12_t_gb2312b>();
+    let font_small: FontRenderer = FontRenderer::new::<fonts::u8g2_font_wqy12_t_gb2312>();
 
     // 状态栏（右上角：加载/wifi/电量，与天气页一致）
     let cy: i32 = 11;

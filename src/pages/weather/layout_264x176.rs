@@ -27,8 +27,8 @@ where
     let w = data.w;
     let h = data.h;
 
-    let font_small: FontRenderer = FontRenderer::new::<fonts::u8g2_font_wqy12_t_gb2312b>();
-    let font_medium: FontRenderer = FontRenderer::new::<fonts::u8g2_font_wqy14_t_gb2312b>();
+    let font_small: FontRenderer = FontRenderer::new::<fonts::u8g2_font_wqy12_t_gb2312>();
+    let font_medium: FontRenderer = FontRenderer::new::<fonts::u8g2_font_wqy14_t_gb2312>();
 
     // 未同步天气
     if !data.weather_synced {

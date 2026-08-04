@@ -1,4 +1,5 @@
 mod page;
+pub(crate) mod bitmap;
 pub use page::ReadPage;
 pub(crate) use page::PAGE_INDEX;
 pub(crate) use page::READING_MODE;

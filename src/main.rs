@@ -191,7 +191,7 @@ async fn main(spawner: Spawner) -> ! {
     let spi_bus_sd = static_cell::make_static!(spi_bus_sd);
     let spi_bus_epd = static_cell::make_static!(spi_bus_epd);
 
-    let font: FontRenderer = FontRenderer::new::<fonts::u8g2_font_wqy15_t_gb2312>();
+    let font: FontRenderer = FontRenderer::new::<fonts::u8g2_font_wqy14_t_gb2312>();
     let _font = font.with_ignore_unknown_chars(true);
 
     spawner.spawn(display::render(spi_bus_epd, epd_busy, epd_rst, epd_dc).unwrap());

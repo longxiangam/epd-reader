@@ -229,7 +229,7 @@ impl ImagePage {
         // Show processing indicator
         if let Some(display) = display_mut() {
             let _ = display.clear_buffer(Color::White);
-            let font = FontRenderer::new::<fonts::u8g2_font_wqy15_t_gb2312>();
+            let font = FontRenderer::new::<fonts::u8g2_font_wqy14_t_gb2312>();
             let _ = font.render_aligned(
                 "处理中...",
                 Point::new(VIS_W as i32 / 2, VIS_H as i32 / 2),
@@ -248,7 +248,7 @@ impl ImagePage {
         if let Some(display) = display_mut() {
             let _ = display.clear_buffer(Color::White);
             let msg = self.status_msg.unwrap_or("壁纸设置失败");
-            let font = FontRenderer::new::<fonts::u8g2_font_wqy15_t_gb2312>();
+            let font = FontRenderer::new::<fonts::u8g2_font_wqy14_t_gb2312>();
             let _ = font.render_aligned(
                 msg,
                 Point::new(VIS_W as i32 / 2, VIS_H as i32 / 2),
@@ -428,7 +428,7 @@ impl Page for ImagePage {
                                                 // First pass: show loading indicator
                                                 if let Some(display) = display_mut() {
                                                     let _ = display.clear_buffer(Color::White);
-                                                    let font = FontRenderer::new::<fonts::u8g2_font_wqy15_t_gb2312>();
+                                                    let font = FontRenderer::new::<fonts::u8g2_font_wqy14_t_gb2312>();
                                                     let _ = font.render_aligned(
                                                         "加载中...",
                                                         Point::new(VIS_W as i32 / 2, VIS_H as i32 / 2),
@@ -455,7 +455,7 @@ impl Page for ImagePage {
                                                     };
                                                     if !ok {
                                                         let _ = display.clear_buffer(Color::White);
-                                                        let font = FontRenderer::new::<fonts::u8g2_font_wqy15_t_gb2312>();
+                                                        let font = FontRenderer::new::<fonts::u8g2_font_wqy14_t_gb2312>();
                                                         let _ = font.render_aligned(
                                                             "图片格式不支持",
                                                             Point::new(VIS_W as i32 / 2, VIS_H as i32 / 2),
@@ -474,7 +474,7 @@ impl Page for ImagePage {
                                                     let _ = display.clear_buffer(Color::White);
                                                     if let Some(ref menus) = self.menus {
                                                         if menus.is_empty() {
-                                                            let font = FontRenderer::new::<fonts::u8g2_font_wqy15_t_gb2312>();
+                                                            let font = FontRenderer::new::<fonts::u8g2_font_wqy14_t_gb2312>();
                                                             let _ = font.render_aligned(
                                                                 "无图片文件\n请将BMP放入SD卡images目录",
                                                                 Point::new(VIS_W as i32 / 2, VIS_H as i32 / 2),
@@ -499,7 +499,7 @@ impl Page for ImagePage {
                                                     }
                                                     if let Some(msg) = self.status_msg {
                                                         self.status_msg = None;
-                                                        let font = FontRenderer::new::<fonts::u8g2_font_wqy15_t_gb2312>();
+                                                        let font = FontRenderer::new::<fonts::u8g2_font_wqy14_t_gb2312>();
                                                         let _ = font.render_aligned(
                                                             msg,
                                                             Point::new(VIS_W as i32 / 2, VIS_H as i32 - 20),
@@ -699,7 +699,7 @@ impl Page for ImagePage {
 
 impl ImagePage {
     fn render_menu_overlay(&self, display: &mut crate::display::EpdDisplay, menu_index: u32) {
-        let font: FontRenderer = FontRenderer::new::<fonts::u8g2_font_wqy15_t_gb2312>();
+        let font: FontRenderer = FontRenderer::new::<fonts::u8g2_font_wqy14_t_gb2312>();
         let menu_width: u32 = 160;
         let menu_item_height: u32 = 28;
         let menu_padding: u32 = 8;

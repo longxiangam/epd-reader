@@ -307,7 +307,7 @@ impl SettingPage {
 
     fn render_locate(&self, display: &mut crate::display::EpdDisplay) {
         let _ = display.clear_buffer(White);
-        let style = U8g2TextStyle::new(fonts::u8g2_font_wqy12_t_gb2312b, Black);
+        let style = U8g2TextStyle::new(fonts::u8g2_font_wqy12_t_gb2312, Black);
         match &self.locate_state {
             LocateState::Idle => {
                 let _ = Text::new("自动定位", Point::new(10, 20), style.clone())
@@ -462,7 +462,7 @@ impl Page for SettingPage {
                 qrcode_widget.draw(display);
 
                 let style =
-                    U8g2TextStyle::new(fonts::u8g2_font_wqy12_t_gb2312b, Black);
+                    U8g2TextStyle::new(fonts::u8g2_font_wqy12_t_gb2312, Black);
 
                 let right_x = qr_width as i32 + 8;
                 let mut right_y = 10;

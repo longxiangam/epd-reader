@@ -47,6 +47,54 @@ fn is_ttf(name: &str) -> bool {
     b.len() >= 4 && b[b.len() - 4..].eq_ignore_ascii_case(b".ttf")
 }
 
+/// 内置点阵字体名 → 单元格像素（wqy12→12 … wqy16→16）。None 表示非点阵（走 TTF）。
+/// 点阵用 u8g2 内置 wqy 位图，不读 SD 字库、无光栅化，渲染比 TTF 快。
+fn bm_size_of(name: &str) -> Option<u32> {
+    match name {
+        "点阵16" => Some(16),
+        "点阵14" => Some(14),
+        "点阵12" => Some(12),
+        _ => None,
+    }
+}
+
+/// 当前字体是否为点阵。
+fn is_bitmap(name: &str) -> bool {
+    bm_size_of(name).is_some()
+}
+
+/// 按 wqy16 像素宽度（中文16、英文/数字8）截断字符串，超出加 "…"。
+/// 用于书单：长书名在窄屏（2.7寸）会延伸到右侧与进度"%"重叠。
+/// 只截断显示用副本，打开书仍用 menus 里的全名。
+fn truncate_name(name: &str, max_w: i32) -> alloc::string::String {
+    const FULL: i32 = 16;
+    const HALF: i32 = 8;
+    let mut w = 0i32;
+    let mut out: alloc::string::String = alloc::string::String::new();
+    let mut cut = false;
+    for ch in name.chars() {
+        let cw = if (ch as u32) < 0x80 { HALF } else { FULL };
+        if w + cw > max_w {
+            cut = true;
+            break;
+        }
+        w += cw;
+        let _ = out.push(ch);
+    }
+    if cut {
+        // 腾出 "…"（按全宽计）的位置
+        while w + FULL > max_w {
+            if out.pop().is_some() {
+                w -= FULL; // 近似（末字可能半宽，偏保守，宁短勿 overlap）
+            } else {
+                break;
+            }
+        }
+        let _ = out.push('…');
+    }
+    out
+}
+
 // 菜单项：0=返回书单 1=收藏书签 2=打开书签 3=删除书签 4=跳转进度
 //         5=排版 6=字体 7=旋转屏幕 8=睡眠 else=取消
 const MENU_ITEMS: &[&str] = &[
@@ -304,7 +352,12 @@ impl ReadPage {
     /// 逐页 compute_page_consumed 扫到 cur，取最后那个 < cur 的页起始。只扫几页，不扫全书。
     fn find_prev_page_start(&mut self) -> u32 {
         let cur = self.ttf_offset;
-        if cur == 0 || self.ttf_file_len == 0 || self.font_file_ptr.is_null() {
+        if cur == 0 || self.ttf_file_len == 0 {
+            return 0;
+        }
+        let bm_cell = bm_size_of(self.font_name.as_str());
+        // 点阵无需 font_file_ptr；TTF 需要句柄
+        if bm_cell.is_none() && self.font_file_ptr.is_null() {
             return 0;
         }
         let book_name = match self
@@ -333,21 +386,31 @@ impl ReadPage {
         let Ok(mut bf) = bd.open_file_in_dir(sn, embedded_sdmmc::Mode::ReadOnly) else {
             return 0;
         };
-        let ff: &mut ActualFile = unsafe { &mut *font_ptr };
-        let prev = match crate::ttf_sd::open_font(ff, ws) {
-            Some(fi) => {
-                let text_area_h =
-                    super::visual_height() as i32 - super::PROGRESS_AREA_HEIGHT as i32 - 2;
-                let base_h = (fi.line_height(ttf_px) + line_gap).max(1);
-                let max_lines = ((text_area_h / base_h) as u32).max(1);
-                let line_h = text_area_h / max_lines as i32;
-                let mw = super::text_width() as i32;
-                let p = crate::ttf_sd::find_prev_start(
-                    &mut bf, ff, &fi, ws, cur, file_len, ttf_px, mw, line_h, max_lines,
-                );
-                Some(p)
+        let text_area_h =
+            super::visual_height() as i32 - super::PROGRESS_AREA_HEIGHT as i32 - 2;
+        let mw = super::text_width() as i32;
+        let prev = if let Some(cell) = bm_cell {
+            // 点阵局部逆推（纯算术，无字体 I/O）
+            let full_w = cell as i32;
+            let half_w = (cell / 2) as i32;
+            let base_h = (cell as i32 + line_gap).max(1);
+            let max_lines = ((text_area_h / base_h) as u32).max(1);
+            Some(super::bitmap::find_prev_start_bitmap(
+                &mut bf, &mut ws.book_buf, cur, file_len, mw, full_w, half_w, max_lines,
+            ))
+        } else {
+            let ff: &mut ActualFile = unsafe { &mut *font_ptr };
+            match crate::ttf_sd::open_font(ff, ws) {
+                Some(fi) => {
+                    let base_h = (fi.line_height(ttf_px) + line_gap).max(1);
+                    let max_lines = ((text_area_h / base_h) as u32).max(1);
+                    let line_h = text_area_h / max_lines as i32;
+                    Some(crate::ttf_sd::find_prev_start(
+                        &mut bf, ff, &fi, ws, cur, file_len, ttf_px, mw, line_h, max_lines,
+                    ))
+                }
+                None => None,
             }
-            None => None,
         };
         bf.close();
         prev.unwrap_or(0)
@@ -355,6 +418,10 @@ impl ReadPage {
 
     /// 预加载下一页字形：渲染完当前页后提前光栅化进缓存（不画），下次翻页直接 blit。
     async fn preload_next_page(&mut self) {
+        // 点阵无需光栅化（位图直接 blit），跳过预加载
+        if is_bitmap(self.font_name.as_str()) {
+            return;
+        }
         let ttf_end = self.ttf_end;
         let ttf_file_len = self.ttf_file_len;
         let ttf_px = self.ttf_px;
@@ -413,11 +480,11 @@ impl ReadPage {
         let menu_padding: u32 = if compact { 4 } else { 8 };
         let avail = vh.saturating_sub(page_info_height + menu_padding * 2);
         let menu_item_height: u32 = (avail / MENU_ITEMS.len() as u32).clamp(12, 24);
-        let font15: FontRenderer = FontRenderer::new::<fonts::u8g2_font_wqy15_t_gb2312>()
+        let font14: FontRenderer = FontRenderer::new::<fonts::u8g2_font_wqy14_t_gb2312>()
             .with_ignore_unknown_chars(true);
         let font12: FontRenderer = FontRenderer::new::<fonts::u8g2_font_wqy12_t_gb2312>()
             .with_ignore_unknown_chars(true);
-        let font = if menu_item_height < 18 { &font12 } else { &font15 };
+        let font = if menu_item_height < 18 { &font12 } else { &font14 };
         let menu_width: u32 = if vw < 200 { vw - 16 } else { 180 };
 
         let box_style = PrimitiveStyleBuilder::new()
@@ -847,7 +914,7 @@ impl ReadPage {
                     );
                     let mut clipped_display = display.clipped(&clip);
                     // TextBox 按裁剪区宽度自动换行（render_aligned 不换行，只能看到一行）
-                    let style = U8g2TextStyle::new(fonts::u8g2_font_wqy15_t_gb2312, Black);
+                    let style = U8g2TextStyle::new(fonts::u8g2_font_wqy14_t_gb2312, Black);
                     let _ = TextBox::new(self.bookmark_preview.as_str(), clip, style)
                         .draw(&mut clipped_display);
                 }
@@ -908,7 +975,7 @@ impl Page for ReadPage {
         let rotate = settings.rotate % 4;
         let mut font_name: String<32> = String::new();
         let fname = settings.font_name_str();
-        if is_ttf(fname) {
+        if is_ttf(fname) || is_bitmap(fname) {
             let _ = font_name.push_str(fname);
         } else {
             let _ = font_name.push_str("font.ttf");
@@ -974,10 +1041,20 @@ impl Page for ReadPage {
                 if !self.reading {
                     // 书单列表
                     if let Some(ref menus) = self.menus {
+                        // 截断过长书名，避免与右侧进度百分比重叠（窄屏尤甚）
+                        // max_w：书名从 x=15 起，右侧留 ~55px 给 "100%" 进度
+                        let max_w = vw as i32 - 70;
+                        // names 须先于 all_items 声明（all_items 借用它，析构逆序要求被借者后释）
+                        let mut names: Vec<alloc::string::String, 20> = Vec::new();
                         let mut all_items: Vec<&str, 20> = Vec::new();
                         let _ = all_items.push("退出");
                         for item in menus.iter() {
-                            if all_items.push(item.as_str()).is_err() {
+                            if names.push(truncate_name(item.as_str(), max_w)).is_err() {
+                                break;
+                            }
+                        }
+                        for n in names.iter() {
+                            if all_items.push(n.as_str()).is_err() {
                                 break;
                             }
                         }
@@ -1031,7 +1108,7 @@ impl Page for ReadPage {
                     }
                 } else {
                     // 阅读态：TTF 即时分页渲染
-                    let font: FontRenderer = FontRenderer::new::<fonts::u8g2_font_wqy15_t_gb2312>();
+                    let font: FontRenderer = FontRenderer::new::<fonts::u8g2_font_wqy14_t_gb2312>();
                     let font = font.with_ignore_unknown_chars(true);
 
                     let ttf_offset = self.ttf_offset;
@@ -1040,6 +1117,7 @@ impl Page for ReadPage {
                     let line_gap = self.line_gap;
                     let bd_ptr = self.books_dir_ptr;
                     let font_ptr = self.font_file_ptr;
+                    let bm_cell = bm_size_of(self.font_name.as_str());
                     let book_name = self
                         .menus
                         .as_ref()
@@ -1063,20 +1141,42 @@ impl Page for ReadPage {
                                     bf.close();
                                 }
                             }
-                            if n > 0 && !font_ptr.is_null() {
-                                let ff: &mut ActualFile = unsafe { &mut *font_ptr };
-                                if let Some(fi) = crate::ttf_sd::open_font(ff, ws) {
-                                    let text_area_h = vh as i32
-                                        - super::PROGRESS_AREA_HEIGHT as i32 - 2;
-                                    let base_h = (fi.line_height(ttf_px) + line_gap).max(1);
+                            if n > 0 {
+                                let text_area_h = vh as i32
+                                    - super::PROGRESS_AREA_HEIGHT as i32 - 2;
+                                if let Some(cell) = bm_cell {
+                                    // 点阵路径：内置 u8g2 位图，固定单元格宽度（中文满宽/英文半宽）
+                                    let bm_font = match cell {
+                                        12 => FontRenderer::new::<fonts::u8g2_font_wqy12_t_gb2312>(),
+                                        14 => FontRenderer::new::<fonts::u8g2_font_wqy14_t_gb2312>(),
+                                        _ => FontRenderer::new::<fonts::u8g2_font_wqy16_t_gb2312>(),
+                                    };
+                                    let bm_font = bm_font.with_ignore_unknown_chars(true);
+                                    let full_w = cell as i32;
+                                    let half_w = (cell / 2) as i32;
+                                    let base_h = (cell as i32 + line_gap).max(1);
                                     let max_lines = ((text_area_h / base_h) as u32).max(1);
                                     let line_h = text_area_h / max_lines as i32;
-                                    let consumed = crate::ttf_sd::paginate_render(
-                                        ff, &fi, ws, display, n, ttf_px,
+                                    let consumed = super::bitmap::paginate_render_bitmap(
+                                        &bm_font, &ws.book_buf, n, display,
                                         Point::new(super::text_left_margin(), 2),
                                         super::text_width() as i32, line_h, max_lines,
+                                        full_w, half_w,
                                     );
                                     result = Some(consumed as u32);
+                                } else if !font_ptr.is_null() {
+                                    let ff: &mut ActualFile = unsafe { &mut *font_ptr };
+                                    if let Some(fi) = crate::ttf_sd::open_font(ff, ws) {
+                                        let base_h = (fi.line_height(ttf_px) + line_gap).max(1);
+                                        let max_lines = ((text_area_h / base_h) as u32).max(1);
+                                        let line_h = text_area_h / max_lines as i32;
+                                        let consumed = crate::ttf_sd::paginate_render(
+                                            ff, &fi, ws, display, n, ttf_px,
+                                            Point::new(super::text_left_margin(), 2),
+                                            super::text_width() as i32, line_h, max_lines,
+                                        );
+                                        result = Some(consumed as u32);
+                                    }
                                 }
                             }
                         }
@@ -1202,6 +1302,10 @@ impl Page for ReadPage {
                                         }
                                     });
                                     self.font_list = fonts_found;
+                                    // 追加内置点阵字体（u8g2 wqy，无需 SD 文件），大→小
+                                    let _ = self.font_list.push(String::from_str("点阵16").unwrap());
+                                    let _ = self.font_list.push(String::from_str("点阵14").unwrap());
+                                    let _ = self.font_list.push(String::from_str("点阵12").unwrap());
                                 }
                                 // font_name 不在列表里则回退到第一个可用字体
                                 if !self.font_list.is_empty()
@@ -1213,16 +1317,19 @@ impl Page for ReadPage {
                                 // 打开字体句柄（整个会话复用，换字体时由 need_reload_font 重开）
                                 let mut ttf_font_file: Option<ActualFile<'static>> = None;
                                 let fname = self.font_name.as_str();
-                                if let Ok(f) = SdMount::open_file_by_name(
-                                    &mut books_dir,
-                                    fname,
-                                    embedded_sdmmc::Mode::ReadOnly,
-                                ) {
-                                    // 句柄实际只依赖 volume_mgr（整个阅读期有效），擦除生命周期为 'static。
-                                    let f_static: ActualFile<'static> = unsafe { core::mem::transmute(f) };
-                                    ttf_font_file = Some(f_static);
-                                } else {
-                                    println!("[read ttf] {} 打开失败", fname);
+                                // 点阵字体用内置 u8g2，无需打开 .ttf
+                                if !is_bitmap(fname) {
+                                    if let Ok(f) = SdMount::open_file_by_name(
+                                        &mut books_dir,
+                                        fname,
+                                        embedded_sdmmc::Mode::ReadOnly,
+                                    ) {
+                                        // 句柄实际只依赖 volume_mgr（整个阅读期有效），擦除生命周期为 'static。
+                                        let f_static: ActualFile<'static> = unsafe { core::mem::transmute(f) };
+                                        ttf_font_file = Some(f_static);
+                                    } else {
+                                        println!("[read ttf] {} 打开失败", fname);
+                                    }
                                 }
                                 self.font_file_ptr = match ttf_font_file.as_mut() {
                                     Some(f) => f as *mut ActualFile<'static>,
@@ -1296,7 +1403,10 @@ impl Page for ReadPage {
                                         self.need_reload_font = false;
                                         ttf_font_file.take();
                                         let fname = self.font_name.as_str();
-                                        if let Ok(f) = SdMount::open_file_by_name(
+                                        if is_bitmap(fname) {
+                                            // 点阵：用内置 u8g2，无 .ttf 句柄
+                                            self.font_file_ptr = core::ptr::null_mut();
+                                        } else if let Ok(f) = SdMount::open_file_by_name(
                                             &mut books_dir,
                                             fname,
                                             embedded_sdmmc::Mode::ReadOnly,
@@ -1309,14 +1419,14 @@ impl Page for ReadPage {
                                                 crate::ttf_sd::cache_clear(ws);
                                                 ws.fi = None; // 强制重新解析新字体的表目录/度量
                                             }
-                                            // 不同字体的 advance/行高不同 → 页边界会变，历史栈作废
-                                            self.ttf_hist.clear();
-                                            self.ttf_at_end = false;
-                                            self.ttf_end = self.ttf_offset.min(self.ttf_file_len);
                                         } else {
                                             println!("[read ttf] 重开字体失败: {}", fname);
                                             self.font_file_ptr = core::ptr::null_mut();
                                         }
+                                        // 换字体 → 页边界变，历史栈作废（点阵/TTF 通用）
+                                        self.ttf_hist.clear();
+                                        self.ttf_at_end = false;
+                                        self.ttf_end = self.ttf_offset.min(self.ttf_file_len);
                                         self.need_render = true;
                                     }
 
