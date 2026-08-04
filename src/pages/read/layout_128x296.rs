@@ -26,8 +26,8 @@ fn swapped() -> bool { cur_rot_num() % 2 == 1 }
 pub fn visual_width() -> u32 { if swapped() { DISPLAY_HEIGHT } else { DISPLAY_WIDTH } }
 pub fn visual_height() -> u32 { if swapped() { DISPLAY_WIDTH } else { DISPLAY_HEIGHT } }
 
-pub fn text_width() -> u32 { visual_width() - 16 }
-pub fn text_left_margin() -> i32 { ((visual_width() - text_width()) / 2) as i32 }
+pub fn text_width() -> u32 { visual_width() }
+pub fn text_left_margin() -> i32 { 0 }
 
 pub fn page_lines() -> u32 {
     (visual_height() - PROGRESS_AREA_HEIGHT) / FONT_SIZE - 1

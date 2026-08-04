@@ -26,12 +26,11 @@ fn swapped() -> bool { cur_rot_num() % 2 == 1 }
 pub fn visual_width() -> u32 { if swapped() { DISPLAY_HEIGHT } else { DISPLAY_WIDTH } }
 pub fn visual_height() -> u32 { if swapped() { DISPLAY_WIDTH } else { DISPLAY_HEIGHT } }
 
-/// Effective text area width — subtract one ZH char width to prevent the
-/// last character on each line from being clipped (ZH_WIDTH overestimates
-/// the actual glyph width by ~1 px, and the wrap logic adds the newline
-/// *after* the overflow character).
-pub fn text_width() -> u32 { visual_width() - 16 }
-pub fn text_left_margin() -> i32 { ((visual_width() - text_width()) / 2) as i32 }
+/// 文本区满宽、顶到屏幕左边。原 -16/居中边距是给旧静态分页
+/// (ZH_WIDTH 估算偏大、溢出后才换行致末字裁切)兜底的；旧分页代码已删除，
+/// 现 TTF 按精确 advance 宽度换行，无需边距（与 layout_400x300 一致）。
+pub fn text_width() -> u32 { visual_width() }
+pub fn text_left_margin() -> i32 { 0 }
 
 pub fn page_lines() -> u32 {
     (visual_height() - PROGRESS_AREA_HEIGHT) / FONT_SIZE - 1
