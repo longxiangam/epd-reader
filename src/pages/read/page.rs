@@ -405,13 +405,20 @@ impl ReadPage {
     }
 
     fn render_menu_overlay(&self, display: &mut crate::display::EpdDisplay) {
-        let font: FontRenderer = FontRenderer::new::<fonts::u8g2_font_wqy15_t_gb2312>();
-        let font = font.with_ignore_unknown_chars(true);
         let vw = super::visual_width();
         let vh = super::visual_height();
+        // 小屏（如2.7寸横屏176高）放不下 10项×24 的菜单：按屏高自适应行高与字号。
+        let compact = vh < 200;
+        let page_info_height: u32 = if compact { 12 } else { 18 };
+        let menu_padding: u32 = if compact { 4 } else { 8 };
+        let avail = vh.saturating_sub(page_info_height + menu_padding * 2);
+        let menu_item_height: u32 = (avail / MENU_ITEMS.len() as u32).clamp(12, 24);
+        let font15: FontRenderer = FontRenderer::new::<fonts::u8g2_font_wqy15_t_gb2312>()
+            .with_ignore_unknown_chars(true);
+        let font12: FontRenderer = FontRenderer::new::<fonts::u8g2_font_wqy12_t_gb2312>()
+            .with_ignore_unknown_chars(true);
+        let font = if menu_item_height < 18 { &font12 } else { &font15 };
         let menu_width: u32 = if vw < 200 { vw - 16 } else { 180 };
-        let menu_item_height: u32 = 24;
-        let menu_padding: u32 = 8;
 
         let box_style = PrimitiveStyleBuilder::new()
             .fill_color(White)
