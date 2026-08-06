@@ -2,6 +2,7 @@ use embassy_futures::select::{Either, select};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
 use embassy_time::{Duration, Timer};
+use core::sync::atomic::{AtomicBool, Ordering};
 use embedded_graphics::geometry::Point;
 
 use esp_hal::gpio::{Input, Level, Output, Pull};
@@ -73,6 +74,12 @@ pub fn set_sleep_renderer(renderer: Option<fn(&mut EpdDisplay)>) {
 pub static RENDER_CHANNEL: Channel<CriticalSectionRawMutex, RenderInfo, 64> = Channel::new();
 pub static QUICKLY_LUT_CHANNEL: Channel<CriticalSectionRawMutex, bool, 64> = Channel::new();
 
+/// 渲染任务是否正在处理一个周期（刷新 + 可选 epd.sleep）。
+/// 异步化后刷新期间 executor 会调度其它任务；若此时切断 EINK 电源 / 进系统深睡，
+/// 面板会被留在半驱动状态 → 睡眠残影（发灰，需全刷才能清除）。
+/// 系统睡眠/断电前必须等 RENDER_BUSY=false 且 RENDER_CHANNEL 排空（见 await_render_idle）。
+static RENDER_BUSY: AtomicBool = AtomicBool::new(false);
+
 type ActualSpi<'a> = CriticalSectionDevice<'a, Spi<'a, esp_hal::Blocking>, Output<'a>, embedded_hal_bus::spi::NoDelay>;
 
 /// 平台默认：多少次快刷后触发一次全刷（清残影）。可由设置/web 覆盖。
@@ -141,6 +148,7 @@ pub async fn render(
         let quickly_lut = quickly_lut.receive();
         match select(render_sign, quickly_lut).await {
             Either::First(render_info) => {
+                RENDER_BUSY.store(true, Ordering::Relaxed);
                 add_render_times();
                 println!("begin render");
 
@@ -179,13 +187,19 @@ pub async fn render(
                             // Normal partial refresh
                             epd.update_and_display_frame_partial(&mut spi_device, buffer, &mut embassy_time::Delay).expect("render failed");
                         }
-                        // Save current frame as reference for next render
+                        // 刷新方法已触发刷新（display_update_sequence 发 MasterActivation 后不再自旋等待）。
+                        // 先存当前帧引用：此处到上传之间无 await，page task 不会改动 DISPLAY；
+                        // wait 期间 page task 才可能绘制下一帧到 DISPLAY，但 PREV_BUFFER 已存好本次画面。
                         unsafe {
                             (*core::ptr::addr_of_mut!(PREV_BUFFER)).copy_from_slice(buffer);
                             core::ptr::addr_of_mut!(PREV_BUFFER_VALID).write(true);
                         }
+                        // 异步等待物理刷新完成（替代驱动内自旋），每 2ms 让出 executor
+                        wait_refresh_done(&mut epd).await;
                     } else {
+                        // Full 模式（罕见，仅手动切换）
                         epd.update_and_display_frame(&mut spi_device, buffer, &mut embassy_time::Delay).expect("render failed");
+                        wait_refresh_done(&mut epd).await;
                     }
                 }
 
@@ -197,6 +211,11 @@ pub async fn render(
                         spi_device = set_refresh_mode(RefreshLut::Full, &mut epd, spi_device);
                     }
                     epd.update_and_display_frame(&mut spi_device, buffer, &mut embassy_time::Delay).expect("render failed");
+                    // 刷新已触发：epd2in9 的 display_frame 发 MasterActivation 后本就不等；
+                    // epd4in2 已移除 display_frame 末尾等待。epd2in9 的 pre-op 就绪等待因上一轮
+                    // 已 poll（面板空闲）而瞬时返回。此处异步等待物理刷新完成，且必须在
+                    // trailing set_refresh_mode(Quick) 之前，确保刷新完成再切回 Quick LUT。
+                    wait_refresh_done(&mut epd).await;
                     if need_force_full {
                         spi_device = set_refresh_mode(RefreshLut::Quick, &mut epd, spi_device);
                     }
@@ -209,8 +228,10 @@ pub async fn render(
                 }
 
                 println!("end render");
+                RENDER_BUSY.store(false, Ordering::Relaxed);
             },
             Either::Second(v) => {
+                RENDER_BUSY.store(true, Ordering::Relaxed);
                 if v {
                     refresh_lut = RefreshLut::Quick;
                     spi_device = set_refresh_mode(RefreshLut::Quick, &mut epd, spi_device);
@@ -220,11 +241,45 @@ pub async fn render(
                 }
                 #[cfg(feature = "epd2in7")]
                 { need_base_map = true; }
+                RENDER_BUSY.store(false, Ordering::Relaxed);
             },
         }
         Timer::after(Duration::from_millis(50)).await;
     }
 
+}
+
+/// 等待渲染任务空闲：当前无正在处理的周期（RENDER_BUSY=false）且 RENDER_CHANNEL 已排空。
+/// 切断 EINK 电源 / 进系统深睡前必须调用——异步刷新期间 executor 会调度其它任务，
+/// 若此时断电，面板会被留在刷新/睡眠命令中途，产生发灰残影。
+pub async fn await_render_idle() {
+    loop {
+        let busy = RENDER_BUSY.load(Ordering::Relaxed);
+        let pending = !RENDER_CHANNEL.is_empty();
+        if !busy && !pending {
+            break;
+        }
+        Timer::after(Duration::from_millis(2)).await;
+    }
+}
+
+/// 异步等待面板刷新完成：替代驱动内的自旋 `wait_until_idle`。
+///
+/// 物理刷新（局部数百 ms、全刷 1~3s）期间，BUSY 引脚保持有效。此处每 2ms
+/// 轮询一次 `is_busy()`，并用 `Timer::await` 让出 executor，使按键扫描、
+/// 下一页栅格化等任务能在刷新期间并发推进，而不是被自旋锁死整个单线程 executor。
+///
+/// 先 `Timer::await` 再读：MasterActivation 后 BUSY 在 µs 级拉高，2ms 足以让其就绪，
+/// 避免首检误判为空闲；相对刷新时长，2ms 轮询粒度可忽略。
+async fn wait_refresh_done(
+    epd: &mut EpdControl<&'static mut ActualSpi<'static>, Input<'static>, Output<'static>, Output<'static>, embassy_time::Delay>,
+) {
+    loop {
+        Timer::after(Duration::from_millis(2)).await;
+        if !epd.is_busy() {
+            break;
+        }
+    }
 }
 
 pub fn add_render_times(){

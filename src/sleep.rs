@@ -48,6 +48,10 @@ pub async fn to_sleep_tips(sleep_time:Duration, idle_time:Duration, show_sleep:b
             crate::display::show_sleep().await;
         }
 
+        // 等待渲染周期结束并排空，再切 EINK 电源：异步刷新期间本任务可能并发推进，
+        // 若在面板刷新/睡眠命令中途断电，会产生发灰残影（需全刷才能清除）。
+        crate::display::await_render_idle().await;
+
         unsafe {
             *core::ptr::addr_of_mut!(WHEN_SLEEP_RTC_MS) = get_rtc_ms().await;
 
@@ -75,6 +79,8 @@ pub async fn reboot_sleep() {
     let mut ws: Vec<&dyn WakeSource, 2> = Vec::new();
     let _ = ws.push(&rtcio);
     let _ = ws.push(&timer);
+    // 同 to_sleep_tips：切电前确保面板不在刷新/睡眠中途。
+    crate::display::await_render_idle().await;
     unsafe {
         if let Some(mut p) = EINK_PWER_PIN.lock().await.take() { p.set_high(); }
         if let Some(mut p) = SD_PWER_PIN.lock().await.take() { p.set_high(); }
