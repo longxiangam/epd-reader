@@ -125,6 +125,8 @@ pub struct ReadPage {
     /// 翻页/跳转后写 .log[0]（持久化阅读位置到 SD，防掉电丢失）。
     need_save_position: bool,
     need_load_preview: bool,
+    /// 返回书单时需重载书单进度（读到最新 .log[0]）。
+    need_reload_progress: bool,
     bookmark_preview: String<ONE_PAGE_CONTENT_LEN>,
     /// 屏幕旋转状态（0..3，相对默认依次向右 +90°）。
     rotate: u8,
@@ -262,7 +264,9 @@ impl ReadPage {
             // 续读：rtc_fast 的 TTF_RESUME_OFFSET 是权威的，不被 .log[0] 覆盖
             self.ttf_resume = false;
         } else if let Some(ref lv) = self.log_vec {
-            if let Some(&off) = lv.first() {
+            if let Some(&raw) = lv.first() {
+                // bit31 = 是否已到末页（完成标记），低 31 位才是字节偏移
+                let off = raw & 0x7FFF_FFFF;
                 self.ttf_offset = off.min(self.ttf_file_len);
                 self.ttf_end = self.ttf_offset;
             }
@@ -292,7 +296,7 @@ impl ReadPage {
                             }
                             Err(_) => 0,
                         };
-                        let offset = match SdMount::open_log_file(books_dir, &short, embedded_sdmmc::Mode::ReadOnly) {
+                        let raw = match SdMount::open_log_file(books_dir, &short, embedded_sdmmc::Mode::ReadOnly) {
                             Ok(mut f) => {
                                 let log = TxtReader::read_log(&mut f);
                                 f.close();
@@ -300,7 +304,7 @@ impl ReadPage {
                             }
                             Err(_) => 0,
                         };
-                        (offset, total)
+                        (raw, total)
                     }
                     None => {
                         let _ = self.book_progress.push(String::new());
@@ -310,7 +314,13 @@ impl ReadPage {
                 let mut s: String<16> = String::new();
                 if total > 0 {
                     use core::fmt::Write;
-                    let _ = write!(s, "{}%", offset * 100 / total);
+                    // bit31 = 已到末页（完成标记）→ 直接 100%；否则按字节偏移两位小数
+                    if offset & (1u32 << 31) != 0 {
+                        let _ = write!(s, "100.00%");
+                    } else {
+                        let p = (offset as u64) * 10000 / total as u64;
+                        let _ = write!(s, "{}.{:02}%", p / 100, p % 100);
+                    }
                 }
                 let _ = self.book_progress.push(s);
             }
@@ -538,10 +548,16 @@ impl ReadPage {
                 }
 
                 if self.ttf_file_len > 0 {
-                    let pct = self.ttf_offset.min(self.ttf_file_len) * 100 / self.ttf_file_len;
+                    // 进度按 ttf_offset；ttf_offset+一页(ttf_end) ≥ file_len 即最后一页 → 算 100%
+                    let cur = if self.ttf_end >= self.ttf_file_len {
+                        self.ttf_file_len
+                    } else {
+                        self.ttf_offset.min(self.ttf_file_len)
+                    };
+                    let p = cur as u64 * 10000 / self.ttf_file_len as u64;
                     let page_text_y = menu_y + menu_height as i32 - menu_padding as i32;
                     font.render_aligned(
-                        format_args!("{}%", pct),
+                        format_args!("{}.{:02}%", p / 100, p % 100),
                         Point::new(menu_x + menu_width as i32 / 2, page_text_y),
                         VerticalPosition::Bottom,
                         HorizontalAlignment::Center,
@@ -856,9 +872,9 @@ impl ReadPage {
                     let text_color = if is_selected { FontColor::Transparent(White) } else { FontColor::Transparent(Black) };
                     let prefix = if is_selected { "> " } else { "  " };
                     let delete_mark = if deleting && is_selected { " ×" } else { "" };
-                    let pct = if self.ttf_file_len > 0 { off * 100 / self.ttf_file_len } else { 0 };
+                    let p = if self.ttf_file_len > 0 { off as u64 * 10000 / self.ttf_file_len as u64 } else { 0 };
                     font.render_aligned(
-                        format_args!("{}{}%{}", prefix, pct, delete_mark),
+                        format_args!("{}{}.{:02}%{}", prefix, p / 100, p % 100, delete_mark),
                         Point::new(text_left, item_y + item_h_i / 2),
                         VerticalPosition::Center,
                         HorizontalAlignment::Left,
@@ -935,7 +951,12 @@ impl ReadPage {
         if total == 0 {
             return;
         }
-        let current = self.ttf_offset.min(total);
+        // 进度按 ttf_offset（当前页起点）；但 ttf_offset+一页(ttf_end) ≥ file_len 即最后一页 → 算 100%
+        let current = if self.ttf_end >= total {
+            total
+        } else {
+            self.ttf_offset.min(total)
+        };
         let vw = super::visual_width();
         let vh = super::visual_height();
         let bar_height: u32 = 3;
@@ -999,6 +1020,7 @@ impl Page for ReadPage {
             delete_bookmark_flag: false,
             need_save_position: false,
             need_load_preview: false,
+            need_reload_progress: false,
             bookmark_preview: String::new(),
             rotate,
             exit_selected: false,
@@ -1379,29 +1401,11 @@ impl Page for ReadPage {
                                     }
 
                                     // 持久化阅读位置到 .log[0]
-                                    if self.need_save_position {
-                                        self.need_save_position = false;
-                                        if self.ttf_file_len > 0 {
-                                            let book_name = self.menus.as_ref().unwrap()[self.choose_index as usize].clone();
-                                            let file_name = format!("{}.txt", book_name);
-                                            if let Some(entry) = SdMount::find_entry_by_name(&mut books_dir, &file_name) {
-                                                let short_name = entry.name;
-                                                let logfile = SdMount::open_log_file(
-                                                    &mut books_dir,
-                                                    &short_name,
-                                                    embedded_sdmmc::Mode::ReadWriteCreateOrTruncate,
-                                                );
-                                                if let Ok(mut f) = logfile {
-                                                    if self.log_vec.is_none() {
-                                                        self.log_vec = Some(Vec::new());
-                                                    }
-                                                    if let Some(ref mut lv) = self.log_vec {
-                                                        TxtReader::save_log(&mut f, lv, self.ttf_offset, false);
-                                                    }
-                                                    f.close();
-                                                }
-                                            }
-                                        }
+                                    // 返回书单：重载每本书的阅读进度（读到最新 .log[0]）
+                                    if self.need_reload_progress {
+                                        self.need_reload_progress = false;
+                                        self.load_book_progress(&mut books_dir);
+                                        self.need_render = true;
                                     }
 
                                     // 换字体：重开句柄 + 清字形缓存 + 清字体表缓存（fi）
@@ -1536,6 +1540,35 @@ impl Page for ReadPage {
                                     let did_render = self.need_render;
                                     self.render().await;
 
+                                    // 持久化阅读位置到 .log[0]（render 之后 ttf_at_end 新鲜）：
+                                    // 低 31 位 = ttf_offset（页起点，续读回到本页）；
+                                    // bit31 = 是否已到末页（书单据此显示 100%，翻页时更新）
+                                    if self.need_save_position {
+                                        self.need_save_position = false;
+                                        if self.ttf_file_len > 0 {
+                                            let pos = self.ttf_offset | (if self.ttf_at_end { 1u32 << 31 } else { 0 });
+                                            let book_name = self.menus.as_ref().unwrap()[self.choose_index as usize].clone();
+                                            let file_name = format!("{}.txt", book_name);
+                                            if let Some(entry) = SdMount::find_entry_by_name(&mut books_dir, &file_name) {
+                                                let short_name = entry.name;
+                                                let logfile = SdMount::open_log_file(
+                                                    &mut books_dir,
+                                                    &short_name,
+                                                    embedded_sdmmc::Mode::ReadWriteCreateOrTruncate,
+                                                );
+                                                if let Ok(mut f) = logfile {
+                                                    if self.log_vec.is_none() {
+                                                        self.log_vec = Some(Vec::new());
+                                                    }
+                                                    if let Some(ref mut lv) = self.log_vec {
+                                                        TxtReader::save_log(&mut f, lv, pos, false);
+                                                    }
+                                                    f.close();
+                                                }
+                                            }
+                                        }
+                                    }
+
                                     // 仅在实际渲染后（翻页）预加载一次下一页字形
                                     if did_render
                                         && matches!(self.menu_state, MenuState::Closed)
@@ -1656,6 +1689,7 @@ impl Page for ReadPage {
                             unsafe {
                                 core::ptr::addr_of_mut!(PAGE_INDEX).write(None);
                             }
+                            mut_ref.need_reload_progress = true;
                             mut_ref.menu_state = MenuState::Closed;
                             mut_ref.need_render = true;
                         } else {
@@ -1680,6 +1714,7 @@ impl Page for ReadPage {
                                 unsafe {
                                     core::ptr::addr_of_mut!(PAGE_INDEX).write(None);
                                 }
+                                mut_ref.need_reload_progress = true;
                             }
                             1 => {
                                 mut_ref.save_bookmark_flag = true;
