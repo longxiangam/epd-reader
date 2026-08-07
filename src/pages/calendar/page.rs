@@ -228,7 +228,8 @@ impl Page for CalendarPage {
             });
         }).await;
         // 长按3回到当前月
-        event::on_target(EventType::KeyLongEnd(3), Self::mut_to_ptr(self), move |info| {
+        // 短按3：回到今天（原为长按，统一交互后移到短按）
+        event::on_target(EventType::KeyShort(3), Self::mut_to_ptr(self), move |info| {
             return Box::pin(async move {
                 let mut_ref: &mut Self = Self::mut_by_ptr(info.ptr).unwrap();
                 if let Some(clock) = get_clock() {
@@ -273,7 +274,8 @@ impl Page for CalendarPage {
             });
         }).await;
         // 短按3退出
-        event::on_target(EventType::KeyShort(3), Self::mut_to_ptr(self), move |info| {
+        // 长按3：返回主界面（统一交互）
+        event::on_target(EventType::KeyLongEnd(3), Self::mut_to_ptr(self), move |info| {
             return Box::pin(async move {
                 let mut_ref: &mut Self = Self::mut_by_ptr(info.ptr).unwrap();
                 mut_ref.running = false;

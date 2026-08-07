@@ -1,6 +1,7 @@
 use alloc::boxed::Box;
 use esp_println::println;
 use heapless::String;
+use time::OffsetDateTime;
 
 /// 默认关注的股票（沪深代码，如 sh600519 / sz000001）
 pub const DEFAULT_STOCK: &str = "sh600519";
@@ -505,4 +506,104 @@ pub fn fmt_signed(v: f32) -> String<16> {
     let _ = s.push((b'0' + (frac / 10) as u8) as char);
     let _ = s.push((b'0' + (frac % 10) as u8) as char);
     s
+}
+
+// ===== 分时本地缓存（rtc_fast，跨深睡保留）=====
+
+/// 一个交易日的分时槽数（AM 24 + PM 24）。
+pub const MINUTE_SLOTS: usize = 48;
+
+/// 单支股票当日分时缓存。存 close[48]（按日内槽位 0..47）+ 真实昨收。
+/// 总览页据此做增量拉取与累积渲染，避免每次全量请求、图表清空。
+#[derive(Clone, Copy)]
+pub struct StockMinuteCache {
+    pub code: [u8; 16], // null-padded；[0]==0 或 code_len==0 表示空槽
+    pub code_len: u8,
+    pub date: u32, // YYYYMMDD；0 = 空
+    pub preclose: f32, // 真实昨收（来自 quote）；0 = 未知
+    pub last_price: f32,
+    pub n_bars: u8, // 有效槽位数 0..=48
+    pub closes: [f32; MINUTE_SLOTS],
+}
+
+impl StockMinuteCache {
+    pub const ZERO: Self = Self {
+        code: [0; 16],
+        code_len: 0,
+        date: 0,
+        preclose: 0.0,
+        last_price: 0.0,
+        n_bars: 0,
+        closes: [0.0; MINUTE_SLOTS],
+    };
+
+    pub fn reset(&mut self) {
+        *self = Self::ZERO;
+    }
+
+    pub fn set_code(&mut self, code: &str) {
+        self.code = [0; 16];
+        let b = code.as_bytes();
+        let n = b.len().min(16);
+        self.code[..n].copy_from_slice(&b[..n]);
+        self.code_len = n as u8;
+    }
+
+    pub fn matches_code(&self, code: &str) -> bool {
+        if self.code_len == 0 {
+            return false;
+        }
+        let cached = &self.code[..self.code_len as usize];
+        cached == code.as_bytes()
+    }
+}
+
+/// 当前日期 → YYYYMMDD（用于跨日重置判断）。
+pub fn today_yyyymmdd(now: &OffsetDateTime) -> u32 {
+    let y = now.year() as u32;
+    let m = now.month() as u8 as u32;
+    let d = now.day() as u32;
+    y * 10000 + m * 100 + d
+}
+
+/// 分钟数（自午夜）→ 日内分时槽（AM 9:30-11:30→0..23，PM 13:00-15:00→24..47）。
+/// 盘前→0、午休→23、盘后→47（夹到边界，保证单调且确定）。
+fn mins_to_slot(mins: i32) -> usize {
+    if mins < 570 {
+        0
+    } else if mins < 780 {
+        (((mins - 570) / 5) as usize).min(23)
+    } else {
+        (24 + ((mins - 780) / 5) as usize).min(47)
+    }
+}
+
+/// 分时 K 线的 date（YYYYMMDDHHMMSS 数字）→ 日内槽。
+pub fn bar_slot(date: u64) -> usize {
+    let hh = ((date / 10000) % 100) as i32;
+    let mm = ((date / 100) % 100) as i32;
+    mins_to_slot(hh * 60 + mm)
+}
+
+/// 当前时间 → 日内槽。
+pub fn now_slot(now: &OffsetDateTime) -> usize {
+    mins_to_slot(now.hour() as i32 * 60 + now.minute() as i32)
+}
+
+/// 把一批分时 K 线按日内槽合并进缓存（同槽覆盖、新槽追加、n_bars 取最大），
+/// 并把最后一根 close 作为 last_price。供总览全量/增量拉取后拼接本地数据。
+pub fn merge_minute(cache: &mut StockMinuteCache, klines: &[KLine]) {
+    for k in klines {
+        let s = bar_slot(k.date);
+        if s < MINUTE_SLOTS {
+            cache.closes[s] = k.close;
+            let nb = (s as u8).saturating_add(1);
+            if nb > cache.n_bars {
+                cache.n_bars = nb;
+            }
+        }
+    }
+    if let Some(last) = klines.last() {
+        cache.last_price = last.close;
+    }
 }

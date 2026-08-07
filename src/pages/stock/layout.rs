@@ -3,14 +3,14 @@ use embedded_graphics::pixelcolor::BinaryColor;
 use embedded_graphics::prelude::{Dimensions, DrawTarget, Point, Primitive, Size};
 use embedded_graphics::primitives::{Circle, Line, PrimitiveStyleBuilder, Rectangle, StrokeAlignment};
 use embedded_graphics::Drawable;
-use epd_waveshare::color::Black;
+use epd_waveshare::color::{Black, White};
 use u8g2_fonts::FontRenderer;
 use u8g2_fonts::fonts;
 use u8g2_fonts::types::{FontColor, HorizontalAlignment, VerticalPosition};
 
-use super::render_data::StockRenderData;
+use super::render_data::{OverviewRenderData, StockRenderData};
 use crate::display::EpdDisplay;
-use crate::model::stock::{fmt_price, fmt_signed, ChartMode, KLINE_CAP, RealtimeQuote, StockData};
+use crate::model::stock::{fmt_price, fmt_signed, ChartMode, KLINE_CAP, MINUTE_SLOTS, RealtimeQuote, StockData};
 use crate::widgets::kline::{draw_candles, draw_line, map_y, padded_range, visible_count};
 
 pub fn draw<D>(display: &mut D, data: &StockRenderData) -> Result<(), D::Error>
@@ -530,6 +530,205 @@ fn fmt_date(yyyymmdd: u64) -> heapless::String<12> {
     let d = md % 100;
     let _ = write!(s, "{}-{:02}-{:02}", y, m, d);
     s
+}
+
+/// 总览页：6 支股票分时小图网格（横屏 3×2，竖屏 2×3）。
+/// 每格：名称条（cursor 反相）+ 小分时折线（复用 draw_line）+ 现价/涨跌幅%。
+pub fn draw_overview<D>(display: &mut D, data: &OverviewRenderData) -> Result<(), D::Error>
+where
+    D: DrawTarget<Color = BinaryColor>,
+{
+    let w = data.w;
+    let h = data.h;
+    let font_small: FontRenderer = FontRenderer::new::<fonts::u8g2_font_wqy12_t_gb2312>();
+
+    // 状态栏（右上角，与明细一致）
+    let cy: i32 = 11;
+    if data.request_loading {
+        crate::widgets::draw_icon::draw_loading_icon(Point::new(w - 118, cy), display);
+    }
+    crate::widgets::draw_icon::draw_wifi_status(Point::new(w - 100, cy), display);
+    if let Some(percent) = data.battery_percent {
+        let _ = crate::widgets::battery::draw_battery(percent, Point::new(w - 60, 4), Black, &font_small, display);
+    }
+
+    let count = (data.storage.count as usize).min(6);
+    if count == 0 {
+        if !data.loading {
+            let _ = font_small.render_aligned(
+                "未配置股票",
+                Point::new(w / 2, h / 2),
+                VerticalPosition::Center, HorizontalAlignment::Center,
+                FontColor::Transparent(Black), display,
+            );
+        }
+        return Ok(());
+    }
+
+    // 顶部留 18px 状态栏
+    let top: i32 = 18;
+    let grid_h = h - top;
+    // 格宽够（≥120，容得下底部 当前/百分比/最低 三项）才用 3 列，否则 2 列。
+    // 2in7(264)→2 列；4in2(400)→3 列。
+    let cols: usize = if w / 3 >= 120 { 3 } else { 2 };
+    let rows: usize = 6 / cols; // 3→2, 2→3
+    let cell_w = w / cols as i32;
+    let cell_h = grid_h / rows as i32;
+    let pad: i32 = 3;
+    let name_h: i32 = 14;
+    let price_h: i32 = 13;
+
+    let border_style = |stroke: u32| PrimitiveStyleBuilder::new()
+        .stroke_color(Black).stroke_width(stroke).stroke_alignment(StrokeAlignment::Inside).build();
+
+    for i in 0..count {
+        let col = (i % cols) as i32;
+        let row = (i / cols) as i32;
+        let x0 = col * cell_w;
+        let y0 = top + row * cell_h;
+        let is_cur = i == data.cursor;
+
+        // 格子边框（cursor 加粗）
+        let cell = Rectangle::new(
+            Point::new(x0 + pad, y0 + pad),
+            Size::new((cell_w - pad * 2) as u32, (cell_h - pad * 2) as u32),
+        );
+        let _ = cell.into_styled(border_style(if is_cur { 2 } else { 1 })).draw(display);
+
+        // 名称条：cursor 反相填充 + 白字
+        let entry = &data.storage.entries[i];
+        let name_full = if entry.name.is_empty() { entry.code.as_str() } else { entry.name.as_str() };
+        if is_cur {
+            let strip = Rectangle::new(
+                Point::new(x0 + pad + 1, y0 + pad + 1),
+                Size::new((cell_w - pad * 2 - 2) as u32, (name_h - 1) as u32),
+            );
+            let _ = strip.into_styled(PrimitiveStyleBuilder::new().fill_color(Black).build()).draw(display);
+        }
+        let name_color = if is_cur { FontColor::Transparent(White) } else { FontColor::Transparent(Black) };
+        // 名称按格宽截断，右侧留约 50px 给最高价（wqy12 CJK≈12px/字）
+        let name_budget = (((cell_w - pad * 2 - 50) / 12) as usize).max(2);
+        let mut nm: heapless::String<24> = heapless::String::new();
+        for c in name_full.chars().take(name_budget) {
+            let _ = nm.push(c);
+        }
+        let _ = font_small.render_aligned(
+            nm.as_str(),
+            Point::new(x0 + pad + 3, y0 + pad + 1),
+            VerticalPosition::Top, HorizontalAlignment::Left,
+            name_color, display,
+        );
+
+        // 底部现价 + 涨跌幅% 的 y
+        let price_y = y0 + cell_h - pad - price_h;
+        // 分时小图区
+        let chart_top = y0 + pad + name_h;
+        let chart_h = (price_y - 2 - chart_top).max(8);
+        let chart = Rectangle::new(
+            Point::new(x0 + pad + 2, chart_top),
+            Size::new((cell_w - pad * 2 - 4) as u32, chart_h as u32),
+        );
+
+        let c = &data.cache[i];
+        let n = (c.n_bars as usize).min(MINUTE_SLOTS);
+        if c.date == 0 || n == 0 {
+            // 无数据（首次拉取中 / 拉取失败）：保留旧数据已在缓存，date==0 表示从未成功
+            let msg = if data.loading { "" } else { "拉取失败" };
+            if !msg.is_empty() {
+                let _ = font_small.render_aligned(
+                    msg,
+                    Point::new(x0 + cell_w / 2, (chart_top + price_y) / 2),
+                    VerticalPosition::Center, HorizontalAlignment::Center,
+                    FontColor::Transparent(Black), display,
+                );
+            }
+        } else {
+            let prices_all = &c.closes[..n];
+            // 跳过前后 0.00 空槽，中间空槽用前一个有效价填充（折线在空档平线，不跳水）
+            let start = prices_all.iter().position(|&p| p > 0.0).unwrap_or(0);
+            let end = prices_all.iter().rposition(|&p| p > 0.0).unwrap_or(0);
+            if start >= end {
+                continue;
+            }
+            let mut filled = [0.0f32; MINUTE_SLOTS];
+            let mut last = 0.0f32;
+            let mut filled_len = 0usize;
+            for &p in &prices_all[start..=end] {
+                if p > 0.0 {
+                    last = p;
+                }
+                filled[filled_len] = last;
+                filled_len += 1;
+            }
+            let prices = &filled[..filled_len];
+            let n_eff = prices.len();
+            // 当天最高/最低（填充后值与原始有效价一致）
+            let mut lo = f32::MAX;
+            let mut hi = f32::MIN;
+            for &p in prices {
+                if p < lo { lo = p; }
+                if p > hi { hi = p; }
+            }
+            let cur = c.last_price;
+
+            // 小图：折线 + 最高/最低横虚线 + 当前点（参考单支大分时）
+            if n_eff >= 2 && hi > lo {
+                let _ = draw_line(display, chart, prices);
+                let (plo, phi) = padded_range(lo, hi);
+                let itop = chart.top_left.y;
+                let ih = chart.size.height as i32;
+                let ix0 = chart.top_left.x;
+                let iw = chart.size.width as i32;
+                let y_high = map_y(hi, plo, phi, itop, ih);
+                let y_low = map_y(lo, plo, phi, itop, ih);
+                let y_cur = map_y(cur, plo, phi, itop, ih);
+                let _ = draw_dashed_hline(display, ix0, y_high, iw);
+                let _ = draw_dashed_hline(display, ix0, y_low, iw);
+                let dot = PrimitiveStyleBuilder::new().fill_color(Black).build();
+                let _ = Circle::new(Point::new(ix0 + iw - 2, y_cur - 2), 4)
+                    .into_styled(dot).draw(display);
+            }
+
+            // 名称行右侧：最高价（cursor 格名称条反相 → 用白字）
+            let hi_color = if is_cur { FontColor::Transparent(White) } else { FontColor::Transparent(Black) };
+            let _ = font_small.render_aligned(
+                fmt_price(hi).as_str(),
+                Point::new(x0 + cell_w - pad - 2, y0 + pad + 1),
+                VerticalPosition::Top, HorizontalAlignment::Right,
+                hi_color, display,
+            );
+
+            // 底部：当前价（左）+ 涨跌幅%（中，真实昨收基准）+ 最低价（右）
+            let _ = font_small.render_aligned(
+                fmt_price(cur).as_str(),
+                Point::new(x0 + pad + 2, price_y),
+                VerticalPosition::Top, HorizontalAlignment::Left,
+                FontColor::Transparent(Black), display,
+            );
+            let change_pct = if c.preclose > 0.0 {
+                (cur - c.preclose) / c.preclose * 100.0
+            } else {
+                0.0
+            };
+            let mut pct: heapless::String<20> = heapless::String::new();
+            let _ = pct.push_str(fmt_signed(change_pct).as_str());
+            let _ = pct.push('%');
+            let _ = font_small.render_aligned(
+                pct.as_str(),
+                Point::new(x0 + cell_w / 2, price_y),
+                VerticalPosition::Top, HorizontalAlignment::Center,
+                FontColor::Transparent(Black), display,
+            );
+            let _ = font_small.render_aligned(
+                fmt_price(lo).as_str(),
+                Point::new(x0 + cell_w - pad - 2, price_y),
+                VerticalPosition::Top, HorizontalAlignment::Right,
+                FontColor::Transparent(Black), display,
+            );
+        }
+    }
+
+    Ok(())
 }
 
 pub fn sleep_renderer(display: &mut EpdDisplay) {

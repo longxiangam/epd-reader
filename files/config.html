@@ -243,7 +243,7 @@
     </div>
     <div id="stock" class="tab-content">
         <form id="stockForm">
-            <p style="margin:0 0 10px;font-weight:normal;">最多配置 5 支，保存后在设备「设置」中切换。代码留空的行会被忽略。</p>
+            <p style="margin:0 0 10px;font-weight:normal;">最多配置 6 支，保存后在设备「设置」中切换。代码留空的行会被忽略。</p>
             <label for="code0">① 代码:</label>
             <input type="text" id="code0" name="code0" placeholder="sh600519" required />
             <label for="name0">① 名称:</label>
@@ -264,6 +264,10 @@
             <input type="text" id="code4" name="code4" />
             <label for="name4">⑤ 名称:</label>
             <input type="text" id="name4" name="name4" />
+            <label for="code5">⑥ 代码:</label>
+            <input type="text" id="code5" name="code5" />
+            <label for="name5">⑥ 名称:</label>
+            <input type="text" id="name5" name="name5" />
             <input type="submit" value="保存配置" />
             <div id="stockMessage" class="message"></div>
         </form>
@@ -785,7 +789,7 @@
             }
             if (cfg.stocks) {
                 cfg.stocks.forEach((s, i) => {
-                    if (i < 5) {
+                    if (i < 6) {
                         document.getElementById('code' + i).value = s.code || '';
                         document.getElementById('name' + i).value = s.name || '';
                     }

@@ -6,6 +6,7 @@ use embassy_time::{Duration, Timer};
 use embedded_graphics::Drawable;
 use embedded_graphics::prelude::{Point, Size};
 use embedded_graphics::primitives::{PrimitiveStyleBuilder, Rectangle, StrokeAlignment};
+use embedded_graphics::primitives::rounded_rectangle::{RoundedRectangle, CornerRadii};
 use embedded_graphics::prelude::Primitive;
 use epd_waveshare::color::{Black, Color, White};
 use epd_waveshare::graphics::{Display, DisplayRotation};
@@ -14,9 +15,7 @@ use esp_println::println;
 use heapless::{String, Vec};
 use u8g2_fonts::FontRenderer;
 use u8g2_fonts::fonts;
-use u8g2_fonts::U8g2TextStyle;
 use u8g2_fonts::types::{FontColor, HorizontalAlignment, VerticalPosition};
-use embedded_text::TextBox;
 use crate::display::{display_mut, RENDER_CHANNEL, RenderInfo};
 use crate::{display, epd2in9_txt, event};
 use crate::epd2in9_txt::TxtReader;
@@ -503,6 +502,10 @@ impl ReadPage {
         let font = if menu_item_height < 18 { &font12 } else { &font14 };
         let menu_width: u32 = if vw < 200 { vw - 16 } else { 180 };
 
+        // 圆角美化：菜单面板与选中高亮统一使用圆角（小屏用小半径）。
+        let corner: u32 = if compact { 3 } else { 6 };
+        let corners = CornerRadii::new(Size::new_equal(corner));
+
         let box_style = PrimitiveStyleBuilder::new()
             .fill_color(White)
             .stroke_color(Black)
@@ -517,18 +520,24 @@ impl ReadPage {
                 let menu_x = ((vw - menu_width) / 2) as i32;
                 let menu_y = ((vh - menu_height) / 2) as i32;
 
-                Rectangle::new(Point::new(menu_x, menu_y), Size::new(menu_width, menu_height))
-                    .into_styled(box_style)
-                    .draw(display)
-                    .ok();
+                RoundedRectangle::new(
+                    Rectangle::new(Point::new(menu_x, menu_y), Size::new(menu_width, menu_height)),
+                    corners,
+                )
+                .into_styled(box_style)
+                .draw(display)
+                .ok();
 
                 for (i, label) in MENU_ITEMS.iter().enumerate() {
                     let item_y = menu_y + menu_padding as i32 + (i as u32 * menu_item_height) as i32;
                     let is_selected = i as u32 == menu_index;
                     if is_selected {
-                        Rectangle::new(
-                            Point::new(menu_x + 4, item_y),
-                            Size::new(menu_width - 8, menu_item_height),
+                        RoundedRectangle::new(
+                            Rectangle::new(
+                                Point::new(menu_x + 4, item_y),
+                                Size::new(menu_width - 8, menu_item_height),
+                            ),
+                            corners,
                         )
                         .into_styled(PrimitiveStyleBuilder::new().fill_color(Black).build())
                         .draw(display)
@@ -573,10 +582,13 @@ impl ReadPage {
                 let jump_y = ((vh - jump_height) / 2) as i32;
                 let center_x = (vw / 2) as i32;
 
-                Rectangle::new(Point::new(jump_x, jump_y), Size::new(menu_width, jump_height))
-                    .into_styled(box_style)
-                    .draw(display)
-                    .ok();
+                RoundedRectangle::new(
+                    Rectangle::new(Point::new(jump_x, jump_y), Size::new(menu_width, jump_height)),
+                    corners,
+                )
+                .into_styled(box_style)
+                .draw(display)
+                .ok();
 
                 font.render_aligned(
                     "跳转进度",
@@ -621,10 +633,13 @@ impl ReadPage {
                 let y = ((vh - h) / 2) as i32;
                 let cx = x + menu_width as i32 / 2;
 
-                Rectangle::new(Point::new(x, y), Size::new(menu_width, h))
-                    .into_styled(box_style)
-                    .draw(display)
-                    .ok();
+                RoundedRectangle::new(
+                    Rectangle::new(Point::new(x, y), Size::new(menu_width, h)),
+                    corners,
+                )
+                .into_styled(box_style)
+                .draw(display)
+                .ok();
 
                 font.render_aligned(
                     "排版设置",
@@ -670,10 +685,13 @@ impl ReadPage {
                 let y: i32 = 10;
                 let cx = x + menu_width as i32 / 2;
 
-                Rectangle::new(Point::new(x, y), Size::new(menu_width, h))
-                    .into_styled(box_style)
-                    .draw(display)
-                    .ok();
+                RoundedRectangle::new(
+                    Rectangle::new(Point::new(x, y), Size::new(menu_width, h)),
+                    corners,
+                )
+                .into_styled(box_style)
+                .draw(display)
+                .ok();
 
                 font.render_aligned(
                     "选择字体",
@@ -727,9 +745,12 @@ impl ReadPage {
                     let is_sel = fi == font_index;
                     let is_cur = name.as_str() == self.font_name.as_str();
                     if is_sel {
-                        Rectangle::new(
-                            Point::new(x + 3, iy),
-                            Size::new(menu_width - 6, item_h as u32),
+                        RoundedRectangle::new(
+                            Rectangle::new(
+                                Point::new(x + 3, iy),
+                                Size::new(menu_width - 6, item_h as u32),
+                            ),
+                            corners,
                         )
                         .into_styled(PrimitiveStyleBuilder::new().fill_color(Black).build())
                         .draw(display)
@@ -770,25 +791,29 @@ impl ReadPage {
                 let margin: i32 = 8;
                 let gap: i32 = 6;
                 let total_h = vh as i32 - margin * 2;
-                let list_h = total_h / 3;
-                let preview_h = total_h - list_h - gap;
+                // 列表为主体（原 list=1/3 时只看得到 1 个书签），预览缩到约 1/3
+                let preview_h = total_h / 3;
+                let list_h = total_h - preview_h - gap;
                 let list_x = ((vw as i32 - menu_width as i32) / 2) as i32;
                 let list_y = margin;
                 let list_right = list_x + menu_width as i32;
                 let preview_x: i32 = 0;
                 let preview_y = margin + list_h + gap;
 
-                Rectangle::new(Point::new(list_x, list_y), Size::new(menu_width, list_h as u32))
-                    .into_styled(
-                        PrimitiveStyleBuilder::new()
-                            .fill_color(White)
-                            .stroke_color(Black)
-                            .stroke_alignment(StrokeAlignment::Inside)
-                            .stroke_width(2)
-                            .build(),
-                    )
-                    .draw(display)
-                    .ok();
+                RoundedRectangle::new(
+                    Rectangle::new(Point::new(list_x, list_y), Size::new(menu_width, list_h as u32)),
+                    corners,
+                )
+                .into_styled(
+                    PrimitiveStyleBuilder::new()
+                        .fill_color(White)
+                        .stroke_color(Black)
+                        .stroke_alignment(StrokeAlignment::Inside)
+                        .stroke_width(2)
+                        .build(),
+                )
+                .draw(display)
+                .ok();
 
                 let title_h: i32 = 18;
                 let title = if deleting { "删除书签" } else { "书签列表" };
@@ -812,10 +837,13 @@ impl ReadPage {
                 let cancel_y = list_y + list_h - 4 - cancel_h;
                 let is_cancel_selected = bm_index >= bm_count;
                 if is_cancel_selected {
-                    Rectangle::new(Point::new(list_x + 3, cancel_y), Size::new(menu_width - 6, menu_item_height))
-                        .into_styled(PrimitiveStyleBuilder::new().fill_color(Black).build())
-                        .draw(display)
-                        .ok();
+                    RoundedRectangle::new(
+                        Rectangle::new(Point::new(list_x + 3, cancel_y), Size::new(menu_width - 6, menu_item_height)),
+                        corners,
+                    )
+                    .into_styled(PrimitiveStyleBuilder::new().fill_color(Black).build())
+                    .draw(display)
+                    .ok();
                 }
                 let cancel_color = if is_cancel_selected { FontColor::Transparent(White) } else { FontColor::Transparent(Black) };
                 let cancel_prefix = if is_cancel_selected { "> " } else { "  " };
@@ -861,9 +889,12 @@ impl ReadPage {
                     let item_y = scroll_top + (vi as i32) * item_h_i;
                     let is_selected = bi == bm_index;
                     if is_selected {
-                        Rectangle::new(
-                            Point::new(list_x + 3, item_y),
-                            Size::new((text_right - list_x - 3) as u32, menu_item_height),
+                        RoundedRectangle::new(
+                            Rectangle::new(
+                                Point::new(list_x + 3, item_y),
+                                Size::new((text_right - list_x - 3) as u32, menu_item_height),
+                            ),
+                            corners,
                         )
                         .into_styled(PrimitiveStyleBuilder::new().fill_color(Black).build())
                         .draw(display)
@@ -911,18 +942,21 @@ impl ReadPage {
                     .ok();
                 }
 
-                // 预览区（全屏宽，2/3 高）
-                Rectangle::new(Point::new(preview_x, preview_y), Size::new(vw, preview_h as u32))
-                    .into_styled(
-                        PrimitiveStyleBuilder::new()
-                            .fill_color(White)
-                            .stroke_color(Black)
-                            .stroke_alignment(StrokeAlignment::Inside)
-                            .stroke_width(1)
-                            .build(),
-                    )
-                    .draw(display)
-                    .ok();
+                // 预览区（全屏宽，约 1/3 高）
+                RoundedRectangle::new(
+                    Rectangle::new(Point::new(preview_x, preview_y), Size::new(vw, preview_h as u32)),
+                    corners,
+                )
+                .into_styled(
+                    PrimitiveStyleBuilder::new()
+                        .fill_color(White)
+                        .stroke_color(Black)
+                        .stroke_alignment(StrokeAlignment::Inside)
+                        .stroke_width(1)
+                        .build(),
+                )
+                .draw(display)
+                .ok();
 
                 if bm_count > 0
                     && bm_index < bm_count
@@ -930,15 +964,71 @@ impl ReadPage {
                     && preview_h > 12
                 {
                     use embedded_graphics::draw_target::DrawTargetExt;
+                    let pad_x = preview_x + 4;
+                    let top = preview_y + 4;
+                    let bottom = top + (preview_h as i32) - 8;
                     let clip = Rectangle::new(
-                        Point::new(preview_x + 4, preview_y + 4),
+                        Point::new(pad_x, top),
                         Size::new(vw - 8, (preview_h - 8) as u32),
                     );
                     let mut clipped_display = display.clipped(&clip);
-                    // TextBox 按裁剪区宽度自动换行（render_aligned 不换行，只能看到一行）
-                    let style = U8g2TextStyle::new(fonts::u8g2_font_wqy14_t_gb2312, Black);
-                    let _ = TextBox::new(self.bookmark_preview.as_str(), clip, style)
-                        .draw(&mut clipped_display);
+                    // 手动折行 + render_aligned 逐行绘制（与正文一致的渲染方式）：
+                    // TextBox 在 u8g2 字体下行高/基线会让每行顶部被裁。
+                    // 宽度按等宽近似（CJK≈15、ASCII≈8），略高估以免右侧贴边被裁。
+                    let full_w: i32 = 15;
+                    let half_w: i32 = 8;
+                    let line_h: i32 = 16;
+                    let max_w = (vw as i32) - 8;
+                    let mut emit = |s: &str, y: i32| {
+                        let _ = font.render_aligned(
+                            s,
+                            Point::new(pad_x, y),
+                            VerticalPosition::Center,
+                            HorizontalAlignment::Left,
+                            FontColor::Transparent(Black),
+                            &mut clipped_display,
+                        );
+                    };
+                    let bytes = self.bookmark_preview.as_bytes();
+                    let mut y_center = top + line_h / 2;
+                    let mut line_start = 0usize;
+                    let mut i = 0usize;
+                    let mut w = 0i32;
+                    while i < bytes.len() {
+                        let b = bytes[i];
+                        let is_nl = b == b'\n';
+                        let clen = match b {
+                            0..=0x7F => 1,
+                            0xC0..=0xDF => 2,
+                            0xE0..=0xEF => 3,
+                            0xF0..=0xF7 => 4,
+                            _ => 1,
+                        };
+                        let clen = clen.min(bytes.len() - i);
+                        let cw = if b < 0x80 { half_w } else { full_w };
+                        if is_nl || w + cw > max_w {
+                            if line_start < i {
+                                if let Ok(s) = core::str::from_utf8(&bytes[line_start..i]) {
+                                    emit(s, y_center);
+                                }
+                            }
+                            y_center += line_h;
+                            line_start = if is_nl { i + clen } else { i };
+                            w = if is_nl { 0 } else { cw };
+                            if is_nl {
+                                i += clen;
+                                continue;
+                            }
+                        } else {
+                            w += cw;
+                        }
+                        i += clen;
+                    }
+                    if line_start < bytes.len() && y_center - line_h / 2 <= bottom {
+                        if let Ok(s) = core::str::from_utf8(&bytes[line_start..]) {
+                            emit(s, y_center);
+                        }
+                    }
                 }
             }
             MenuState::Closed => {}
@@ -1473,7 +1563,8 @@ impl Page for ReadPage {
                                                 }
                                             }
                                         }
-                                        self.bookmark_preview.clear();
+                                        // 删除后重载当前选中项预览（交由下方 need_load_preview 块读取）
+                                        self.need_load_preview = true;
                                         self.need_render = true;
                                     }
 
@@ -1683,7 +1774,13 @@ impl Page for ReadPage {
                         mut_ref.bookmark_preview.clear();
                         mut_ref.need_render = true;
                     }
+                    MenuState::Popup { .. } => {
+                        // 主菜单打开时长按 3：关闭菜单，继续阅读（而非返回书单）
+                        mut_ref.menu_state = MenuState::Closed;
+                        mut_ref.need_render = true;
+                    }
                     _ => {
+                        // 菜单未打开（Closed）时长按 3：返回书单
                         if mut_ref.reading {
                             mut_ref.reading = false;
                             unsafe {
@@ -1727,7 +1824,7 @@ impl Page for ReadPage {
                             }
                             3 => {
                                 mut_ref.menu_state = MenuState::BookmarkList { bm_index: 0, deleting: true };
-                                mut_ref.bookmark_preview.clear();
+                                mut_ref.need_load_preview = true;
                                 mut_ref.need_render = true;
                                 return;
                             }
@@ -1758,13 +1855,16 @@ impl Page for ReadPage {
                                 return;
                             }
                             7 => {
-                                // 旋转屏幕
+                                // 旋转屏幕：保持菜单打开，便于连续旋转（再按 Key3 继续转，
+                                // 移走光标或选“取消”关闭菜单）
                                 mut_ref.rotate = (mut_ref.rotate + 1) % 4;
                                 super::set_rotation_state(mut_ref.rotate);
                                 if let Some(display) = display_mut() {
                                     display.set_rotation(super::current_rotation());
                                 }
                                 mut_ref.save_reading_settings();
+                                mut_ref.need_render = true;
+                                return;
                             }
                             8 => {
                                 crate::sleep::refresh_active_time().await;
@@ -1887,9 +1987,7 @@ impl Page for ReadPage {
                             .unwrap_or(0) as u32;
                         if *bm_index < bm_count {
                             *bm_index += 1;
-                            if !deleting {
-                                mut_ref.need_load_preview = true;
-                            }
+                            mut_ref.need_load_preview = true;
                             mut_ref.need_render = true;
                             Timer::after_millis(200).await;
                         }
@@ -1951,9 +2049,7 @@ impl Page for ReadPage {
                     MenuState::BookmarkList { ref mut bm_index, deleting } => {
                         if *bm_index > 0 {
                             *bm_index -= 1;
-                            if !deleting {
-                                mut_ref.need_load_preview = true;
-                            }
+                            mut_ref.need_load_preview = true;
                             mut_ref.need_render = true;
                             Timer::after_millis(200).await;
                         }
@@ -2025,9 +2121,7 @@ impl Page for ReadPage {
                             .unwrap_or(0) as u32;
                         if *bm_index < bm_count {
                             *bm_index += 1;
-                            if !deleting {
-                                mut_ref.need_load_preview = true;
-                            }
+                            mut_ref.need_load_preview = true;
                             mut_ref.need_render = true;
                         }
                     }
@@ -2087,9 +2181,7 @@ impl Page for ReadPage {
                     MenuState::BookmarkList { ref mut bm_index, deleting } => {
                         if *bm_index > 0 {
                             *bm_index -= 1;
-                            if !deleting {
-                                mut_ref.need_load_preview = true;
-                            }
+                            mut_ref.need_load_preview = true;
                             mut_ref.need_render = true;
                         }
                     }

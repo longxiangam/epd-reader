@@ -210,7 +210,7 @@ async fn handle_get_config(socket: &mut TcpSocket<'_>) {
     body.push_str("},\"display\":{\"full_refresh\":");
     body.push_str(&alloc::format!("{}", crate::display::get_full_refresh_times()));
     body.push_str("},\"stocks\":[");
-    for i in 0..(stock.count as usize).min(5) {
+    for i in 0..(stock.count as usize).min(6) {
         if i > 0 { body.push(','); }
         body.push_str("{\"code\":");
         json_str(&mut body, stock.entries[i].code.as_str());
@@ -944,9 +944,9 @@ async fn handle_configure_stock(socket: &mut TcpSocket<'_>, req: &httparse::Requ
     println!("stock form_data:{:?}", form_fields);
 
     if let Ok(fields) = form_fields {
-        // 收集 code0..code4 / name0..name4
-        let mut codes: [Option<&str>; 5] = [None; 5];
-        let mut names: [Option<&str>; 5] = [None; 5];
+        // 收集 code0..code5 / name0..name5
+        let mut codes: [Option<&str>; 6] = [None; 6];
+        let mut names: [Option<&str>; 6] = [None; 6];
         for field in fields {
             let (kind, idx) = if let Some(s) = field.0.strip_prefix("code") {
                 ("code", s)
@@ -956,7 +956,7 @@ async fn handle_configure_stock(socket: &mut TcpSocket<'_>, req: &httparse::Requ
                 continue;
             };
             let i: usize = idx.parse().unwrap_or(99);
-            if i >= 5 {
+            if i >= 6 {
                 continue;
             }
             match kind {
@@ -967,7 +967,7 @@ async fn handle_configure_stock(socket: &mut TcpSocket<'_>, req: &httparse::Requ
 
         let mut stock_storage = crate::storage::StockStorage::read().unwrap_or_default();
         let mut count: u8 = 0;
-        for i in 0..5 {
+        for i in 0..6 {
             if let Some(c) = codes[i] {
                 if !c.is_empty() {
                     let idx = count as usize;

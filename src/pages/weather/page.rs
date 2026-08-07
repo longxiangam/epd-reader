@@ -216,7 +216,8 @@ impl Page for WeatherPage {
             });
         }).await;
         // 短按3退出
-        event::on_target(EventType::KeyShort(3), Self::mut_to_ptr(self), move |info| {
+        // 长按3：返回主界面（统一交互）
+        event::on_target(EventType::KeyLongEnd(3), Self::mut_to_ptr(self), move |info| {
             return Box::pin(async move {
                 let mut_ref: &mut Self = Self::mut_by_ptr(info.ptr).unwrap();
                 mut_ref.running = false;

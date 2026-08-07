@@ -174,7 +174,7 @@ pub struct ErrorLogStorage{
 
 const TIMER_LOG_END_OFFSET:usize = ERROR_LOG_OFFSET + size_of::<ErrorLogStorage>();
 
-//股票配置：最多 5 支（代码 + 名称），selected 为当前选用索引
+//股票配置：最多 6 支（代码 + 名称），selected 为当前选用索引
 #[derive(Clone, Default, Debug)]
 pub struct StockEntry{
     pub code:heapless::String<16>,
@@ -183,8 +183,8 @@ pub struct StockEntry{
 
 #[derive(Clone, Debug)]
 pub struct StockStorage{
-    pub entries:[StockEntry;5],
-    pub count:u8,       // 实际配置数量 0..=5
+    pub entries:[StockEntry;6],
+    pub count:u8,       // 实际配置数量 0..=6
     pub selected:u8,    // 当前选用索引 0..count
 }
 impl Default for StockStorage{
@@ -192,7 +192,7 @@ impl Default for StockStorage{
         Self{
             entries:[
                 StockEntry::default(),StockEntry::default(),StockEntry::default(),
-                StockEntry::default(),StockEntry::default(),
+                StockEntry::default(),StockEntry::default(),StockEntry::default(),
             ],
             count:0,
             selected:0,

@@ -104,7 +104,11 @@ impl MainPage {
         Self::bind_event(MAIN_PAGE.lock().await.as_mut().unwrap()).await;
 
         if page_index > -1 {
-            MAIN_PAGE.lock().await.as_mut().unwrap().current_page = Some(page_index as u32);
+            let mut guard = MAIN_PAGE.lock().await;
+            let mp = guard.as_mut().unwrap();
+            mp.current_page = Some(page_index as u32);
+            // 焦点与自动打开的应用保持一致：返回主界面后停留在该应用，而非回到第 0 个
+            mp.choose_index = page_index as u32;
         }else{
             MAIN_PAGE.lock().await.as_mut().unwrap().current_page = None;
         }
