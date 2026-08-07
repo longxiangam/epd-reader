@@ -585,6 +585,61 @@ pub fn bar_slot(date: u64) -> usize {
     mins_to_slot(hh * 60 + mm)
 }
 
+/// 日内槽 → 近似时间戳（YYYYMMDDHHMMSS），供明细页时间标签/跨天检测。
+/// slot 0..23 → AM 9:30+i*5, slot 24..47 → PM 13:00+(i-24)*5。
+pub fn slot_to_date(yyyymmdd: u32, slot: usize) -> u64 {
+    let mins = if slot < 24 { 570 + slot * 5 } else { 780 + (slot - 24) * 5 };
+    let hh = mins / 60;
+    let mm = mins % 60;
+    (yyyymmdd as u64) * 1_000_000 + (hh as u64) * 10000 + (mm as u64) * 100
+}
+
+/// 从 rtc_fast 分时缓存构造 StockData（供明细分时模式复用，免去网络拉取）。
+/// closes[0..n_bars] → KLine（date 近似、OHLC=close），含真实昨收。
+pub fn stock_data_from_cache(
+    cache: &StockMinuteCache,
+    code: &str,
+    name: &str,
+) -> Option<Box<StockData>> {
+    if cache.date == 0 || cache.n_bars == 0 {
+        return None;
+    }
+    let mut klines: heapless::Vec<KLine, KLINE_CAP> = heapless::Vec::new();
+    let n = (cache.n_bars as usize).min(MINUTE_SLOTS);
+    for i in 0..n {
+        let c = cache.closes[i];
+        if c > 0.0 {
+            let _ = klines.push(KLine {
+                date: slot_to_date(cache.date, i),
+                open: c,
+                close: c,
+                high: c,
+                low: c,
+            });
+        }
+    }
+    if klines.is_empty() {
+        return None;
+    }
+    let last_price = cache.last_price;
+    let preclose = cache.preclose;
+    let mut code_s: String<10> = String::new();
+    let _ = code_s.push_str(code);
+    let mut name_s: String<32> = String::new();
+    let _ = name_s.push_str(name);
+    Some(Box::new(StockData {
+        mode: ChartMode::Minute,
+        klines,
+        last_price,
+        preclose,
+        change: last_price - preclose,
+        change_pct: if preclose > 0.0 { (last_price - preclose) / preclose * 100.0 } else { 0.0 },
+        code: code_s,
+        name: name_s,
+        quote: None,
+    }))
+}
+
 /// 当前时间 → 日内槽。
 pub fn now_slot(now: &OffsetDateTime) -> usize {
     mins_to_slot(now.hour() as i32 * 60 + now.minute() as i32)

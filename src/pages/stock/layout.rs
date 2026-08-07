@@ -2,6 +2,7 @@ use core::fmt::Write;
 use embedded_graphics::pixelcolor::BinaryColor;
 use embedded_graphics::prelude::{Dimensions, DrawTarget, Point, Primitive, Size};
 use embedded_graphics::primitives::{Circle, Line, PrimitiveStyleBuilder, Rectangle, StrokeAlignment};
+use embedded_graphics::primitives::rounded_rectangle::{RoundedRectangle, CornerRadii};
 use embedded_graphics::Drawable;
 use epd_waveshare::color::{Black, White};
 use u8g2_fonts::FontRenderer;
@@ -574,12 +575,13 @@ where
     let rows: usize = 6 / cols; // 3→2, 2→3
     let cell_w = w / cols as i32;
     let cell_h = grid_h / rows as i32;
-    let pad: i32 = 3;
+    let pad: i32 = 1;
     let name_h: i32 = 14;
     let price_h: i32 = 13;
 
     let border_style = |stroke: u32| PrimitiveStyleBuilder::new()
         .stroke_color(Black).stroke_width(stroke).stroke_alignment(StrokeAlignment::Inside).build();
+    let corners = CornerRadii::new(Size::new_equal(4));
 
     for i in 0..count {
         let col = (i % cols) as i32;
@@ -588,10 +590,13 @@ where
         let y0 = top + row * cell_h;
         let is_cur = i == data.cursor;
 
-        // 格子边框（cursor 加粗）
-        let cell = Rectangle::new(
-            Point::new(x0 + pad, y0 + pad),
-            Size::new((cell_w - pad * 2) as u32, (cell_h - pad * 2) as u32),
+        // 格子边框（cursor 加粗，圆角美化）
+        let cell = RoundedRectangle::new(
+            Rectangle::new(
+                Point::new(x0 + pad, y0 + pad),
+                Size::new((cell_w - pad * 2) as u32, (cell_h - pad * 2) as u32),
+            ),
+            corners,
         );
         let _ = cell.into_styled(border_style(if is_cur { 2 } else { 1 })).draw(display);
 
@@ -689,18 +694,18 @@ where
                     .into_styled(dot).draw(display);
             }
 
-            // 名称行右侧：最高价（cursor 格名称条反相 → 用白字）
-            let hi_color = if is_cur { FontColor::Transparent(White) } else { FontColor::Transparent(Black) };
-            let _ = font_small.render_aligned(
-                fmt_price(hi).as_str(),
-                Point::new(x0 + cell_w - pad - 2, y0 + pad + 1),
-                VerticalPosition::Top, HorizontalAlignment::Right,
-                hi_color, display,
-            );
-
-            // 底部：当前价（左）+ 涨跌幅%（中，真实昨收基准）+ 最低价（右）
+            // 名称行右侧：当前价（cursor 格名称条反相 → 用白字）
+            let top_right_color = if is_cur { FontColor::Transparent(White) } else { FontColor::Transparent(Black) };
             let _ = font_small.render_aligned(
                 fmt_price(cur).as_str(),
+                Point::new(x0 + cell_w - pad - 2, y0 + pad + 1),
+                VerticalPosition::Top, HorizontalAlignment::Right,
+                top_right_color, display,
+            );
+
+            // 底部：最低（左）+ 涨跌幅%（中，真实昨收基准）+ 最高（右）
+            let _ = font_small.render_aligned(
+                fmt_price(lo).as_str(),
                 Point::new(x0 + pad + 2, price_y),
                 VerticalPosition::Top, HorizontalAlignment::Left,
                 FontColor::Transparent(Black), display,
@@ -720,7 +725,7 @@ where
                 FontColor::Transparent(Black), display,
             );
             let _ = font_small.render_aligned(
-                fmt_price(lo).as_str(),
+                fmt_price(hi).as_str(),
                 Point::new(x0 + cell_w - pad - 2, price_y),
                 VerticalPosition::Top, HorizontalAlignment::Right,
                 FontColor::Transparent(Black), display,

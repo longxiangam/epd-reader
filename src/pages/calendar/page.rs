@@ -180,7 +180,7 @@ impl Page for CalendarPage {
     async fn bind_event(&mut self) {
         event::clear().await;
         // 上一月
-        event::on_target(EventType::KeyLongEnd(1), Self::mut_to_ptr(self), move |info| {
+        event::on_target(EventType::KeyShort(1), Self::mut_to_ptr(self), move |info| {
             return Box::pin(async move {
                 let mut_ref: &mut Self = Self::mut_by_ptr(info.ptr).unwrap();
                 if let Some(ref mut clock) = mut_ref.current_date {
@@ -204,7 +204,7 @@ impl Page for CalendarPage {
             });
         }).await;
         // 下一月
-        event::on_target(EventType::KeyLongEnd(2), Self::mut_to_ptr(self), move |info| {
+        event::on_target(EventType::KeyShort(2), Self::mut_to_ptr(self), move |info| {
             return Box::pin(async move {
                 let mut_ref: &mut Self = Self::mut_by_ptr(info.ptr).unwrap();
                 if let Some(ref mut clock) = mut_ref.current_date {
@@ -238,8 +238,8 @@ impl Page for CalendarPage {
                 }
             });
         }).await;
-        // 短按1刷新天气
-        event::on_target(EventType::KeyShort(1), Self::mut_to_ptr(self), move |info| {
+        // 长按1刷新天气
+        event::on_target(EventType::KeyLongEnd(1), Self::mut_to_ptr(self), move |info| {
             return Box::pin(async move {
                 crate::wifi::set_request_loading(true);
                 let mut_ref: &mut Self = Self::mut_by_ptr(info.ptr).unwrap();
@@ -255,8 +255,8 @@ impl Page for CalendarPage {
                 crate::display::QUICKLY_LUT_CHANNEL.send(true).await;
             });
         }).await;
-        // 短按2刷新节假日
-        event::on_target(EventType::KeyShort(2), Self::mut_to_ptr(self), move |info| {
+        // 长按2刷新节假日
+        event::on_target(EventType::KeyLongEnd(2), Self::mut_to_ptr(self), move |info| {
             return Box::pin(async move {
                 crate::wifi::set_request_loading(true);
                 let mut_ref: &mut Self = Self::mut_by_ptr(info.ptr).unwrap();

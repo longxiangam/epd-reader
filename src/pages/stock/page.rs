@@ -25,6 +25,14 @@ use time::OffsetDateTime;
 #[ram(unstable(rtc_fast))]
 static mut STOCK_MODE: u8 = 4; // 默认分时（Minute=4）
 
+/// 股票当前视图：0=总览，1=明细。存 rtc_fast，深睡唤醒后恢复到上次视图。
+#[ram(unstable(rtc_fast))]
+static mut STOCK_VIEW: u8 = 0;
+
+/// 上次总览拉取的 RTC 毫秒时间戳。跨深睡保留，用于判断是否跳过重复拉取。
+#[ram(unstable(rtc_fast))]
+static mut STOCK_LAST_FETCH_MS: u64 = 0;
+
 /// 6 支股票当日分时缓存（rtc_fast，跨深睡保留）：close[48] 按日内槽位 + 真实昨收。
 /// 总览页据此做增量拉取（只取上次之后的根数并合并）与累积渲染（图表不清空），
 /// 昨收只在首次/跨日查一次实时行情。约 1.3KB（8KB rtc_fast 内）。
@@ -42,6 +50,8 @@ pub struct StockPage {
     pub(crate) need_render: bool,
     /// 回调置位、run 循环消费：拉取数据（fetch 移出回调，避免阻塞按键）。
     pub(crate) need_fetch: bool,
+    /// 强制走网络拉取（跳过缓存），长按 Key1 手动刷新时置位。
+    pub(crate) force_fetch: bool,
     /// 回调置位、run 循环消费：用全刷 LUT 重绘当前数据（同源切换，如 Day↔折线）。
     pub(crate) need_clean_render: bool,
     pub(crate) mode: ChartMode,
@@ -55,6 +65,8 @@ pub struct StockPage {
 
 impl StockPage {
     async fn back(&mut self) {
+        // 退出到主界面：重置视图为总览，下次进入从总览开始
+        unsafe { *core::ptr::addr_of_mut!(STOCK_VIEW) = 0; }
         self.running = false;
     }
 
@@ -119,6 +131,7 @@ impl StockPage {
         let _ = ss.write();
         self.mode = ChartMode::decode(unsafe { *core::ptr::addr_of!(STOCK_MODE) });
         self.view = StockView::Detail;
+        unsafe { *core::ptr::addr_of_mut!(STOCK_VIEW) = 1; }
         self.data = None;
         self.err_msg = None;
         self.need_fetch = true;
@@ -127,6 +140,11 @@ impl StockPage {
     /// 明细返回总览：复用已缓存 overview，不重拉。
     fn back_to_overview(&mut self) {
         self.view = StockView::Overview;
+        unsafe { *core::ptr::addr_of_mut!(STOCK_VIEW) = 0; }
+        // cursor 恢复到 selected（刚从该支明细返回）
+        let ss = crate::storage::StockStorage::read().unwrap_or_default();
+        let c = (ss.count as usize).min(6);
+        self.cursor = if c > 0 { (ss.selected as usize).min(c - 1) } else { 0 };
         self.need_render = true;
     }
 
@@ -243,8 +261,35 @@ impl StockPage {
         } else {
             (DEFAULT_STOCK, "")
         };
+        // 分时模式优先复用总览 rtc_fast 缓存（免去网络拉取，秒进）；force_fetch 时跳过
+        if self.mode.is_minute() && !self.force_fetch && code_storage.count > 0 {
+            let si = (code_storage.selected as usize).min((code_storage.count as usize).saturating_sub(1));
+            let cache: &stock::StockMinuteCache = unsafe {
+                &(*core::ptr::addr_of!(STOCK_MINUTE_CACHE))[si]
+            };
+            if let Some(d) = stock::stock_data_from_cache(cache, code, name) {
+                println!("[stock] detail minute from cache: n_bars={} last_price={}", cache.n_bars, cache.last_price);
+                self.data = Some(d);
+                self.err_msg = None;
+                crate::wifi::set_request_loading(false);
+                self.loading = false;
+                self.need_render = true;
+                return;
+            }
+        }
+
         match fetch_stock(self.mode, code, name, stock::bar_count(self.mode)).await {
             Ok(d) => {
+                // 分时网络拉取成功后回写缓存（保持缓存新鲜）
+                if self.mode.is_minute() && code_storage.count > 0 {
+                    let si = (code_storage.selected as usize).min((code_storage.count as usize).saturating_sub(1));
+                    let cache: &mut stock::StockMinuteCache = unsafe {
+                        &mut (*core::ptr::addr_of_mut!(STOCK_MINUTE_CACHE))[si]
+                    };
+                    if cache.matches_code(code) {
+                        stock::merge_minute(cache, &d.klines);
+                    }
+                }
                 self.data = Some(d);
                 self.err_msg = None;
             }
@@ -255,6 +300,7 @@ impl StockPage {
         // 无论成败请求都已结束：复位加载标志，避免 wifi 失败时图标残留。
         crate::wifi::set_request_loading(false);
         self.loading = false;
+        self.force_fetch = false;
         // 完成后整屏重绘（run 循环消费 need_render）。
         self.need_render = true;
     }
@@ -266,6 +312,7 @@ impl Page for StockPage {
             running: false,
             need_render: false,
             need_fetch: false,
+            force_fetch: false,
             need_clean_render: false,
             mode: ChartMode::Minute,
             view: StockView::Overview,
@@ -350,14 +397,33 @@ impl Page for StockPage {
         self.mode = ChartMode::decode(unsafe { *core::ptr::addr_of!(STOCK_MODE) });
         crate::display::set_sleep_renderer(Some(super::sleep_renderer));
         refresh_active_time().await;
-        // 进入总览页：cursor 落在 selected，拉取 6 支分时数据
-        self.view = StockView::Overview;
-        {
-            let ss = crate::storage::StockStorage::read().unwrap_or_default();
-            let c = (ss.count as usize).min(6);
-            self.cursor = if c > 0 { (ss.selected as usize).min(c - 1) } else { 0 };
+        // 深睡唤醒恢复：STOCK_VIEW=1 时直接进明细(selected + STOCK_MODE 已跨睡眠保留)
+        let saved_view = unsafe { *core::ptr::addr_of!(STOCK_VIEW) };
+        if saved_view == 1 {
+            // 明细：DRAM 跨重启丢失，必须拉取
+            self.view = StockView::Detail;
+            self.data = None;
+            self.err_msg = None;
+            self.fetch().await;
+        } else {
+            // 进入总览页：cursor 落在 selected
+            self.view = StockView::Overview;
+            {
+                let ss = crate::storage::StockStorage::read().unwrap_or_default();
+                let c = (ss.count as usize).min(6);
+                self.cursor = if c > 0 { (ss.selected as usize).min(c - 1) } else { 0 };
+            }
+            // 距上次拉取不足 2 分钟 → 跳过，直接用 rtc_fast 缓存渲染
+            let now_ms = crate::sleep::get_rtc_ms().await;
+            let last_ms = unsafe { *core::ptr::addr_of!(STOCK_LAST_FETCH_MS) };
+            if last_ms != 0 && now_ms.wrapping_sub(last_ms) < 120_000 {
+                println!("[stock] overview skip fetch: elapsed={}ms < 120s", now_ms.wrapping_sub(last_ms));
+                self.need_render = true;
+            } else {
+                self.fetch_overview().await;
+                unsafe { *core::ptr::addr_of_mut!(STOCK_LAST_FETCH_MS) = now_ms; }
+            }
         }
-        self.fetch_overview().await;
         loop {
             if !self.running {
                 break;
@@ -431,13 +497,14 @@ impl Page for StockPage {
                 }
             })
         }).await;
-        // 长按1：总览=上一格 / 明细=上一支股票
+        // 长按1：总览=上一格 / 明细=强制刷新（跳过缓存，走网络更新分时并回写缓存）
         event::on_target(EventType::KeyLongEnd(1), Self::mut_to_ptr(self), move |info| {
             Box::pin(async move {
                 let mut_ref: &mut Self = Self::mut_by_ptr(info.ptr).unwrap();
                 if mut_ref.view == StockView::Overview {
                     mut_ref.overview_move_cursor(false);
-                } else if mut_ref.switch_stock(false) {
+                } else {
+                    mut_ref.force_fetch = true;
                     mut_ref.need_fetch = true;
                 }
             })
