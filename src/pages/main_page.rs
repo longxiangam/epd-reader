@@ -41,13 +41,13 @@ pub(crate) static mut PAGE_INDEX:i32 = 1;
 #[ram(unstable(rtc_fast))]
 static mut BOOTED: bool = false;
 
-/// 读取默认主页（1=天气 2=日历 3=股票，存于 OtherStorage.data，避免改 storage 结构）
+/// 读取默认主页（0=电子书 1=天气 2=日历 3=股票 9=主界面，存于 OtherStorage.data）
 pub fn read_default_page() -> i32 {
     if let Ok(o) = crate::storage::OtherStorage::read() {
         if let Some(c) = o.data.chars().next() {
             if let Some(d) = c.to_digit(10) {
                 let d = d as i32;
-                if (1..=3).contains(&d) {
+                if d == 0 || d == 9 || (1..=3).contains(&d) {
                     return d;
                 }
             }
@@ -103,7 +103,7 @@ impl MainPage {
 
         Self::bind_event(MAIN_PAGE.lock().await.as_mut().unwrap()).await;
 
-        if page_index > -1 {
+        if page_index >= 0 && page_index <= 6 {
             let mut guard = MAIN_PAGE.lock().await;
             let mp = guard.as_mut().unwrap();
             mp.current_page = Some(page_index as u32);

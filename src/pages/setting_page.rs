@@ -95,8 +95,8 @@ impl SettingPage {
                     }
                 }
                 5 => {
-                    // 默认主页：上一个（天->股->日->天）
-                    self.home_edit = match self.home_edit { 1 => 3, 3 => 2, 2 => 1, _ => 1 };
+                    // 默认主页：上一个（电子书->主界面->股票->日历->天气->电子书）
+                    self.home_edit = match self.home_edit { 1 => 0, 0 => 9, 9 => 3, 3 => 2, 2 => 1, _ => 1 };
                 }
                 6 => {
                     // 全刷次数：减（最少 1）
@@ -130,8 +130,8 @@ impl SettingPage {
                     }
                 }
                 5 => {
-                    // 默认主页：下一个（天->日->股->天）
-                    self.home_edit = match self.home_edit { 1 => 2, 2 => 3, 3 => 1, _ => 2 };
+                    // 默认主页：下一个（电子书->天气->日历->股票->主界面->电子书）
+                    self.home_edit = match self.home_edit { 0 => 1, 1 => 2, 2 => 3, 3 => 9, 9 => 0, _ => 1 };
                 }
                 6 => {
                     // 全刷次数：加（最多 100）
@@ -266,7 +266,7 @@ impl SettingPage {
             } else {
                 crate::pages::main_page::read_default_page()
             };
-            let name = match cur { 1 => "天气", 2 => "日历", 3 => "股票", _ => "天气" };
+            let name = match cur { 0 => "电子书", 1 => "天气", 2 => "日历", 3 => "股票", 9 => "主界面", _ => "天气" };
             if editing && select == 5 {
                 format!("默认主页: >>{}<<", name)
             } else {
