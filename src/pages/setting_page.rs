@@ -70,22 +70,8 @@ impl SettingPage {
         };
         if editing {
             match select {
-                0 => {
-                    if self.read_sleep_seconds > READ_SLEEP_MIN {
-                        self.read_sleep_seconds -= SLEEP_STEP;
-                        if self.read_sleep_seconds < READ_SLEEP_MIN {
-                            self.read_sleep_seconds = READ_SLEEP_MIN;
-                        }
-                    }
-                }
-                1 => {
-                    if self.weather_sleep_seconds > WEATHER_SLEEP_MIN {
-                        self.weather_sleep_seconds -= SLEEP_STEP;
-                        if self.weather_sleep_seconds < WEATHER_SLEEP_MIN {
-                            self.weather_sleep_seconds = WEATHER_SLEEP_MIN;
-                        }
-                    }
-                }
+                0 => { self.read_sleep_seconds += SLEEP_STEP; }
+                1 => { self.weather_sleep_seconds += SLEEP_STEP; }
                 4 => {
                     // 上一支
                     let ss = crate::storage::StockStorage::read().unwrap_or_default();
@@ -99,9 +85,9 @@ impl SettingPage {
                     self.home_edit = match self.home_edit { 1 => 0, 0 => 9, 9 => 3, 3 => 2, 2 => 1, _ => 1 };
                 }
                 6 => {
-                    // 全刷次数：减（最少 1）
-                    if self.full_refresh_edit > FULL_REFRESH_MIN {
-                        self.full_refresh_edit -= 1;
+                    // 全刷次数：加（最多 100）
+                    if self.full_refresh_edit < FULL_REFRESH_MAX {
+                        self.full_refresh_edit += 1;
                     }
                 }
                 _ => {}
@@ -119,8 +105,22 @@ impl SettingPage {
         };
         if editing {
             match select {
-                0 => { self.read_sleep_seconds += SLEEP_STEP; }
-                1 => { self.weather_sleep_seconds += SLEEP_STEP; }
+                0 => {
+                    if self.read_sleep_seconds > READ_SLEEP_MIN {
+                        self.read_sleep_seconds -= SLEEP_STEP;
+                        if self.read_sleep_seconds < READ_SLEEP_MIN {
+                            self.read_sleep_seconds = READ_SLEEP_MIN;
+                        }
+                    }
+                }
+                1 => {
+                    if self.weather_sleep_seconds > WEATHER_SLEEP_MIN {
+                        self.weather_sleep_seconds -= SLEEP_STEP;
+                        if self.weather_sleep_seconds < WEATHER_SLEEP_MIN {
+                            self.weather_sleep_seconds = WEATHER_SLEEP_MIN;
+                        }
+                    }
+                }
                 4 => {
                     // 下一支
                     let ss = crate::storage::StockStorage::read().unwrap_or_default();
@@ -134,9 +134,9 @@ impl SettingPage {
                     self.home_edit = match self.home_edit { 0 => 1, 1 => 2, 2 => 3, 3 => 9, 9 => 0, _ => 1 };
                 }
                 6 => {
-                    // 全刷次数：加（最多 100）
-                    if self.full_refresh_edit < FULL_REFRESH_MAX {
-                        self.full_refresh_edit += 1;
+                    // 全刷次数：减（最少 1）
+                    if self.full_refresh_edit > FULL_REFRESH_MIN {
+                        self.full_refresh_edit -= 1;
                     }
                 }
                 _ => {}

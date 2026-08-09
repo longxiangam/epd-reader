@@ -193,6 +193,8 @@ async fn handle_get_config(socket: &mut TcpSocket<'_>) {
     let weather = crate::storage::WeatherStorage::read().unwrap_or_default();
     let sleep = crate::storage::SleepStorage::read().unwrap_or_default();
     let stock = crate::storage::StockStorage::read().unwrap_or_default();
+    let reading = crate::storage::ReadingSettings::read().unwrap_or_default();
+    let home_page = crate::pages::main_page::read_default_page();
 
     let mut body = alloc::string::String::new();
     body.push_str("{\"wifi\":{\"ssid\":");
@@ -218,7 +220,17 @@ async fn handle_get_config(socket: &mut TcpSocket<'_>) {
         json_str(&mut body, stock.entries[i].name.as_str());
         body.push('}');
     }
-    body.push_str("]}");
+    body.push_str("],\"reading\":{\"px\":");
+    body.push_str(&alloc::format!("{}", reading.ttf_px));
+    body.push_str(",\"gap\":");
+    body.push_str(&alloc::format!("{}", reading.line_gap));
+    body.push_str(",\"rotate\":");
+    body.push_str(&alloc::format!("{}", reading.rotate));
+    body.push_str(",\"font\":");
+    json_str(&mut body, reading.font_name_str());
+    body.push_str("},\"home_page\":");
+    body.push_str(&alloc::format!("{}", home_page));
+    body.push('}');
 
     send_json(socket, body.as_bytes()).await;
 }
@@ -534,6 +546,9 @@ async fn process_http(socket:&mut TcpSocket<'_>, header_data: &[u8]) {
         }
         (Some("POST"), Some("/configure_stock")) => {
             handle_configure_stock(socket, &req, header_str).await;
+        }
+        (Some("POST"), Some("/configure_reading")) => {
+            handle_configure_reading(socket, &req, header_str).await;
         }
         (Some("GET"), Some("/sleep_image")) => {
             handle_get_sleep_image(socket).await;
@@ -881,15 +896,22 @@ async fn handle_configure_wifi(socket: &mut TcpSocket<'_>, req: &httparse::Reque
 
         if let Some(wifi_info) = crate::storage::WIFI_INFO.lock().await.as_mut() {
             println!("wifi_info:{:?}", wifi_info);
-            wifi_info.wifi_ssid = String::from_str(ssid.unwrap()).unwrap();
-            wifi_info.wifi_password = String::from_str(password.unwrap()).unwrap();
+            let new_ssid = ssid.unwrap();
+            let new_pwd = password.unwrap();
+            // SSID 或密码有变化才重启；相同则只保存不重启（导入配置时 WiFi 未变不需要断网）
+            let changed = wifi_info.wifi_ssid.as_str() != new_ssid
+                || wifi_info.wifi_password.as_str() != new_pwd;
+            wifi_info.wifi_ssid = String::from_str(new_ssid).unwrap();
+            wifi_info.wifi_password = String::from_str(new_pwd).unwrap();
             wifi_info.wifi_finish = true;
             match wifi_info.write() {
                 Ok(_) => {
-                    println!("保存成功");
+                    println!("保存成功 changed={}", changed);
                     send_json(socket, b"{\"success\":true}").await;
-                    Timer::after(Duration::from_millis(100)).await;
-                    software_reset();
+                    if changed {
+                        Timer::after(Duration::from_millis(100)).await;
+                        software_reset();
+                    }
                 }
                 Err(e) => {
                     println!("保存失败：{:?}", e);
@@ -985,6 +1007,37 @@ async fn handle_configure_stock(socket: &mut TcpSocket<'_>, req: &httparse::Requ
         println!("股票配置保存: {} 支", count);
 
         send_json(socket, b"{\"success\":true}").await;
+    }
+}
+
+async fn handle_configure_reading(socket: &mut TcpSocket<'_>, req: &httparse::Request<'_, '_>, header_str: &str) {
+    let form_fields = parse_form(req, header_str);
+    if let Ok(fields) = form_fields {
+        let get = |key: &str| -> &str {
+            fields.iter().find(|(k, _)| *k == key).map(|(_, v)| *v).unwrap_or("")
+        };
+        let mut s = crate::storage::ReadingSettings::read().unwrap_or_default();
+        if let Some(px) = get("px").parse::<u8>().ok() {
+            s.ttf_px = px.max(12).min(40);
+        }
+        if let Some(gap) = get("gap").parse::<u8>().ok() {
+            s.line_gap = gap.min(10);
+        }
+        if let Some(rot) = get("rotate").parse::<u8>().ok() {
+            s.rotate = rot % 4;
+        }
+        let font = get("font");
+        if !font.is_empty() {
+            s.font_name = [0u8; 32];
+            let b = font.as_bytes();
+            let n = b.len().min(s.font_name.len());
+            s.font_name[..n].copy_from_slice(&b[..n]);
+        }
+        let _ = s.write();
+        println!("阅读排版保存: px={} gap={} rotate={} font={}", s.ttf_px, s.line_gap, s.rotate, s.font_name_str());
+        send_json(socket, b"{\"success\":true}").await;
+    } else {
+        send_json(socket, b"{\"success\":false}").await;
     }
 }
 

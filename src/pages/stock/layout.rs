@@ -11,7 +11,7 @@ use u8g2_fonts::types::{FontColor, HorizontalAlignment, VerticalPosition};
 
 use super::render_data::{OverviewRenderData, StockRenderData};
 use crate::display::EpdDisplay;
-use crate::model::stock::{fmt_price, fmt_signed, ChartMode, KLINE_CAP, MINUTE_SLOTS, RealtimeQuote, StockData};
+use crate::model::stock::{fmt_price, fmt_signed, ChartMode, KLINE_CAP, MINUTE_SLOTS, CACHE_SLOTS, RealtimeQuote, StockData};
 use crate::widgets::kline::{draw_candles, draw_line, map_y, padded_range, visible_count};
 
 pub fn draw<D>(display: &mut D, data: &StockRenderData) -> Result<(), D::Error>
@@ -170,9 +170,7 @@ where
                 for k in &sd.klines {
                     prices.push(k.close).ok();
                 }
-                let _ = draw_line(display, inner, &prices);
 
-                // 最高/最低/当前 价格参考线
                 let mut lo = f32::MAX;
                 let mut hi = f32::MIN;
                 for &p in &prices {
@@ -180,40 +178,94 @@ where
                     if p > hi { hi = p; }
                 }
                 let cur = *prices.last().unwrap_or(&0.0);
-                let (plo, phi) = padded_range(lo, hi);
+                // 以昨收为中点构建对称 Y 轴范围
+                let preclose = sd.preclose;
+                let (plo, phi) = if preclose > 0.0 {
+                    let dev = ((hi - preclose).abs().max((preclose - lo).abs())) * 1.1;
+                    (preclose - dev, preclose + dev)
+                } else {
+                    padded_range(lo, hi)
+                };
                 let itop = inner.top_left.y;
                 let ih = inner.size.height as i32;
                 let ix0 = inner.top_left.x;
                 let iw = inner.size.width as i32;
+                let y_pre = if preclose > 0.0 { Some(map_y(preclose, plo, phi, itop, ih)) } else { None };
+
+                // 折线（用 plo/phi 统一映射，不调 draw_line 的内部 padded_range）
+                let line_style = PrimitiveStyleBuilder::new().stroke_color(Black).stroke_width(1).build();
+                let pn = prices.len() as i32;
+                let mut prev_pt: Option<Point> = None;
+                for (idx, &p) in prices.iter().enumerate() {
+                    let px = ix0 + (iw as f32 * idx as f32 / (pn as f32 - 1.0)) as i32;
+                    let py = map_y(p, plo, phi, itop, ih);
+                    if let Some(p0) = prev_pt {
+                        let _ = Line::new(p0, Point::new(px, py)).into_styled(line_style.clone()).draw(display);
+                    }
+                    prev_pt = Some(Point::new(px, py));
+                }
+
                 let y_high = map_y(hi, plo, phi, itop, ih);
                 let y_low = map_y(lo, plo, phi, itop, ih);
                 let y_cur = map_y(cur, plo, phi, itop, ih);
-                // 当前价标签 y：避免与最高/最低重叠（高价保持在上、低价在下，当前避让）
-                let mut y_cur_lbl = y_cur;
-                if y_cur - y_high < 12 { y_cur_lbl = y_high + 12; }
-                if y_low - y_cur_lbl < 12 { y_cur_lbl = y_low - 12; }
-                // 最高/最低 横虚线
-                let _ = draw_dashed_hline(display, ix0, y_high, iw);
-                let _ = draw_dashed_hline(display, ix0, y_low, iw);
-                // 左侧价格标签（高/低/当前）
-                let _ = font_small.render_aligned(
-                    format_args!("{}", fmt_price(hi).as_str()),
-                    Point::new(left_pad - 2, y_high - 6),
-                    VerticalPosition::Top, HorizontalAlignment::Right,
-                    FontColor::Transparent(Black), display,
-                );
-                let _ = font_small.render_aligned(
-                    format_args!("{}", fmt_price(lo).as_str()),
-                    Point::new(left_pad - 2, y_low - 6),
-                    VerticalPosition::Top, HorizontalAlignment::Right,
-                    FontColor::Transparent(Black), display,
-                );
-                let _ = font_small.render_aligned(
-                    format_args!("{}", fmt_price(cur).as_str()),
-                    Point::new(left_pad - 2, y_cur_lbl - 6),
-                    VerticalPosition::Top, HorizontalAlignment::Right,
-                    FontColor::Transparent(Black), display,
-                );
+
+                // 昨收水平实线（涨跌分界）
+                if let Some(yp) = y_pre {
+                    let pre_style = PrimitiveStyleBuilder::new().stroke_color(Black).stroke_width(1).build();
+                    let _ = Line::new(Point::new(ix0, yp), Point::new(ix0 + iw, yp))
+                        .into_styled(pre_style).draw(display);
+                }
+
+                // 左侧价格标签：收集 hi/lo/cur/preclose，去重 + 防重叠
+                // (price, y) pairs — 用数组手动管理，避免 heapless::String 的所有权问题
+                let mut lbl_price: [f32; 4] = [hi, lo, cur, preclose];
+                let mut lbl_y: [i32; 4] = [y_high, y_low, y_cur, y_pre.unwrap_or(y_cur)];
+                let mut lbl_count = 4usize;
+                // preclose=0 表示无昨收，不显示
+                if preclose <= 0.0 { lbl_count = 3; }
+
+                // 按价格降序排列（高价在上=屏幕 y 小）
+                for i in 0..lbl_count {
+                    for j in (i + 1)..lbl_count {
+                        if lbl_price[j] > lbl_price[i] {
+                            lbl_price.swap(i, j);
+                            lbl_y.swap(i, j);
+                        }
+                    }
+                }
+                // 去重：价格相同（差<0.005）只保留一个
+                {
+                    let mut write_idx = 0usize;
+                    for read_idx in 0..lbl_count {
+                        if write_idx > 0 && (lbl_price[write_idx - 1] - lbl_price[read_idx]).abs() < 0.005 {
+                            continue; // 跳过重复
+                        }
+                        lbl_price[write_idx] = lbl_price[read_idx];
+                        lbl_y[write_idx] = lbl_y[read_idx];
+                        write_idx += 1;
+                    }
+                    lbl_count = write_idx;
+                }
+                // 防重叠：从上到下（y 升序），间距 < 12px 则下推
+                const MIN_GAP: i32 = 12;
+                for i in 1..lbl_count {
+                    // 排序后 price 降序 = y 升序；但映射后可能有微小偏差，确保 y 也是升序
+                    if lbl_y[i] < lbl_y[i - 1] {
+                        lbl_y[i] = lbl_y[i - 1];
+                    }
+                    if lbl_y[i] - lbl_y[i - 1] < MIN_GAP {
+                        lbl_y[i] = lbl_y[i - 1] + MIN_GAP;
+                    }
+                }
+                // 渲染
+                for i in 0..lbl_count {
+                    let _ = font_small.render_aligned(
+                        format_args!("{}", fmt_price(lbl_price[i]).as_str()),
+                        Point::new(left_pad - 2, lbl_y[i] - 6),
+                        VerticalPosition::Top, HorizontalAlignment::Right,
+                        FontColor::Transparent(Black), display,
+                    );
+                }
                 // 当前点小圆点（折线末端）
                 let dot = PrimitiveStyleBuilder::new().fill_color(Black).build();
                 let _ = Circle::new(Point::new(ix0 + iw - 3, y_cur - 3), 6)
@@ -635,9 +687,9 @@ where
         );
 
         let c = &data.cache[i];
-        let n = (c.n_bars as usize).min(MINUTE_SLOTS);
-        if c.date == 0 || n == 0 {
-            // 无数据（首次拉取中 / 拉取失败）：保留旧数据已在缓存，date==0 表示从未成功
+        let np = (c.n_prev as usize).min(MINUTE_SLOTS);
+        let nt = (c.n_today as usize).min(MINUTE_SLOTS);
+        if np == 0 && nt == 0 {
             let msg = if data.loading { "" } else { "拉取失败" };
             if !msg.is_empty() {
                 let _ = font_small.render_aligned(
@@ -648,53 +700,74 @@ where
                 );
             }
         } else {
-            let prices_all = &c.closes[..n];
-            // 跳过前后 0.00 空槽，中间空槽用前一个有效价填充（折线在空档平线，不跳水）
-            let start = prices_all.iter().position(|&p| p > 0.0).unwrap_or(0);
-            let end = prices_all.iter().rposition(|&p| p > 0.0).unwrap_or(0);
-            if start >= end {
-                continue;
+            // 和单支大分时一样：前一天 + 今天的 close 平铺成一条折线，只推非零值（不填空）
+            let mut prices: heapless::Vec<f32, CACHE_SLOTS> = heapless::Vec::new();
+            for i in 0..np {
+                let p = c.closes[i];
+                if p > 0.0 { let _ = prices.push(p); }
             }
-            let mut filled = [0.0f32; MINUTE_SLOTS];
-            let mut last = 0.0f32;
-            let mut filled_len = 0usize;
-            for &p in &prices_all[start..=end] {
-                if p > 0.0 {
-                    last = p;
-                }
-                filled[filled_len] = last;
-                filled_len += 1;
+            let boundary = prices.len(); // 前一天结束的位置 = 跨天边界
+            for i in 0..nt {
+                let p = c.closes[MINUTE_SLOTS + i];
+                if p > 0.0 { let _ = prices.push(p); }
             }
-            let prices = &filled[..filled_len];
             let n_eff = prices.len();
-            // 当天最高/最低（填充后值与原始有效价一致）
+            if n_eff < 2 { continue; }
+            // hi/lo
             let mut lo = f32::MAX;
             let mut hi = f32::MIN;
-            for &p in prices {
-                if p < lo { lo = p; }
-                if p > hi { hi = p; }
-            }
+            for &p in prices.iter() { if p < lo { lo = p; } if p > hi { hi = p; } }
             let cur = c.last_price;
+            if hi <= lo { continue; }
 
-            // 小图：折线 + 最高/最低横虚线 + 当前点（参考单支大分时）
-            if n_eff >= 2 && hi > lo {
-                let _ = draw_line(display, chart, prices);
-                let (plo, phi) = padded_range(lo, hi);
-                let itop = chart.top_left.y;
-                let ih = chart.size.height as i32;
-                let ix0 = chart.top_left.x;
-                let iw = chart.size.width as i32;
-                let y_high = map_y(hi, plo, phi, itop, ih);
-                let y_low = map_y(lo, plo, phi, itop, ih);
-                let y_cur = map_y(cur, plo, phi, itop, ih);
-                let _ = draw_dashed_hline(display, ix0, y_high, iw);
-                let _ = draw_dashed_hline(display, ix0, y_low, iw);
-                let dot = PrimitiveStyleBuilder::new().fill_color(Black).build();
-                let _ = Circle::new(Point::new(ix0 + iw - 2, y_cur - 2), 4)
-                    .into_styled(dot).draw(display);
+            let itop = chart.top_left.y;
+            let ih = chart.size.height as i32;
+            let ix0 = chart.top_left.x;
+            let iw = chart.size.width as i32;
+            // 以昨收为中点构建对称 Y 轴范围（直观看出相对昨收的涨跌）
+            let preclose = c.preclose;
+            let (plo, phi) = if preclose > 0.0 {
+                let dev = ((hi - preclose).abs().max((preclose - lo).abs())) * 1.1;
+                (preclose - dev, preclose + dev)
+            } else {
+                padded_range(lo, hi)
+            };
+            let y_high = map_y(hi, plo, phi, itop, ih);
+            let y_low = map_y(lo, plo, phi, itop, ih);
+            let y_cur = map_y(cur, plo, phi, itop, ih);
+            let y_pre = if preclose > 0.0 { Some(map_y(preclose, plo, phi, itop, ih)) } else { None };
+
+            // 折线（用与圆点/昨收线相同的 plo/phi 映射，不自调 draw_line 的内部 padded_range）
+            let line_style = PrimitiveStyleBuilder::new().stroke_color(Black).stroke_width(1).build();
+            let n = n_eff as i32;
+            let mut prev_pt: Option<Point> = None;
+            for (idx, &p) in prices.iter().enumerate() {
+                let x = ix0 + (iw as f32 * idx as f32 / (n as f32 - 1.0)) as i32;
+                let y = map_y(p, plo, phi, itop, ih);
+                if let Some(p0) = prev_pt {
+                    let _ = Line::new(p0, Point::new(x, y)).into_styled(line_style.clone()).draw(display);
+                }
+                prev_pt = Some(Point::new(x, y));
             }
+            // 昨收水平线（实线，作为涨跌中点参考）
+            if let Some(yp) = y_pre {
+                let line_style = PrimitiveStyleBuilder::new().stroke_color(Black).stroke_width(1).build();
+                let _ = Line::new(Point::new(ix0, yp), Point::new(ix0 + iw, yp))
+                    .into_styled(line_style).draw(display);
+            }
+            // 跨天竖虚线：X 与折线公式一致（iw * idx / (n-1)）
+            if boundary > 0 && boundary < n_eff {
+                let bx = ix0 + (iw as f32 * boundary as f32 / (n_eff as f32 - 1.0)) as i32;
+                let _ = draw_dashed_vline(display, bx, itop, ih);
+            }
+            // 当前点圆点：用折线最后一个点的价格定位（与折线末端重合）
+            let line_end = prices[n_eff - 1];
+            let y_end = map_y(line_end, plo, phi, itop, ih);
+            let dot = PrimitiveStyleBuilder::new().fill_color(Black).build();
+            let _ = Circle::new(Point::new(ix0 + iw - 2, y_end - 2), 4)
+                .into_styled(dot).draw(display);
 
-            // 名称行右侧：当前价（cursor 格名称条反相 → 用白字）
+            // 名称行右侧：当前价
             let top_right_color = if is_cur { FontColor::Transparent(White) } else { FontColor::Transparent(Black) };
             let _ = font_small.render_aligned(
                 fmt_price(cur).as_str(),
@@ -702,8 +775,7 @@ where
                 VerticalPosition::Top, HorizontalAlignment::Right,
                 top_right_color, display,
             );
-
-            // 底部：最低（左）+ 涨跌幅%（中，真实昨收基准）+ 最高（右）
+            // 底部：最低（左）+ 涨跌幅%（中）+ 最高（右）
             let _ = font_small.render_aligned(
                 fmt_price(lo).as_str(),
                 Point::new(x0 + pad + 2, price_y),

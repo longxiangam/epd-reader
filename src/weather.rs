@@ -194,7 +194,7 @@ impl HolidayInfo {
                 println!("开始请求节假日");
                 let current_year =  get_clock().unwrap().now().await.year() as u32;
                 crate::wifi::set_request_loading(true);
-                let result = request.send_request(format!("https://api.jiejiariapi.com/v1/holidays/{}",current_year).as_str()).await;
+                let result = request.send_request(format!("https://raw.githubusercontent.com/NateScarlet/holiday-cn/master/{}.json",current_year).as_str()).await;
                 crate::wifi::set_request_loading(false);
             
                 match result {
@@ -204,11 +204,15 @@ impl HolidayInfo {
                         if let Some(mut v) = holiday_result {
                             v.year = current_year;
                             Self::save(v).await;
+                            println!("节假日请求成功");
+                            finish_wifi().await;
+                            Ok(())
+                        } else {
+                            // 解析失败：可能是 429 限流或响应格式不对
+                            println!("节假日解析失败: {}", core::str::from_utf8(&response.data[..response.length]).unwrap_or(""));
+                            finish_wifi().await;
+                            Err(())
                         }
-                        
-                        println!("节假日请求成功{}", core::str::from_utf8(&response.data[..response.length]).unwrap());
-                        finish_wifi().await;
-                        Ok(())
                     }
                     Err(e) => {
                         finish_wifi().await;
@@ -288,7 +292,7 @@ impl HolidayInfo {
 pub(crate) static mut HOLIDAY_SYNC_SECOND: u64 = 0;
 #[ram(unstable(rtc_fast))]
 static mut HOLIDAY_SYNC_YEAR: u32 = 0;
-
+#[ram(unstable(rtc_fast))]
 static mut HOLIDAY_SYNC_ERROR_SECOND: u64 = 0;
 
 pub fn sync_holiday_success() -> bool {

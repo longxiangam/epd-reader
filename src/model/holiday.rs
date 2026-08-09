@@ -58,62 +58,55 @@ pub fn form_json(str: &[u8]) -> Option<HolidayResponse> {
     }
 }
 
-//遍历对象解析
+//遍历对象解析（适配 holiday-cn 格式：days 数组，每项含 date + isOffDay）
 pub fn form_json_each(str: &[u8]) -> Option<HolidayResponse> {
-    let str = core::str::from_utf8(str).unwrap();
+    let s = core::str::from_utf8(str).unwrap_or("");
     let mut holidays: Vec<Holiday, 40> = Vec::new();
     let mut year: u32 = 0;
-    let mut remaining_str = str;
-    
-    //解析出年份
-    if let Some(year_pos) = remaining_str.find("\"20") {
-        let year_start = year_pos + 1;
-        if year_start + 4 <= remaining_str.len() {
-            let year_str = &remaining_str[year_start..year_start + 4];
-            if let Ok(year_num) = year_str.parse::<u32>() {
-                year = year_num;
-                println!("year: {}", year);
+
+    // 解析年份：找 "year": NNNN
+    if let Some(pos) = s.find("\"year\"") {
+        let after = &s[pos..];
+        if let Some(colon) = after.find(':') {
+            let rest = &after[colon + 1..];
+            let rest = rest.trim_start();
+            let digits: heapless::String<8> = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+            if let Ok(y) = digits.parse::<u32>() {
+                year = y;
             }
         }
     }
-    
     if year == 0 {
         return None;
     }
-    
-    //从字符串中把日期取出来并把日期前的字符串截取掉
-    while let Some(date_start) = remaining_str.find("\"") {
-        // 找到日期字符串
-        if let Some(date_end) = remaining_str[date_start + 1..].find("\"") {
-            let date_end = date_start + 1 + date_end;
-            let date_key = &remaining_str[date_start + 1..date_end];
-            
-            // 检查是否是日期格式 (YYYY-MM-DD)
-            if date_key.len() == 10 && date_key.contains('-') {
-                // 3. 找到第一个开始大括号和结束大括号
-                if let Some(brace_start) = remaining_str[date_end..].find("{") {
-                    let brace_start = date_end + brace_start;
-                    if let Some(brace_end) = remaining_str[brace_start..].find("}") {
-                        let brace_end = brace_start + brace_end;
-                        let date_obj = &remaining_str[brace_start..=brace_end];
-                        if let Some(holiday) = parse_single_holiday(date_obj, date_key) {
-                            holidays.push(holiday).ok();
-                        }
-                        remaining_str = &remaining_str[brace_end..];
-                    } else {
-                        remaining_str = &remaining_str[brace_start..];
-                    }
-                } else {
-                    remaining_str = &remaining_str[date_end..];
+
+    // 扫描所有 "date": "YYYY-MM-DD"，然后找最近的 "isOffDay": true/false
+    let mut search_from = 0;
+    while let Some(date_pos) = s[search_from..].find("\"date\"") {
+        let date_pos = search_from + date_pos;
+        // 找 date 值
+        if let Some(val_start) = s[date_pos..].find("\"20") {
+            let val_start = date_pos + val_start + 1;
+            if let Some(val_end) = s[val_start..].find("\"") {
+                let date_str = &s[val_start..val_start + val_end];
+                if date_str.len() == 10 && date_str.chars().filter(|c| *c == '-').count() == 2 {
+                    // 解析 YYYYMMDD
+                    let yyyymmdd: heapless::String<8> = date_str.chars().filter(|c| *c != '-').collect();
+                    let date_num: u32 = yyyymmdd.parse().unwrap_or(0);
+
+                    // 在 date 之后找 "isOffDay"（不限制字节数，避免 UTF-8 边界 panic）
+                    let region = &s[val_start + val_end..];
+                    let is_off = region.contains("\"isOffDay\":true") || region.contains("\"isOffDay\": true");
+
+                    holidays.push(Holiday { date: date_num, is_off_day: is_off }).ok();
+                    search_from = val_start + val_end;
+                    continue;
                 }
-            } else {
-                remaining_str = &remaining_str[date_end..];
             }
-        } else {
-            break;
         }
+        search_from = date_pos + 6;
     }
-    
+
     if holidays.is_empty() {
         None
     } else {

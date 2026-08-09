@@ -171,7 +171,7 @@
         <button class="tab-link" data-tab="books">书籍</button>
         <button class="tab-link" data-tab="images">图片</button>
         <button class="tab-link" data-tab="stock">股票</button>
-       <!-- <button class="tab-link" data-tab="timer">定时功能</button>-->
+        <button class="tab-link" data-tab="backup">备份</button>
 
     </div>
     <div id="wifi" class="tab-content active">
@@ -272,15 +272,18 @@
             <div id="stockMessage" class="message"></div>
         </form>
     </div>
-<!--    <div id="timer" class="tab-content">
-        <form action="/configure_timer" method="POST">
-            <label for="start-time">Start Time:</label>
-            <input type="text" id="start-time" name="start-time" required />
-            <label for="end-time">End Time:</label>
-            <input type="text" id="end-time" name="end-time" required />
-            <input type="submit" value="Set Timer" />
-        </form>
-    </div>-->
+    <div id="backup" class="tab-content">
+        <p style="margin:0 0 10px;font-weight:normal;">导出当前全部配置为 JSON 文件，或从备份文件恢复。</p>
+        <div style="margin-bottom:16px;">
+            <button id="exportBtn" style="background-color:#28a745;color:white;padding:8px 16px;border:none;border-radius:4px;cursor:pointer;font-size:14px;">导出配置</button>
+        </div>
+        <div style="margin-bottom:8px;">
+            <label style="display:block;margin-bottom:6px;">从备份文件导入：</label>
+            <input type="file" id="importFile" accept=".json" style="margin-bottom:8px;" />
+            <button id="importBtn" style="background-color:#007bff;color:white;padding:8px 16px;border:none;border-radius:4px;cursor:pointer;font-size:14px;">导入配置</button>
+        </div>
+        <div id="backupMessage" class="message"></div>
+    </div>
 </div>
 
 <script>
@@ -801,6 +804,99 @@
     }
     // 进入页面不立即请求，延时 600ms 等连接就绪，避免 502
     setTimeout(loadConfig, 600);
+
+    // ── 备份：导出/导入 ──
+    var backupMsg = document.getElementById('backupMessage');
+    function setBackupMsg(text, ok) {
+        backupMsg.textContent = text;
+        backupMsg.className = 'message ' + (ok ? 'success' : 'error');
+        backupMsg.style.display = 'block';
+    }
+
+    // 导出：fetch /config → 下载 JSON
+    document.getElementById('exportBtn').addEventListener('click', function() {
+        setBackupMsg('正在导出...', 'success');
+        fetch('/config').then(r => r.json()).then(data => {
+            var blob = new Blob([JSON.stringify(data, null, 2)], {type: 'application/json'});
+            var a = document.createElement('a');
+            a.href = URL.createObjectURL(blob);
+            a.download = 'epd_reader_config.json';
+            a.click();
+            setBackupMsg('导出成功！', 'success');
+        }).catch(e => setBackupMsg('导出失败: ' + e, false));
+    });
+
+    // 导入：读取 JSON → 逐个 POST 到已有端点
+    document.getElementById('importBtn').addEventListener('click', async function() {
+        var fileInput = document.getElementById('importFile');
+        if (!fileInput.files[0]) { setBackupMsg('请先选择文件', false); return; }
+        try {
+            var text = await fileInput.files[0].text();
+            var cfg = JSON.parse(text);
+            var steps = [];
+
+            // WiFi 放最后（/configure_wifi 成功后会 software_reset 重启设备）
+            // 1. 天气
+            if (cfg.weather) {
+                steps.push({name: '天气', url: '/configure_weather', fields: {
+                    'api-key': cfg.weather['api-key'] || '',
+                    'location': cfg.weather.city || ''
+                }});
+            }
+            // 2. 睡眠
+            if (cfg.sleep) {
+                steps.push({name: '睡眠', url: '/configure_sleep', fields: {
+                    'read-sleep-seconds': String(cfg.sleep.read || 120),
+                    'weather-sleep-seconds': String(cfg.sleep.weather || 5)
+                }});
+            }
+            // 3. 显示
+            if (cfg.display) {
+                steps.push({name: '显示', url: '/configure_display', fields: {
+                    'full-refresh': String(cfg.display.full_refresh || 5)
+                }});
+            }
+            // 4. 股票
+            if (cfg.stocks && Array.isArray(cfg.stocks)) {
+                var sf = {};
+                cfg.stocks.forEach(function(s, i) {
+                    if (i < 6) { sf['code' + i] = s.code || ''; sf['name' + i] = s.name || ''; }
+                });
+                steps.push({name: '股票', url: '/configure_stock', fields: sf});
+            }
+            // 5. 阅读排版
+            if (cfg.reading) {
+                steps.push({name: '阅读排版', url: '/configure_reading', fields: {
+                    'px': String(cfg.reading.px || 20),
+                    'gap': String(cfg.reading.gap || 1),
+                    'rotate': String(cfg.reading.rotate || 0),
+                    'font': cfg.reading.font || 'font.ttf'
+                }});
+            }
+            // 6. WiFi（最后：设备会重启）
+            if (cfg.wifi) {
+                steps.push({name: 'WiFi（设备将重启）', url: '/configure_wifi', fields: {
+                    'ssid': cfg.wifi.ssid || '', 'password': cfg.wifi.password || ''
+                }});
+            }
+
+            for (var i = 0; i < steps.length; i++) {
+                setBackupMsg('导入中 (' + (i+1) + '/' + steps.length + '): ' + steps[i].name + '...', 'success');
+                var fd = new FormData();
+                for (var key in steps[i].fields) { fd.append(key, steps[i].fields[key]); }
+                var resp = await fetch(steps[i].url, {method: 'POST', body: fd});
+                var result = await resp.json();
+                if (!result.success) {
+                    setBackupMsg('第 ' + (i+1) + ' 步(' + steps[i].name + ')失败', false);
+                    return;
+                }
+            }
+            var names = steps.map(function(s) { return s.name; }).join('、');
+            setBackupMsg('✅ 导入完成！已恢复：' + names + '。' + (cfg.wifi ? 'WiFi 如有变更将自动重启。' : ''), true);
+        } catch(e) {
+            setBackupMsg('导入失败: ' + e, false);
+        }
+    });
 
 </script>
 </body>

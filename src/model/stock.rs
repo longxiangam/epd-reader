@@ -512,18 +512,23 @@ pub fn fmt_signed(v: f32) -> String<16> {
 
 /// 一个交易日的分时槽数（AM 24 + PM 24）。
 pub const MINUTE_SLOTS: usize = 48;
+/// 缓存总槽位：2 天 × 48 = 96（[0..47]=前一日, [48..95]=今日）。
+pub const CACHE_SLOTS: usize = MINUTE_SLOTS * 2;
 
-/// 单支股票当日分时缓存。存 close[48]（按日内槽位 0..47）+ 真实昨收。
-/// 总览页据此做增量拉取与累积渲染，避免每次全量请求、图表清空。
+/// 单支股票 2 日分时缓存（前一天 + 今天），各 48 槽。
+/// 总览图表左右分屏：左半=前一天完整走势，右半=今天实时走势（随开盘推进），
+/// 竖虚线分隔两天。固定宽度：每天各占图表一半，不会因今天点少而拉伸。
 #[derive(Clone, Copy)]
 pub struct StockMinuteCache {
-    pub code: [u8; 16], // null-padded；[0]==0 或 code_len==0 表示空槽
+    pub code: [u8; 16],
     pub code_len: u8,
-    pub date: u32, // YYYYMMDD；0 = 空
-    pub preclose: f32, // 真实昨收（来自 quote）；0 = 未知
+    pub date: u32,           // 今日 YYYYMMDD；0=空
+    pub prev_date: u32,      // 前一交易日 YYYYMMDD
+    pub preclose: f32,
     pub last_price: f32,
-    pub n_bars: u8, // 有效槽位数 0..=48
-    pub closes: [f32; MINUTE_SLOTS],
+    pub n_prev: u8,          // 前一天有效槽 0..=48
+    pub n_today: u8,         // 今天有效槽 0..=48
+    pub closes: [f32; CACHE_SLOTS], // [0..47]=前一天, [48..95]=今天
 }
 
 impl StockMinuteCache {
@@ -531,10 +536,12 @@ impl StockMinuteCache {
         code: [0; 16],
         code_len: 0,
         date: 0,
+        prev_date: 0,
         preclose: 0.0,
         last_price: 0.0,
-        n_bars: 0,
-        closes: [0.0; MINUTE_SLOTS],
+        n_prev: 0,
+        n_today: 0,
+        closes: [0.0; CACHE_SLOTS],
     };
 
     pub fn reset(&mut self) {
@@ -594,33 +601,38 @@ pub fn slot_to_date(yyyymmdd: u32, slot: usize) -> u64 {
     (yyyymmdd as u64) * 1_000_000 + (hh as u64) * 10000 + (mm as u64) * 100
 }
 
-/// 从 rtc_fast 分时缓存构造 StockData（供明细分时模式复用，免去网络拉取）。
-/// closes[0..n_bars] → KLine（date 近似、OHLC=close），含真实昨收。
+/// 从 2 日缓存构造 StockData（供明细分时模式复用）。
+/// 前一天 + 今天 KLine 按时间顺序排列，明细页自动画跨天竖虚线。
 pub fn stock_data_from_cache(
     cache: &StockMinuteCache,
     code: &str,
     name: &str,
 ) -> Option<Box<StockData>> {
-    if cache.date == 0 || cache.n_bars == 0 {
+    if cache.date == 0 || (cache.n_prev == 0 && cache.n_today == 0) {
         return None;
     }
     let mut klines: heapless::Vec<KLine, KLINE_CAP> = heapless::Vec::new();
-    let n = (cache.n_bars as usize).min(MINUTE_SLOTS);
-    for i in 0..n {
+    // 前一天
+    for i in 0..(cache.n_prev as usize).min(MINUTE_SLOTS) {
         let c = cache.closes[i];
         if c > 0.0 {
             let _ = klines.push(KLine {
-                date: slot_to_date(cache.date, i),
-                open: c,
-                close: c,
-                high: c,
-                low: c,
+                date: slot_to_date(cache.prev_date, i),
+                open: c, close: c, high: c, low: c,
             });
         }
     }
-    if klines.is_empty() {
-        return None;
+    // 今天
+    for i in 0..(cache.n_today as usize).min(MINUTE_SLOTS) {
+        let c = cache.closes[MINUTE_SLOTS + i];
+        if c > 0.0 {
+            let _ = klines.push(KLine {
+                date: slot_to_date(cache.date, i),
+                open: c, close: c, high: c, low: c,
+            });
+        }
     }
+    if klines.is_empty() { return None; }
     let last_price = cache.last_price;
     let preclose = cache.preclose;
     let mut code_s: String<10> = String::new();
@@ -645,20 +657,36 @@ pub fn now_slot(now: &OffsetDateTime) -> usize {
     mins_to_slot(now.hour() as i32 * 60 + now.minute() as i32)
 }
 
-/// 把一批分时 K 线按日内槽合并进缓存（同槽覆盖、新槽追加、n_bars 取最大），
-/// 并把最后一根 close 作为 last_price。供总览全量/增量拉取后拼接本地数据。
-pub fn merge_minute(cache: &mut StockMinuteCache, klines: &[KLine]) {
+/// 把分时 K 线按日期拆分合并进 2 日缓存：今天的 → 槽 48+s，非今天的 → 槽 s。
+/// last_price 取今天最后一根（无今天则取前一天的）。
+pub fn merge_minute(cache: &mut StockMinuteCache, klines: &[KLine], today: u32) {
     for k in klines {
         let s = bar_slot(k.date);
-        if s < MINUTE_SLOTS {
+        if s >= MINUTE_SLOTS { continue; }
+        let kd = (k.date / 1_000_000) as u32;
+        if kd == today {
+            cache.closes[MINUTE_SLOTS + s] = k.close;
+            let nb = (s as u8) + 1;
+            if nb > cache.n_today { cache.n_today = nb; }
+        } else {
             cache.closes[s] = k.close;
-            let nb = (s as u8).saturating_add(1);
-            if nb > cache.n_bars {
-                cache.n_bars = nb;
-            }
+            let nb = (s as u8) + 1;
+            if nb > cache.n_prev { cache.n_prev = nb; }
+            if cache.prev_date == 0 { cache.prev_date = kd; }
         }
     }
-    if let Some(last) = klines.last() {
-        cache.last_price = last.close;
+    // last_price：优先今天的最后一根
+    let mut found = false;
+    for k in klines.iter().rev() {
+        if (k.date / 1_000_000) as u32 == today {
+            cache.last_price = k.close;
+            found = true;
+            break;
+        }
+    }
+    if !found {
+        if let Some(last) = klines.last() {
+            cache.last_price = last.close;
+        }
     }
 }

@@ -105,8 +105,8 @@ enum MenuState {
     Closed,
     Popup { menu_index: u32 },
     JumpInput { input_pct: u8 },
-    /// 排版：px/gap 为进入时的快照（供“长按取消”还原），实时值在 self.ttf_px / self.line_gap。
-    Layout { px: u8, gap: u8 },
+    /// 排版：cursor 0=字号 1=行距 2=返回；editing=true 时上下键改值。
+    Layout { cursor: u8, editing: bool },
     FontList { font_index: u32 },
     BookmarkList { bm_index: u32, deleting: bool },
 }
@@ -513,6 +513,14 @@ impl ReadPage {
             .stroke_width(2)
             .build();
 
+        // 右上角电量显示
+        let bat_pct = crate::battery::last_percent();
+        if bat_pct > 0 {
+            let _ = crate::widgets::battery::draw_battery(
+                bat_pct, Point::new(vw as i32 - 32, 2), Black, &font12, display,
+            );
+        }
+
         match self.menu_state {
             MenuState::Popup { menu_index } => {
                 let page_info_height: u32 = 18;
@@ -627,11 +635,13 @@ impl ReadPage {
                         .ok();
                 }
             }
-            MenuState::Layout { .. } => {
-                let h: u32 = 120;
+            MenuState::Layout { cursor, editing } => {
+                let h: u32 = 130;
                 let x = ((vw - menu_width) / 2) as i32;
                 let y = ((vh - h) / 2) as i32;
                 let cx = x + menu_width as i32 / 2;
+                let row_h: i32 = 22;
+                let y0 = y + 26; // 第一行顶
 
                 RoundedRectangle::new(
                     Rectangle::new(Point::new(x, y), Size::new(menu_width, h)),
@@ -643,38 +653,65 @@ impl ReadPage {
 
                 font.render_aligned(
                     "排版设置",
-                    Point::new(cx, y + 18),
+                    Point::new(cx, y + 15),
                     VerticalPosition::Center,
                     HorizontalAlignment::Center,
                     FontColor::Transparent(Black),
                     display,
                 )
                 .ok();
+
+                // 三行选项：0=字号 1=行距 2=返回
+                let items: [(&str, heapless::String<24>); 3] = [
+                    ("字号", {
+                        let mut s: heapless::String<24> = heapless::String::new();
+                        let _ = core::fmt::write(&mut s, format_args!("{}", self.ttf_px as i32));
+                        s
+                    }),
+                    ("行距", {
+                        let mut s: heapless::String<24> = heapless::String::new();
+                        let _ = core::fmt::write(&mut s, format_args!("{}", self.line_gap));
+                        s
+                    }),
+                    ("返回", heapless::String::new()),
+                ];
+                for (i, (label, val)) in items.iter().enumerate() {
+                    let ry = y0 + i as i32 * row_h;
+                    let is_sel = i as u8 == cursor;
+                    // 选中行反相条
+                    if is_sel {
+                        let strip = Rectangle::new(
+                            Point::new(x + 4, ry),
+                            Size::new(menu_width - 8, row_h as u32 - 2),
+                        );
+                        let _ = strip.into_styled(PrimitiveStyleBuilder::new().fill_color(Black).build()).draw(display);
+                    }
+                    let lbl_color = if is_sel { FontColor::Transparent(White) } else { FontColor::Transparent(Black) };
+                    font.render_aligned(
+                        *label,
+                        Point::new(x + 12, ry + row_h / 2),
+                        VerticalPosition::Center, HorizontalAlignment::Left,
+                        lbl_color, display,
+                    )
+                    .ok();
+                    if !val.is_empty() {
+                        let prefix = if editing && is_sel { ">> " } else { "" };
+                        font.render_aligned(
+                            format_args!("{}{}", prefix, val.as_str()),
+                            Point::new(x + menu_width as i32 - 12, ry + row_h / 2),
+                            VerticalPosition::Center, HorizontalAlignment::Right,
+                            lbl_color, display,
+                        )
+                        .ok();
+                    }
+                }
+                // 底部提示
+                let tip = if editing { "1/2改值 3退出编辑" } else { "1/2选择 3确认 长按退出" };
                 font.render_aligned(
-                    format_args!("字号: {}", self.ttf_px as i32),
-                    Point::new(cx, y + 48),
-                    VerticalPosition::Center,
-                    HorizontalAlignment::Center,
-                    FontColor::Transparent(Black),
-                    display,
-                )
-                .ok();
-                font.render_aligned(
-                    format_args!("行距: {}", self.line_gap),
-                    Point::new(cx, y + 74),
-                    VerticalPosition::Center,
-                    HorizontalAlignment::Center,
-                    FontColor::Transparent(Black),
-                    display,
-                )
-                .ok();
-                font.render_aligned(
-                    "1/2字号 长按行距 3保存",
-                    Point::new(cx, y + h as i32 - 14),
-                    VerticalPosition::Center,
-                    HorizontalAlignment::Center,
-                    FontColor::Transparent(Black),
-                    display,
+                    tip,
+                    Point::new(cx, y + h as i32 - 12),
+                    VerticalPosition::Center, HorizontalAlignment::Center,
+                    FontColor::Transparent(Black), display,
                 )
                 .ok();
             }
@@ -1516,8 +1553,8 @@ impl Page for ReadPage {
                                             ttf_font_file = Some(f_static);
                                             self.font_file_ptr = ttf_font_file.as_mut().unwrap() as *mut ActualFile<'static>;
                                             if let Some(ws) = self.ttf_ws.as_mut() {
-                                                crate::ttf_sd::cache_clear(ws);
-                                                ws.fi = None; // 强制重新解析新字体的表目录/度量
+                                                crate::ttf_sd::cache_clear(ws, self.ttf_px);
+                                                ws.fi = None;
                                             }
                                         } else {
                                             println!("[read ttf] 重开字体失败: {}", fname);
@@ -1766,12 +1803,17 @@ impl Page for ReadPage {
                 let mut_ref: &mut Self = Self::mut_by_ptr(info.ptr).unwrap();
                 match mut_ref.menu_state {
                     MenuState::JumpInput { .. }
-                    | MenuState::Layout { .. }
                     | MenuState::FontList { .. }
                     | MenuState::BookmarkList { .. } => {
                         // 子菜单内长按 3：统一退回 Popup（取消当前操作）
                         mut_ref.menu_state = MenuState::Popup { menu_index: 0 };
                         mut_ref.bookmark_preview.clear();
+                        mut_ref.need_render = true;
+                    }
+                    MenuState::Layout { .. } => {
+                        // 排版长按 3：保存设置后关闭（与"返回"一致）
+                        mut_ref.save_reading_settings();
+                        mut_ref.menu_state = MenuState::Closed;
                         mut_ref.need_render = true;
                     }
                     MenuState::Popup { .. } => {
@@ -1842,10 +1884,7 @@ impl Page for ReadPage {
                             }
                             5 => {
                                 // 排版：快照当前值供“长按取消”还原
-                                mut_ref.menu_state = MenuState::Layout {
-                                    px: mut_ref.ttf_px as u8,
-                                    gap: mut_ref.line_gap as u8,
-                                };
+                                mut_ref.menu_state = MenuState::Layout { cursor: 0, editing: false };
                                 mut_ref.need_render = true;
                                 return;
                             }
@@ -1883,10 +1922,27 @@ impl Page for ReadPage {
                         mut_ref.menu_state = MenuState::Closed;
                         mut_ref.need_render = true;
                     }
-                    MenuState::Layout { .. } => {
-                        // 确认排版：保存到 flash 并关闭
-                        mut_ref.save_reading_settings();
-                        mut_ref.menu_state = MenuState::Closed;
+                    MenuState::Layout { ref mut cursor, ref mut editing } => {
+                        if *editing {
+                            // 退出编辑模式
+                            *editing = false;
+                            // 字号改了需清缓存
+                            if *cursor == 0 {
+                                if let Some(ws) = mut_ref.ttf_ws.as_mut() {
+                                    crate::ttf_sd::cache_clear(ws, mut_ref.ttf_px);
+                                }
+                            }
+                        } else {
+                            match *cursor {
+                                0 | 1 => { *editing = true; }
+                                2 => {
+                                    // 返回
+                                    mut_ref.save_reading_settings();
+                                    mut_ref.menu_state = MenuState::Closed;
+                                }
+                                _ => {}
+                            }
+                        }
                         mut_ref.need_render = true;
                     }
                     MenuState::FontList { font_index } => {
@@ -1965,11 +2021,22 @@ impl Page for ReadPage {
                         mut_ref.need_render = true;
                         Timer::after_millis(75).await;
                     }
-                    MenuState::Layout { .. } => {
-                        // 长按：行距 +1（实时）
-                        mut_ref.line_gap = (mut_ref.line_gap + 1).min(10);
-                        mut_ref.need_render = true;
-                        Timer::after_millis(150).await;
+                    MenuState::Layout { ref cursor, ref editing } => {
+                        if *editing {
+                            match *cursor {
+                                0 => {
+                                    let np = (mut_ref.ttf_px + 2.0).min(40.0);
+                                    mut_ref.ttf_px = np;
+                                    if let Some(ws) = mut_ref.ttf_ws.as_mut() {
+                                        crate::ttf_sd::cache_clear(ws, np);
+                                    }
+                                }
+                                1 => { mut_ref.line_gap = (mut_ref.line_gap + 1).min(10); }
+                                _ => {}
+                            }
+                            mut_ref.need_render = true;
+                            Timer::after_millis(150).await;
+                        }
                     }
                     MenuState::FontList { ref mut font_index } => {
                         let max = mut_ref.font_list.len() as u32;
@@ -2033,10 +2100,22 @@ impl Page for ReadPage {
                         mut_ref.need_render = true;
                         Timer::after_millis(75).await;
                     }
-                    MenuState::Layout { .. } => {
-                        mut_ref.line_gap = (mut_ref.line_gap - 1).max(0);
-                        mut_ref.need_render = true;
-                        Timer::after_millis(150).await;
+                    MenuState::Layout { ref cursor, ref editing } => {
+                        if *editing {
+                            match *cursor {
+                                0 => {
+                                    let np = (mut_ref.ttf_px - 2.0).max(12.0);
+                                    mut_ref.ttf_px = np;
+                                    if let Some(ws) = mut_ref.ttf_ws.as_mut() {
+                                        crate::ttf_sd::cache_clear(ws, np);
+                                    }
+                                }
+                                1 => { mut_ref.line_gap = (mut_ref.line_gap - 1).max(0); }
+                                _ => {}
+                            }
+                            mut_ref.need_render = true;
+                            Timer::after_millis(150).await;
+                        }
                     }
                     MenuState::FontList { ref mut font_index } => {
                         let max = mut_ref.font_list.len() as u32;
@@ -2097,12 +2176,21 @@ impl Page for ReadPage {
                         mut_ref.jump_accel = 0;
                         mut_ref.need_render = true;
                     }
-                    MenuState::Layout { .. } => {
-                        // 字号 +2（实时：改值 + 清字形缓存 + 重渲染）
-                        let np = (mut_ref.ttf_px + 2.0).min(40.0);
-                        mut_ref.ttf_px = np;
-                        if let Some(ws) = mut_ref.ttf_ws.as_mut() {
-                            crate::ttf_sd::cache_clear(ws);
+                    MenuState::Layout { ref mut cursor, ref mut editing } => {
+                        if *editing {
+                            match *cursor {
+                                0 => {
+                                    let np = (mut_ref.ttf_px - 2.0).max(12.0);
+                                    mut_ref.ttf_px = np;
+                                    if let Some(ws) = mut_ref.ttf_ws.as_mut() {
+                                        crate::ttf_sd::cache_clear(ws, np);
+                                    }
+                                }
+                                1 => { mut_ref.line_gap = (mut_ref.line_gap - 1).max(0); }
+                                _ => {}
+                            }
+                        } else {
+                            *cursor = (*cursor + 1) % 3; // Key1=下：0→1→2→0
                         }
                         mut_ref.need_render = true;
                     }
@@ -2163,11 +2251,21 @@ impl Page for ReadPage {
                         mut_ref.jump_accel = 0;
                         mut_ref.need_render = true;
                     }
-                    MenuState::Layout { .. } => {
-                        let np = (mut_ref.ttf_px - 2.0).max(12.0);
-                        mut_ref.ttf_px = np;
-                        if let Some(ws) = mut_ref.ttf_ws.as_mut() {
-                            crate::ttf_sd::cache_clear(ws);
+                    MenuState::Layout { ref mut cursor, ref mut editing } => {
+                        if *editing {
+                            match *cursor {
+                                0 => {
+                                    let np = (mut_ref.ttf_px + 2.0).min(40.0);
+                                    mut_ref.ttf_px = np;
+                                    if let Some(ws) = mut_ref.ttf_ws.as_mut() {
+                                        crate::ttf_sd::cache_clear(ws, np);
+                                    }
+                                }
+                                1 => { mut_ref.line_gap = (mut_ref.line_gap + 1).min(10); }
+                                _ => {}
+                            }
+                        } else {
+                            *cursor = (*cursor + 3 - 1) % 3; // Key2=上：0→2→1→0
                         }
                         mut_ref.need_render = true;
                     }

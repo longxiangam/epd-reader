@@ -28,8 +28,11 @@ const HMTX_CACHE_MAX: usize = 1024;
 const LOCA_CACHE_MAX: usize = 1024;
 const GLYF_BUF_MAX: usize = 2048;
 const BOOK_BUF_MAX: usize = 2048;
-const GC_N: usize = 128;
-const GC_BMP_BYTES: usize = 72;
+/// 字形位图缓存：扁平缓冲区 + 运行时按字号切分槽位大小/数量。
+/// 大字号 → 槽大、槽少（字数少够用）；小字号 → 槽小、槽多（字数多需要）。总预算不变。
+const GC_CACHE_BUDGET: usize = 12288; // 12KB 扁平位图缓冲
+const GC_N_MAX: usize = 256; // 槽位元数据上限（gid/w/h/yoff 数组长度）
+const MAX_SLOT_BYTES: usize = 128; // rasterize_to_bitmap 栈缓冲上限（覆盖到 ~30px）
 
 /// TTF 字体元信息（表偏移/度量）。Copy：首次解析后缓存在 TtfWs.fi，
 /// 避免每页翻页重复读表目录 + 重读 cmap 子表。
@@ -56,9 +59,8 @@ impl FontInfo {
     }
 }
 
-/// TTF 渲染工作区（~18KB）。堆分配，进阅读时创建、退出时释放。
-/// 字形缓存 GC_N=96：足够容纳一整页 CJK 的去重字形，使「渲染后预加载下一页」
-/// 真正命中缓存——翻页时绝大多数字形直接 blit，不再重新光栅化。
+/// TTF 渲染工作区。堆分配，进阅读时创建、退出时释放。
+/// 字形位图缓存：扁平缓冲区 GC_CACHE_BUDGET(12KB)，运行时按字号自适应切分槽位。
 pub struct TtfWs {
     pub pts_x: [i32; MAX_PTS],
     pub pts_y: [i32; MAX_PTS],
@@ -66,23 +68,22 @@ pub struct TtfWs {
     pub end_pts: [u16; MAX_CONTOURS],
     pub cmap_cache: [u8; CMAP_CACHE_MAX],
     pub cmap_len: u32,
-    /// 整张 hmtx（水平度量）表缓存进 RAM：advance() 不再每字读 SD，
-    /// 翻页时布局零 SD 读（只剩读 .txt 正文一次）。
     pub hmtx_cache: [u8; HMTX_CACHE_MAX],
     pub hmtx_len: u32,
-    /// 整张 loca 表缓存进 RAM：parse_glyph 取字形偏移不再每字读 2 次 SD。
     pub loca_cache: [u8; LOCA_CACHE_MAX],
     pub loca_len: u32,
     pub glyf_buf: [u8; GLYF_BUF_MAX],
     pub book_buf: [u8; BOOK_BUF_MAX],
-    pub gc_gid: [u16; GC_N],
-    pub gc_w: [u8; GC_N],
-    pub gc_h: [u8; GC_N],
-    /// 该字形位图 top 相对行顶(pen_y)的 y 偏移：基线对齐用（标点/不同升部字下沉到底）。
-    pub gc_yoff: [i16; GC_N],
-    pub gc_bmp: [[u8; GC_BMP_BYTES]; GC_N],
+    pub gc_gid: [u16; GC_N_MAX],
+    pub gc_w: [u8; GC_N_MAX],
+    pub gc_h: [u8; GC_N_MAX],
+    pub gc_yoff: [i16; GC_N_MAX],
+    pub gc_bmp: [u8; GC_CACHE_BUDGET],
+    /// 每槽字节数（按字号自适应）：slot i 的位图在 gc_bmp[i * gc_slot_bytes ..]。
+    pub gc_slot_bytes: usize,
+    /// 实际可用槽位数 = GC_CACHE_BUDGET / gc_slot_bytes，上限 GC_N_MAX。
+    pub gc_n_slots: usize,
     pub gc_next: usize,
-    /// 缓存已解析的 FontInfo（首次 open_font 填充）；Some 时 open_font 直接返回，不再读 SD。
     pub fi: Option<FontInfo>,
 }
 
@@ -588,20 +589,21 @@ fn build_outline(
 /// 光栅化字形到 1-bit 紧凑位图（覆盖率 ≥ 0.5 置位）。装不进 `GC_BMP_BYTES` 或尺寸非正返回 `None`。
 fn rasterize_to_bitmap(
     ws: &TtfWs, npt: usize, ncon: usize, bbox: [i16; 4], fi: &FontInfo, px: f32,
-) -> Option<(u8, u8, i16, [u8; GC_BMP_BYTES])> {
+) -> Option<(u8, u8, i16, [u8; MAX_SLOT_BYTES], usize)> {
     let (gw, gh, yoff, sc) = glyph_px_box(fi, bbox, px);
     if gw <= 0 || gh <= 0 { return None; }
     let rowbytes = (gw as usize + 7) / 8;
-    if gh as usize * rowbytes > GC_BMP_BYTES { return None; }
+    let bmp_len = gh as usize * rowbytes;
+    if bmp_len > ws.gc_slot_bytes || bmp_len > MAX_SLOT_BYTES { return None; }
     let mut ras = Rasterizer::new(gw as usize, gh as usize);
     build_outline(&mut ras, ws, npt, ncon, bbox, sc);
-    let mut bmp = [0u8; GC_BMP_BYTES];
+    let mut bmp = [0u8; MAX_SLOT_BYTES];
     ras.for_each_pixel_2d(|x, y, coverage| {
         if coverage >= 0.35 {
             bmp[y as usize * rowbytes + x as usize / 8] |= 0x80u8 >> (x % 8);
         }
     });
-    Some((gw as u8, gh as u8, yoff, bmp))
+    Some((gw as u8, gh as u8, yoff, bmp, bmp_len))
 }
 
 /// 字形过大装不进缓存位图：直接光栅化逐像素画到 `display`（`oy` 传行顶，内部按 `yoff` 下沉）。
@@ -623,41 +625,51 @@ fn rasterize_to_display<D: DrawTarget<Color = BinaryColor>>(
     });
 }
 
-// ── 字形位图缓存 ──
+// ── 字形位图缓存（扁平缓冲区，按字号自适应槽位大小）──
 fn cache_lookup(ws: &TtfWs, gid: u16) -> Option<usize> {
     let mut i = 0;
-    while i < GC_N {
+    let n = ws.gc_n_slots;
+    while i < n {
         if ws.gc_gid[i] == gid { return Some(i); }
         i += 1;
     }
     None
 }
-/// 清空字形缓存（改字号/旋转后调用：旧位图尺寸/方向已失效）。
-pub fn cache_clear(ws: &mut TtfWs) {
-    for i in 0..GC_N {
-        ws.gc_gid[i] = 0xFFFF; // 不可能是真实 gid（< num_glyphs）
+/// 清空字形缓存并按字号重新计算槽位大小/数量（改字号/旋转后调用）。
+/// px=16 → 槽小(34B)槽多(256)；px=30 → 槽大(120B)槽少(102)。总预算 12KB 不变。
+pub fn cache_clear(ws: &mut TtfWs, px: f32) {
+    for i in 0..GC_N_MAX {
+        ws.gc_gid[i] = 0xFFFF;
     }
     ws.gc_next = 0;
+    // 按 px 计算每槽字节：CJK 字形约 px×px，1-bit packed。
+    let dim = (px.ceil() as usize) + 2;
+    let rowbytes = (dim + 7) / 8;
+    ws.gc_slot_bytes = rowbytes * dim;
+    ws.gc_n_slots = (GC_CACHE_BUDGET / ws.gc_slot_bytes).min(GC_N_MAX);
 }
 fn cache_store(ws: &mut TtfWs, gid: u16, w: u8, h: u8, yoff: i16) -> usize {
     let slot = ws.gc_next;
-    ws.gc_next = (slot + 1) % GC_N;
+    ws.gc_next = (slot + 1) % ws.gc_n_slots;
     ws.gc_gid[slot] = gid;
     ws.gc_w[slot] = w;
     ws.gc_h[slot] = h;
     ws.gc_yoff[slot] = yoff;
-    for i in 0..GC_BMP_BYTES { ws.gc_bmp[slot][i] = 0; }
+    // 清零该槽区域
+    let off = slot * ws.gc_slot_bytes;
+    for i in 0..ws.gc_slot_bytes { ws.gc_bmp[off + i] = 0; }
     slot
 }
 fn blit_slot<D: DrawTarget<Color = BinaryColor>>(ws: &TtfWs, display: &mut D, slot: usize, ox: i32, oy: i32) {
     let w = ws.gc_w[slot] as i32;
     let h = ws.gc_h[slot] as i32;
     let rowbytes = ((w as usize) + 7) / 8;
+    let off = slot * ws.gc_slot_bytes;
     for y in 0..h {
         let mut x = 0;
         while x < w {
-            let idx = (y as usize) * rowbytes + (x as usize) / 8;
-            if ws.gc_bmp[slot][idx] & (0x80u8 >> (x % 8)) != 0 {
+            let idx = off + (y as usize) * rowbytes + (x as usize) / 8;
+            if ws.gc_bmp[idx] & (0x80u8 >> (x % 8)) != 0 {
                 let _ = display.draw_iter(core::iter::once(Pixel(Point::new(ox + x, oy + y), BinaryColor::On)));
             }
             x += 1;
@@ -685,12 +697,24 @@ pub fn paginate_render<D: DrawTarget<Color = BinaryColor>>(
     book_len: usize, px: f32, top_left: Point, max_w: i32, line_h: i32, max_lines: u32,
 ) -> usize {
     if max_lines == 0 { return 0; }
-    let sc = px / fi.units_per_em as f32; // advance 布局用（每字一次，f32 可接受）
+    // 惰性初始化：alloc_ws 清零后 gc_n_slots=0，首次渲染时按 px 自动设置槽位。
+    if ws.gc_n_slots == 0 {
+        let dim = (px.ceil() as usize) + 2;
+        ws.gc_slot_bytes = ((dim + 7) / 8) * dim;
+        ws.gc_n_slots = (GC_CACHE_BUDGET / ws.gc_slot_bytes).min(GC_N_MAX);
+        for g in &mut ws.gc_gid[..] { *g = 0xFFFF; }
+        ws.gc_next = 0;
+        println!("[ttf] cache init: slot_bytes={} n_slots={}", ws.gc_slot_bytes, ws.gc_n_slots);
+    }
+    let sc = px / fi.units_per_em as f32;
     let left = top_left.x;
     let mut pen_x = left;
     let mut pen_y = top_left.y;
     let mut line = 0u32;
     let mut i = 0usize;
+    let mut hits = 0u32;
+    let mut misses = 0u32;
+    let mut big_glyphs = 0u32; // 超出槽位走直接渲染
     while i < book_len {
         let b0 = ws.book_buf[i];
         let clen = if b0 < 0x80 { 1 } else if b0 < 0xC0 { 1 }
@@ -715,14 +739,17 @@ pub fn paginate_render<D: DrawTarget<Color = BinaryColor>>(
             pen_y += line_h;
         }
         if let Some(slot) = cache_lookup(ws, gid) {
+            hits += 1;
             blit_slot(ws, display, slot, pen_x, pen_y + ws.gc_yoff[slot] as i32);
         } else if let Some((npt, ncon, bbox)) = parse_glyph(f, fi, gid, ws) {
-            if let Some((gw, gh, yoff, bmp)) = rasterize_to_bitmap(ws, npt, ncon, bbox, fi, px) {
+            if let Some((gw, gh, yoff, bmp, blen)) = rasterize_to_bitmap(ws, npt, ncon, bbox, fi, px) {
+                misses += 1;
                 let slot = cache_store(ws, gid, gw, gh, yoff);
-                ws.gc_bmp[slot] = bmp;
+                let off = slot * ws.gc_slot_bytes;
+                ws.gc_bmp[off..off + blen].copy_from_slice(&bmp[..blen]);
                 blit_slot(ws, display, slot, pen_x, pen_y + yoff as i32);
             } else {
-                // 字形过大装不进缓存位图：直接光栅化逐像素画到屏幕
+                big_glyphs += 1;
                 rasterize_to_display(
                     ws, display, npt, ncon, bbox, fi, px,
                     pen_x, pen_y, BinaryColor::On,
@@ -732,6 +759,8 @@ pub fn paginate_render<D: DrawTarget<Color = BinaryColor>>(
         pen_x += adv_f as i32;
         i += clen;
     }
+    println!("[ttf] paginate: hits={} misses={} big={} slot_bytes={} n_slots={}",
+        hits, misses, big_glyphs, ws.gc_slot_bytes, ws.gc_n_slots);
     i
 }
 
@@ -860,6 +889,13 @@ pub async fn preload_glyphs(
     book_len: usize, px: f32, max_w: i32, line_h: i32, max_lines: u32,
 ) {
     if max_lines == 0 { return; }
+    if ws.gc_n_slots == 0 {
+        let dim = (px.ceil() as usize) + 2;
+        ws.gc_slot_bytes = ((dim + 7) / 8) * dim;
+        ws.gc_n_slots = (GC_CACHE_BUDGET / ws.gc_slot_bytes).min(GC_N_MAX);
+        for g in &mut ws.gc_gid[..] { *g = 0xFFFF; }
+        ws.gc_next = 0;
+    }
     let sc = px / fi.units_per_em as f32;
     let mut pen_x = 0i32;
     let mut line = 0u32;
@@ -888,9 +924,10 @@ pub async fn preload_glyphs(
         // 只缓存不画
         if cache_lookup(ws, gid).is_none() {
             if let Some((npt, ncon, bbox)) = parse_glyph(f, fi, gid, ws) {
-                if let Some((gw, gh, yoff, bmp)) = rasterize_to_bitmap(ws, npt, ncon, bbox, fi, px) {
+                if let Some((gw, gh, yoff, bmp, blen)) = rasterize_to_bitmap(ws, npt, ncon, bbox, fi, px) {
                     let slot = cache_store(ws, gid, gw, gh, yoff);
-                    ws.gc_bmp[slot] = bmp;
+                    let off = slot * ws.gc_slot_bytes;
+                    ws.gc_bmp[off..off + blen].copy_from_slice(&bmp[..blen]);
                 }
                 // 字形过大装不进缓存：预加载阶段不画（跳过，翻页即时渲染时再直接画）
             }

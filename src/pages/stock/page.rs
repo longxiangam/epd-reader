@@ -175,69 +175,39 @@ impl StockPage {
         for i in 0..count {
             let code = storage.entries[i].code.as_str();
             let name = storage.entries[i].name.as_str();
-            // 跳过空代码（web 配置中留空的行，或 NVS 数据偏移错位导致的垃圾）
-            if code.is_empty() {
-                continue;
-            }
-            // SAFETY: 单核协作式调度；fetch_overview 仅在 run() 循环执行，无重入。
+            if code.is_empty() { continue; }
             let cache: &mut stock::StockMinuteCache = unsafe {
                 &mut (*core::ptr::addr_of_mut!(STOCK_MINUTE_CACHE))[i]
             };
-            let same_day = time_ok && cache.matches_code(code) && cache.date == today;
-            println!("[stock] i={} code={} same_day={} time_ok={} today={} cache.date={} cache.n_bars={}", i, code, same_day, time_ok, today, cache.date, cache.n_bars);
-            if !same_day {
-                // 全量 + 取昨收
+            println!("[stock] i={} code={} today={}", i, code, today);
+
+            // 每次全量拉取 + 全量重建缓存（不做增量，避免槽位残留导致数据不一致）
+            let mut minute_result = fetch_stock(ChartMode::Minute, code, name, stock::MINUTE_SLOTS).await;
+            if minute_result.is_err() {
+                Timer::after(Duration::from_millis(500)).await;
+                minute_result = fetch_stock(ChartMode::Minute, code, name, stock::MINUTE_SLOTS).await;
+            }
+            if let Ok(d) = minute_result {
+                let old_preclose = cache.preclose;
                 cache.reset();
                 cache.set_code(code);
-                if let Ok(d) = fetch_stock(ChartMode::Minute, code, name, stock::MINUTE_SLOTS).await {
-                    if time_ok {
-                        cache.date = today; // 取到分时才标记当日（失败则下次唤醒重试全量）
-                    }
-                    let nk = d.klines.len();
-                    // 诊断：前 3 根 bar 的时间戳→槽位
-                    for (idx, k) in d.klines.iter().take(3).enumerate() {
-                        println!("  bar[{}] date={} slot={} close={}", idx, k.date, stock::bar_slot(k.date), k.close);
-                    }
-                    stock::merge_minute(cache, &d.klines);
-                    println!("  full: nk={} n_bars={} last_price={}", nk, cache.n_bars, cache.last_price);
-                    // 缓存前 5 槽值（诊断数据是否正确存入）
-                    if cache.n_bars >= 5 {
-                        println!("  closes[0..5]: {:.2} {:.2} {:.2} {:.2} {:.2}",
-                            cache.closes[0], cache.closes[1], cache.closes[2], cache.closes[3], cache.closes[4]);
-                    }
-                    // 昨收：首次/跨日只查一次实时行情（真实昨收，与手机涨跌幅一致）
+                if time_ok { cache.date = today; }
+                // 昨收：一天内只查一次（preclose 跨交易日才变）。
+                // 复用旧 preclose → Y 轴范围稳定 → 图表不会因 preclose 漂移而变形
+                cache.preclose = old_preclose;
+                let nk = d.klines.len();
+                stock::merge_minute(cache, &d.klines, today);
+                println!("  fetched: nk={} n_prev={} n_today={} last_price={}", nk, cache.n_prev, cache.n_today, cache.last_price);
+                // 只在 preclose 还没有时查一次腾讯行情
+                if cache.preclose <= 0.0 {
                     if let Ok(q) = fetch_stock(ChartMode::Quote, code, name, 0).await {
                         cache.preclose = q.preclose;
-                        if q.last_price > 0.0 {
-                            cache.last_price = q.last_price;
-                        }
-                        println!("  quote: preclose={} last_price={}", cache.preclose, cache.last_price);
+                        if q.last_price > 0.0 { cache.last_price = q.last_price; }
+                        println!("  quote(first): preclose={} last_price={}", cache.preclose, cache.last_price);
                     }
                 }
-            } else if let Some(n) = now.as_ref() && cache.n_bars > 0 {
-                // 同日增量：只拉 cur_slot - last_slot 根，合并；昨收复用缓存。
-                // n_bars==0 的首次场景已在上面全量分支处理；盘后/盘前 now_slot=0/47，
-                // need 用 MINUTE_SLOTS 保证拉够（merge 按槽覆盖，冗余无害）。
-                let cur_slot = stock::now_slot(n);
-                let last_slot = ((cache.n_bars as i32) - 1).max(0);
-                let need = if cur_slot as i32 <= last_slot {
-                    stock::MINUTE_SLOTS // 盘后/盘前：拉全量，确保缓存覆盖完整
-                } else {
-                    ((cur_slot as i32) - last_slot) as usize
-                };
-                println!("  incr: cur_slot={} last_slot={} need={}", cur_slot, last_slot, need);
-                if let Ok(d) = fetch_stock(ChartMode::Minute, code, name, need).await {
-                    let nk = d.klines.len();
-                    for (idx, k) in d.klines.iter().take(3).enumerate() {
-                        println!("  bar[{}] date={} slot={} close={}", idx, k.date, stock::bar_slot(k.date), k.close);
-                    }
-                    stock::merge_minute(cache, &d.klines);
-                    println!("  incr done: nk={} n_bars={} last_price={}", nk, cache.n_bars, cache.last_price);
-                    if cache.n_bars >= 5 {
-                        println!("  closes[0..5]: {:.2} {:.2} {:.2} {:.2} {:.2}",
-                            cache.closes[0], cache.closes[1], cache.closes[2], cache.closes[3], cache.closes[4]);
-                    }
-                }
+            } else {
+                println!("[stock] i={} fetch failed, keeping old cache", i);
             }
         }
         crate::wifi::set_request_loading(false);
@@ -268,7 +238,7 @@ impl StockPage {
                 &(*core::ptr::addr_of!(STOCK_MINUTE_CACHE))[si]
             };
             if let Some(d) = stock::stock_data_from_cache(cache, code, name) {
-                println!("[stock] detail minute from cache: n_bars={} last_price={}", cache.n_bars, cache.last_price);
+                println!("[stock] detail minute from cache: n_prev={} n_today={} last_price={}", cache.n_prev, cache.n_today, cache.last_price);
                 self.data = Some(d);
                 self.err_msg = None;
                 crate::wifi::set_request_loading(false);
@@ -287,7 +257,11 @@ impl StockPage {
                         &mut (*core::ptr::addr_of_mut!(STOCK_MINUTE_CACHE))[si]
                     };
                     if cache.matches_code(code) {
-                        stock::merge_minute(cache, &d.klines);
+                        let today = match crate::worldtime::get_clock() {
+                            Some(c) => stock::today_yyyymmdd(&c.local().await),
+                            None => 0,
+                        };
+                        stock::merge_minute(cache, &d.klines, today);
                     }
                 }
                 self.data = Some(d);
@@ -413,13 +387,15 @@ impl Page for StockPage {
                 let c = (ss.count as usize).min(6);
                 self.cursor = if c > 0 { (ss.selected as usize).min(c - 1) } else { 0 };
             }
-            // 距上次拉取不足 2 分钟 → 跳过，直接用 rtc_fast 缓存渲染
+            // 距上次拉取不足 30 秒 → 跳过，直接用 rtc_fast 缓存渲染
             let now_ms = crate::sleep::get_rtc_ms().await;
             let last_ms = unsafe { *core::ptr::addr_of!(STOCK_LAST_FETCH_MS) };
-            if last_ms != 0 && now_ms.wrapping_sub(last_ms) < 120_000 {
-                println!("[stock] overview skip fetch: elapsed={}ms < 120s", now_ms.wrapping_sub(last_ms));
+            let elapsed = now_ms.wrapping_sub(last_ms);
+            if last_ms != 0 && elapsed < 30_000 {
+                println!("[stock] overview skip fetch: elapsed={}ms < 30s", elapsed);
                 self.need_render = true;
             } else {
+                println!("[stock] overview fetch: elapsed={}ms >= 30s (or first)", elapsed);
                 self.fetch_overview().await;
                 unsafe { *core::ptr::addr_of_mut!(STOCK_LAST_FETCH_MS) = now_ms; }
             }
@@ -497,14 +473,14 @@ impl Page for StockPage {
                 }
             })
         }).await;
-        // 长按1：总览=上一格 / 明细=强制刷新（跳过缓存，走网络更新分时并回写缓存）
+        // 长按1：总览=强制刷新 / 明细=上一支股票
         event::on_target(EventType::KeyLongEnd(1), Self::mut_to_ptr(self), move |info| {
             Box::pin(async move {
                 let mut_ref: &mut Self = Self::mut_by_ptr(info.ptr).unwrap();
                 if mut_ref.view == StockView::Overview {
-                    mut_ref.overview_move_cursor(false);
-                } else {
-                    mut_ref.force_fetch = true;
+                    // 总览长按1：强制刷新（直接触发 fetch_overview，不走间隔判断）
+                    mut_ref.need_fetch = true;
+                } else if mut_ref.switch_stock(false) {
                     mut_ref.need_fetch = true;
                 }
             })

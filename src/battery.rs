@@ -27,6 +27,11 @@ pub static ADC_PIN:Mutex<CriticalSectionRawMutex,Option<AdcPin<esp_hal::peripher
 #[ram(unstable(rtc_fast))]
 static mut LAST_BATTERY_PERCENT: u32 = 0;
 
+/// 同步读取最近一次电量百分比（供渲染路径用，无需 await）。
+pub fn last_percent() -> u32 {
+    unsafe { *core::ptr::addr_of!(LAST_BATTERY_PERCENT) }
+}
+
 #[embassy_executor::task]
 pub async fn test_bat_adc() {
     const V_MAX: u32 = 4100;

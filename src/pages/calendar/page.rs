@@ -155,11 +155,8 @@ impl Page for CalendarPage {
                     self.need_render = true;
                     holiday_sync_second = temp;
                 }
-            } else {
-                refresh_active_time().await;
-                self.need_render = true;
-                Timer::after(Duration::from_secs(1)).await;
             }
+            // 节假日未同步时不阻止睡眠、不强制刷新
 
             Timer::after(Duration::from_millis(1)).await;
             self.render().await;

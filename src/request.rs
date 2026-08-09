@@ -12,7 +12,7 @@ use crate::random::RngWrapper;
 
 // 缓冲区各段尺寸
 const TCP_BUF: usize = 4096;
-const TLS_BUF: usize = 4096;
+const TLS_BUF: usize = 8192;
 const HEADERS_BUF: usize = 1024;
 /// 响应体缓冲。新浪 K 线日K(60根)≈6.4KB、分时≈5.8KB；天气/节假日<4KB。
 const RESPONSE_BUF: usize = 8 * 1024;
