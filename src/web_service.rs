@@ -343,7 +343,7 @@ async fn handle_delete_image(socket: &mut TcpSocket<'_>, _req: &httparse::Reques
 
     let bmp_file_name = alloc::format!("{}.bmp", image_name);
     if let Some(entry) = SdMount::find_entry_by_name(&mut images_dir, &bmp_file_name) {
-        let _ = images_dir.delete_file_in_dir(entry.name);
+        let _ = images_dir.delete_entry_in_dir(entry.name);
         send_json(socket, b"{\"success\":true}").await;
     } else {
         send_json(socket, b"{\"success\":false,\"error\":\"image not found\"}").await;
@@ -399,20 +399,6 @@ async fn handle_upload_image(socket: &mut TcpSocket<'_>, req: &httparse::Request
         embedded_sdmmc::Mode::ReadWriteCreateOrAppend
     };
 
-    let mut lfn_short_name: Option<embedded_sdmmc::ShortFileName> = None;
-    if chunk_index == 0 && !file_name.is_ascii() {
-        match SdMount::create_image_file_with_lfn(&mut sd.volume_manager, &file_name) {
-            Ok((short_name, _block, _offset)) => {
-                println!("Image LFN created: {} -> {}", file_name, short_name);
-                lfn_short_name = Some(short_name);
-            }
-            Err(_) => {
-                send_json(socket, b"{\"success\":false,\"error\":\"create image lfn failed\"}").await;
-                return;
-            }
-        }
-    }
-
     let volume0 = match sd.volume_manager.open_volume(embedded_sdmmc::VolumeIdx(0)) {
         Ok(v) => v,
         Err(_) => { send_json(socket, b"{\"success\":false,\"error\":\"open volume failed\"}").await; return; }
@@ -426,22 +412,11 @@ async fn handle_upload_image(socket: &mut TcpSocket<'_>, req: &httparse::Request
         Err(_) => { send_json(socket, b"{\"success\":false,\"error\":\"open images dir failed\"}").await; return; }
     };
 
-    let file = if let Some(ref sn) = lfn_short_name {
-        match images_dir.open_file_in_dir(sn.clone(), mode) {
-            Ok(f) => f,
-            Err(e) => {
-                println!("open by short name failed: {:?}", e);
-                send_json(socket, b"{\"success\":false,\"error\":\"open file failed\"}").await;
-                return;
-            }
-        }
-    } else {
-        match SdMount::open_file_by_name(&mut images_dir, &file_name, mode) {
-            Ok(f) => f,
-            Err(_) => {
-                send_json(socket, b"{\"success\":false,\"error\":\"open file failed\"}").await;
-                return;
-            }
+    let file = match SdMount::open_file_by_name(&mut images_dir, &file_name, mode) {
+        Ok(f) => f,
+        Err(_) => {
+            send_json(socket, b"{\"success\":false,\"error\":\"open file failed\"}").await;
+            return;
         }
     };
 
@@ -706,12 +681,12 @@ async fn handle_delete(socket: &mut TcpSocket<'_>, _req: &httparse::Request<'_, 
     if let Some(entry) = SdMount::find_entry_by_name(&mut books_dir, &txt_file_name) {
         let short_name = entry.name;
         // Delete .txt
-        let _ = books_dir.delete_file_in_dir(short_name.clone());
+        let _ = books_dir.delete_entry_in_dir(short_name.clone());
         // Delete .idx if exists
         let _ = SdMount::delete_idx_file(&mut books_dir, &short_name);
         // Delete .log if exists
         if let Some(log_name) = SdMount::derive_short_name(&short_name, "LOG") {
-            let _ = books_dir.delete_file_in_dir(log_name);
+            let _ = books_dir.delete_entry_in_dir(log_name);
         }
         send_json(socket, b"{\"success\":true}").await;
     } else {
@@ -782,22 +757,6 @@ async fn handle_upload(socket: &mut TcpSocket<'_>, req: &httparse::Request<'_, '
         embedded_sdmmc::Mode::ReadWriteCreateOrAppend
     };
 
-    // Step 1: For chunk 0 with non-ASCII name, create file with LFN first
-    let mut lfn_short_name: Option<embedded_sdmmc::ShortFileName> = None;
-    if chunk_index == 0 && !file_name.is_ascii() {
-        match SdMount::create_file_with_lfn(&mut sd.volume_manager, &file_name) {
-            Ok((short_name, _block, _offset)) => {
-                println!("LFN created: {} -> {}", file_name, short_name);
-                lfn_short_name = Some(short_name);
-            }
-            Err(_) => {
-                send_json(socket, b"{\"success\":false,\"error\":\"create lfn failed\"}").await;
-                return;
-            }
-        }
-    }
-
-    // Step 2: Open volume/root/books_dir and get file handle
     let volume0 = match sd.volume_manager.open_volume(embedded_sdmmc::VolumeIdx(0)) {
         Ok(v) => v,
         Err(_) => {
@@ -820,23 +779,11 @@ async fn handle_upload(socket: &mut TcpSocket<'_>, req: &httparse::Request<'_, '
         }
     };
 
-    // Open file — use short name directly if LFN was just created
-    let file = if let Some(ref sn) = lfn_short_name {
-        match books_dir.open_file_in_dir(sn.clone(), mode) {
-            Ok(f) => f,
-            Err(e) => {
-                println!("open by short name failed: {:?}", e);
-                send_json(socket, b"{\"success\":false,\"error\":\"open file failed\"}").await;
-                return;
-            }
-        }
-    } else {
-        match SdMount::open_file_by_name(&mut books_dir, &file_name, mode) {
-            Ok(f) => f,
-            Err(_) => {
-                send_json(socket, b"{\"success\":false,\"error\":\"open file failed\"}").await;
-                return;
-            }
+    let file = match SdMount::open_file_by_name(&mut books_dir, &file_name, mode) {
+        Ok(f) => f,
+        Err(_) => {
+            send_json(socket, b"{\"success\":false,\"error\":\"open file failed\"}").await;
+            return;
         }
     };
 

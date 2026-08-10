@@ -22,6 +22,7 @@ use crate::epd2in9_txt::TxtReader;
 use crate::event::EventType;
 use crate::pages::Page;
 use crate::sd_mount::{ActualDirectory, ActualFile, SD_MOUNT, SdMount, BOOK_NAME_MAX};
+use core::ops::ControlFlow;
 use crate::sleep::to_sleep_tips;
 use crate::storage::NvsStorage;
 use crate::widgets::list_widget::ListWidget;
@@ -1285,16 +1286,12 @@ impl Page for ReadPage {
                         if !bd_ptr.is_null() {
                             let bd: &mut ActualDirectory<'_> = unsafe { &mut *bd_ptr };
                             let file_name = format!("{}.txt", book_name);
-                            let short_name =
-                                SdMount::find_entry_by_name(bd, &file_name).map(|e| e.name);
                             let mut n = 0usize;
-                            if let Some(sn) = short_name {
-                                if let Ok(mut bf) =
-                                    bd.open_file_in_dir(sn, embedded_sdmmc::Mode::ReadOnly)
-                                {
-                                    n = crate::ttf_sd::read_book_chunk(&mut bf, ttf_offset, ws);
-                                    bf.close();
-                                }
+                            if let Ok(mut bf) =
+                                bd.open_long_name_file_in_dir(&file_name, embedded_sdmmc::Mode::ReadOnly)
+                            {
+                                n = crate::ttf_sd::read_book_chunk(&mut bf, ttf_offset, ws);
+                                bf.close();
                             }
                             if n > 0 {
                                 let text_area_h = vh as i32
@@ -1455,6 +1452,7 @@ impl Page for ReadPage {
                                                 }
                                             }
                                         }
+                                        ControlFlow::Continue(())
                                     });
                                     self.font_list = fonts_found;
                                     // 追加内置点阵字体（u8g2 wqy，无需 SD 文件），大→小

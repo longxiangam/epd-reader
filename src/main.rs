@@ -40,7 +40,7 @@ use embedded_graphics::Drawable;
 use embedded_graphics::mono_font::MonoTextStyleBuilder;
 use embedded_graphics::prelude::Point;
 use embedded_graphics::text::{Baseline, Text, TextStyleBuilder};
-use embedded_sdmmc::{sdcard::AcquireOpts, SdCard, VolumeManager};
+use embedded_sdmmc::{sdcard::spi::AcquireOpts, SdCard, VolumeManager};
 
 use esp_hal::{
     analog::adc::{Adc, AdcCalCurve, AdcConfig, Attenuation},
