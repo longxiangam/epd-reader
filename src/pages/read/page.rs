@@ -248,12 +248,7 @@ impl ReadPage {
             Some(n) => n.clone(),
             None => return,
         };
-        let file_name = format!("{}.txt", book_name);
-        let short_name = match SdMount::find_entry_by_name(books_dir, &file_name) {
-            Some(e) => e.name,
-            None => return,
-        };
-        let log_file = SdMount::open_log_file(books_dir, &short_name, embedded_sdmmc::Mode::ReadOnly);
+        let log_file = SdMount::open_log_file(books_dir, &book_name, embedded_sdmmc::Mode::ReadOnly);
         if let Ok(mut f) = log_file {
             self.log_vec = Some(TxtReader::read_log(&mut f));
             f.close();
@@ -296,7 +291,7 @@ impl ReadPage {
                             }
                             Err(_) => 0,
                         };
-                        let raw = match SdMount::open_log_file(books_dir, &short, embedded_sdmmc::Mode::ReadOnly) {
+                        let raw = match SdMount::open_log_file(books_dir, book_name, embedded_sdmmc::Mode::ReadOnly) {
                             Ok(mut f) => {
                                 let log = TxtReader::read_log(&mut f);
                                 f.close();
@@ -1428,32 +1423,38 @@ impl Page for ReadPage {
                                 self.books_dir_ptr =
                                     core::ptr::addr_of_mut!(books_dir) as *mut ActualDirectory<'static>;
 
+                                // 字体独立放在 fonts/ 目录（不存在则仅用内置点阵字体）
+                                let mut fonts_dir_opt: Option<ActualDirectory<'_>> =
+                                    root.open_dir("fonts").ok();
+
                                 // 扫描 .ttf 文件进 font_list（长文件名 + 短文件名回退）
                                 {
                                     let mut fonts_found: Vec<String<32>, 10> = Vec::new();
-                                    let mut storage = [0u8; 512];
-                                    let mut lfn_buffer = embedded_sdmmc::LfnBuffer::new(&mut storage);
-                                    let _ = books_dir.iterate_dir_lfn(&mut lfn_buffer, |dir, lfn| {
-                                        let name_opt: Option<alloc::string::String> = if let Some(lfn_name) = lfn {
-                                            if is_ttf(lfn_name) { Some(alloc::string::String::from(lfn_name)) } else { None }
-                                        } else {
-                                            // 短文件名回退：dir.name 是 ShortFileName
-                                            if dir.name.extension().eq_ignore_ascii_case(b"TTF") {
-                                                let base = dir.name.base_name();
-                                                let mut s = alloc::string::String::from_utf8(alloc::vec::Vec::from(base)).unwrap_or_default();
-                                                s.push_str(".TTF");
-                                                Some(s)
-                                            } else { None }
-                                        };
-                                        if let Some(name) = name_opt {
-                                            if name.len() <= 32 {
-                                                if let Ok(s) = String::<32>::from_str(&name) {
-                                                    let _ = fonts_found.push(s);
+                                    if let Some(fonts_dir) = fonts_dir_opt.as_mut() {
+                                        let mut storage = [0u8; 512];
+                                        let mut lfn_buffer = embedded_sdmmc::LfnBuffer::new(&mut storage);
+                                        let _ = fonts_dir.iterate_dir_lfn(&mut lfn_buffer, |dir, lfn| {
+                                            let name_opt: Option<alloc::string::String> = if let Some(lfn_name) = lfn {
+                                                if is_ttf(lfn_name) { Some(alloc::string::String::from(lfn_name)) } else { None }
+                                            } else {
+                                                // 短文件名回退：dir.name 是 ShortFileName
+                                                if dir.name.extension().eq_ignore_ascii_case(b"TTF") {
+                                                    let base = dir.name.base_name();
+                                                    let mut s = alloc::string::String::from_utf8(alloc::vec::Vec::from(base)).unwrap_or_default();
+                                                    s.push_str(".TTF");
+                                                    Some(s)
+                                                } else { None }
+                                            };
+                                            if let Some(name) = name_opt {
+                                                if name.len() <= 32 {
+                                                    if let Ok(s) = String::<32>::from_str(&name) {
+                                                        let _ = fonts_found.push(s);
+                                                    }
                                                 }
                                             }
-                                        }
-                                        ControlFlow::Continue(())
-                                    });
+                                            ControlFlow::Continue(())
+                                        });
+                                    }
                                     self.font_list = fonts_found;
                                     // 追加内置点阵字体（u8g2 wqy，无需 SD 文件），大→小
                                     let _ = self.font_list.push(String::from_str("点阵16").unwrap());
@@ -1472,16 +1473,18 @@ impl Page for ReadPage {
                                 let fname = self.font_name.as_str();
                                 // 点阵字体用内置 u8g2，无需打开 .ttf
                                 if !is_bitmap(fname) {
-                                    if let Ok(f) = SdMount::open_file_by_name(
-                                        &mut books_dir,
-                                        fname,
-                                        embedded_sdmmc::Mode::ReadOnly,
-                                    ) {
-                                        // 句柄实际只依赖 volume_mgr（整个阅读期有效），擦除生命周期为 'static。
-                                        let f_static: ActualFile<'static> = unsafe { core::mem::transmute(f) };
-                                        ttf_font_file = Some(f_static);
-                                    } else {
-                                        println!("[read ttf] {} 打开失败", fname);
+                                    if let Some(fd) = fonts_dir_opt.as_mut() {
+                                        if let Ok(f) = SdMount::open_file_by_name(
+                                            fd,
+                                            fname,
+                                            embedded_sdmmc::Mode::ReadOnly,
+                                        ) {
+                                            // 句柄实际只依赖 volume_mgr（整个阅读期有效），擦除生命周期为 'static。
+                                            let f_static: ActualFile<'static> = unsafe { core::mem::transmute(f) };
+                                            ttf_font_file = Some(f_static);
+                                        } else {
+                                            println!("[read ttf] {} 打开失败", fname);
+                                        }
                                     }
                                 }
                                 self.font_file_ptr = match ttf_font_file.as_mut() {
@@ -1504,23 +1507,19 @@ impl Page for ReadPage {
                                     if self.save_bookmark_flag {
                                         self.save_bookmark_flag = false;
                                         let book_name = self.menus.as_ref().unwrap()[self.choose_index as usize].clone();
-                                        let file_name = format!("{}.txt", book_name);
-                                        if let Some(entry) = SdMount::find_entry_by_name(&mut books_dir, &file_name) {
-                                            let short_name = entry.name;
-                                            let logfile = SdMount::open_log_file(
-                                                &mut books_dir,
-                                                &short_name,
-                                                embedded_sdmmc::Mode::ReadWriteCreateOrTruncate,
-                                            );
-                                            if let Ok(mut f) = logfile {
-                                                if self.log_vec.is_none() {
-                                                    self.log_vec = Some(Vec::new());
-                                                }
-                                                if let Some(ref mut lv) = self.log_vec {
-                                                    TxtReader::save_log(&mut f, lv, self.ttf_offset, true);
-                                                }
-                                                f.close();
+                                        let logfile = SdMount::open_log_file(
+                                            &mut books_dir,
+                                            &book_name,
+                                            embedded_sdmmc::Mode::ReadWriteCreateOrTruncate,
+                                        );
+                                        if let Ok(mut f) = logfile {
+                                            if self.log_vec.is_none() {
+                                                self.log_vec = Some(Vec::new());
                                             }
+                                            if let Some(ref mut lv) = self.log_vec {
+                                                TxtReader::save_log(&mut f, lv, self.ttf_offset, true);
+                                            }
+                                            f.close();
                                         }
                                         self.need_render = true;
                                     }
@@ -1541,22 +1540,31 @@ impl Page for ReadPage {
                                         if is_bitmap(fname) {
                                             // 点阵：用内置 u8g2，无 .ttf 句柄
                                             self.font_file_ptr = core::ptr::null_mut();
-                                        } else if let Ok(f) = SdMount::open_file_by_name(
-                                            &mut books_dir,
-                                            fname,
-                                            embedded_sdmmc::Mode::ReadOnly,
-                                        ) {
-                                            let f_static: ActualFile<'static> =
-                                                unsafe { core::mem::transmute(f) };
-                                            ttf_font_file = Some(f_static);
-                                            self.font_file_ptr = ttf_font_file.as_mut().unwrap() as *mut ActualFile<'static>;
-                                            if let Some(ws) = self.ttf_ws.as_mut() {
-                                                crate::ttf_sd::cache_clear(ws, self.ttf_px);
-                                                ws.fi = None;
-                                            }
                                         } else {
-                                            println!("[read ttf] 重开字体失败: {}", fname);
-                                            self.font_file_ptr = core::ptr::null_mut();
+                                            // TTF：从 fonts/ 打开（fonts/ 不存在或打开失败都视为失败）
+                                            let opened: Option<ActualFile<'_>> = fonts_dir_opt
+                                                .as_mut()
+                                                .and_then(|fd| {
+                                                    SdMount::open_file_by_name(
+                                                        fd,
+                                                        fname,
+                                                        embedded_sdmmc::Mode::ReadOnly,
+                                                    )
+                                                    .ok()
+                                                });
+                                            if let Some(f) = opened {
+                                                let f_static: ActualFile<'static> =
+                                                    unsafe { core::mem::transmute(f) };
+                                                ttf_font_file = Some(f_static);
+                                                self.font_file_ptr = ttf_font_file.as_mut().unwrap() as *mut ActualFile<'static>;
+                                                if let Some(ws) = self.ttf_ws.as_mut() {
+                                                    crate::ttf_sd::cache_clear(ws, self.ttf_px);
+                                                    ws.fi = None;
+                                                }
+                                            } else {
+                                                println!("[read ttf] 重开字体失败: {}", fname);
+                                                self.font_file_ptr = core::ptr::null_mut();
+                                            }
                                         }
                                         // 换字体 → 页边界变，历史栈作废（点阵/TTF 通用）
                                         self.ttf_hist.clear();
@@ -1577,18 +1585,14 @@ impl Page for ReadPage {
                                             if del_idx < lv.len() {
                                                 lv.remove(del_idx);
                                                 let book_name = self.menus.as_ref().unwrap()[self.choose_index as usize].clone();
-                                                let file_name = format!("{}.txt", book_name);
-                                                if let Some(entry) = SdMount::find_entry_by_name(&mut books_dir, &file_name) {
-                                                    let short_name = entry.name;
-                                                    let logfile = SdMount::open_log_file(
-                                                        &mut books_dir,
-                                                        &short_name,
-                                                        embedded_sdmmc::Mode::ReadWriteCreateOrTruncate,
-                                                    );
-                                                    if let Ok(mut f) = logfile {
-                                                        TxtReader::save_log_raw(&mut f, lv);
-                                                        f.close();
-                                                    }
+                                                let logfile = SdMount::open_log_file(
+                                                    &mut books_dir,
+                                                    &book_name,
+                                                    embedded_sdmmc::Mode::ReadWriteCreateOrTruncate,
+                                                );
+                                                if let Ok(mut f) = logfile {
+                                                    TxtReader::save_log_raw(&mut f, lv);
+                                                    f.close();
                                                 }
                                                 let new_bm_count = if lv.len() > 1 { lv.len() - 1 } else { 0 };
                                                 if let MenuState::BookmarkList { ref mut bm_index, .. } = self.menu_state {
@@ -1674,23 +1678,19 @@ impl Page for ReadPage {
                                         if self.ttf_file_len > 0 {
                                             let pos = self.ttf_offset | (if self.ttf_at_end { 1u32 << 31 } else { 0 });
                                             let book_name = self.menus.as_ref().unwrap()[self.choose_index as usize].clone();
-                                            let file_name = format!("{}.txt", book_name);
-                                            if let Some(entry) = SdMount::find_entry_by_name(&mut books_dir, &file_name) {
-                                                let short_name = entry.name;
-                                                let logfile = SdMount::open_log_file(
-                                                    &mut books_dir,
-                                                    &short_name,
-                                                    embedded_sdmmc::Mode::ReadWriteCreateOrTruncate,
-                                                );
-                                                if let Ok(mut f) = logfile {
-                                                    if self.log_vec.is_none() {
-                                                        self.log_vec = Some(Vec::new());
-                                                    }
-                                                    if let Some(ref mut lv) = self.log_vec {
-                                                        TxtReader::save_log(&mut f, lv, pos, false);
-                                                    }
-                                                    f.close();
+                                            let logfile = SdMount::open_log_file(
+                                                &mut books_dir,
+                                                &book_name,
+                                                embedded_sdmmc::Mode::ReadWriteCreateOrTruncate,
+                                            );
+                                            if let Ok(mut f) = logfile {
+                                                if self.log_vec.is_none() {
+                                                    self.log_vec = Some(Vec::new());
                                                 }
+                                                if let Some(ref mut lv) = self.log_vec {
+                                                    TxtReader::save_log(&mut f, lv, pos, false);
+                                                }
+                                                f.close();
                                             }
                                         }
                                     }
@@ -1730,24 +1730,18 @@ impl Page for ReadPage {
                                         .and_then(|m| m.get(self.choose_index as usize))
                                         .cloned();
                                     if let Some(book_name) = book_name {
-                                        let file_name = format!("{}.txt", book_name);
-                                        if let Some(entry) =
-                                            SdMount::find_entry_by_name(&mut books_dir, &file_name)
-                                        {
-                                            let short_name = entry.name;
-                                            if let Ok(mut f) = SdMount::open_log_file(
-                                                &mut books_dir,
-                                                &short_name,
-                                                embedded_sdmmc::Mode::ReadWriteCreateOrTruncate,
-                                            ) {
-                                                if self.log_vec.is_none() {
-                                                    self.log_vec = Some(Vec::new());
-                                                }
-                                                if let Some(ref mut lv) = self.log_vec {
-                                                    TxtReader::save_log(&mut f, lv, self.ttf_offset, false);
-                                                }
-                                                f.close();
+                                        if let Ok(mut f) = SdMount::open_log_file(
+                                            &mut books_dir,
+                                            &book_name,
+                                            embedded_sdmmc::Mode::ReadWriteCreateOrTruncate,
+                                        ) {
+                                            if self.log_vec.is_none() {
+                                                self.log_vec = Some(Vec::new());
                                             }
+                                            if let Some(ref mut lv) = self.log_vec {
+                                                TxtReader::save_log(&mut f, lv, self.ttf_offset, false);
+                                            }
+                                            f.close();
                                         }
                                     }
                                 }

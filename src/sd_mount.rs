@@ -258,22 +258,24 @@ impl SdMount{
         books_dir.find_directory_entry(idx_name).is_ok()
     }
 
-    /// Open or create the log file (.log) for a book, using the book's short name.
-    pub fn open_log_file<'a>(books_dir: &'a mut ActualDirectory, book_short_name: &ShortFileName, mode: Mode) -> Result<ActualFile<'a>, SdError> {
-        let log_name = Self::derive_short_name(book_short_name, "LOG").ok_or(FileNotFound)?;
-        books_dir.open_file_in_dir(log_name, mode).map_err(|_| FileNotFound)
+    /// Open or create the reading-progress log file for a book, using the
+    /// book's LONG name (e.g. "三体" → long file name "三体.log").
+    pub fn open_log_file<'a>(
+        books_dir: &'a mut ActualDirectory,
+        book_name: &str,
+        mode: Mode,
+    ) -> Result<ActualFile<'a>, SdError> {
+        let log_lfn = format!("{}.log", book_name);
+        books_dir
+            .open_long_name_file_in_dir(&log_lfn, mode)
+            .map_err(|_| FileNotFound)
     }
 
     pub fn open_file_by_name<'a>(books_dir: &'a mut ActualDirectory, file_name: &str, mode: embedded_sdmmc::Mode) -> Result<ActualFile<'a>, SdError> {
-        // 0.10.0: 优先用长文件名直接打开（内部一次遍历），失败则按短名回退
-        if let Ok(f) = books_dir.open_long_name_file_in_dir(file_name, mode) {
-            return Ok(f);
-        }
-        // 短名回退（用于 .LOG/.IDX 等无 LFN 的文件，或创建模式）
-        if let Ok(f) = books_dir.open_file_in_dir(file_name, mode) {
-            return Ok(f);
-        }
-        Err(FileNotFound)
+        // Pure long file name — no short-name fallback.
+        books_dir
+            .open_long_name_file_in_dir(file_name, mode)
+            .map_err(|_| FileNotFound)
     }
 
 }

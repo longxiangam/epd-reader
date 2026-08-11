@@ -23,7 +23,9 @@ use crate::sd_mount::{ActualFile, SdMount};
 // ── 缓冲容量（阅读模式堆宽裕，放宽以保证复杂 CJK 字形不截断）──
 const MAX_PTS: usize = 600;
 const MAX_CONTOURS: usize = 96;
-const CMAP_CACHE_MAX: usize = 2048;
+// 需容下子集字体的整个 cmap 子表（如 Light_gb2312 的 fmt4 ~28KB）。
+// simhei 证明：只要 cmap 进缓存，loca/glyf 走 SD 回退也足够快（cmap 是每字查的瓶颈）。
+const CMAP_CACHE_MAX: usize = 28672;
 const HMTX_CACHE_MAX: usize = 1024;
 const LOCA_CACHE_MAX: usize = 1024;
 const GLYF_BUF_MAX: usize = 2048;
@@ -139,11 +141,18 @@ unsafe fn read_into(f: &mut ActualFile, off: u32, dst: *mut u8, len: usize) {
     read_at(f, off, core::slice::from_raw_parts_mut(dst, len));
 }
 
-// cmap 缓存读取（ws）
+// cmap 缓存读取（ws）。越界（字体 cmap 数据异常/未完整缓存）一律返回 0
+// （= 缺字符 .notdef），绝不 panic——嵌入式上 panic 会重启。
 fn cu16(ws: &TtfWs, rel: usize) -> u16 {
+    if rel + 1 >= ws.cmap_len as usize {
+        return 0;
+    }
     u16::from_be_bytes([ws.cmap_cache[rel], ws.cmap_cache[rel + 1]])
 }
 fn cu32(ws: &TtfWs, rel: usize) -> u32 {
+    if rel + 3 >= ws.cmap_len as usize {
+        return 0;
+    }
     u32::from_be_bytes([
         ws.cmap_cache[rel],
         ws.cmap_cache[rel + 1],
@@ -166,6 +175,13 @@ fn lu32(ws: &TtfWs, o: usize) -> u32 {
 }
 
 fn parse_font_info(f: &mut ActualFile, ws: &mut TtfWs) -> Option<FontInfo> {
+    // 无条件清零表缓存长度。parse 只在 fi=None（首次/切字体）时跑：若新字体的
+    // cmap/loca/hmtx 装不下缓存（走 SD 回退），下面的条件填充不会更新对应 len，
+    // 这里先清零，避免残留上一个字体的数据——否则 char_to_gid 会用「新 fi + 旧
+    // cmap_cache」，glyph 全部查错，表现为所有字符变问号（重启才恢复）。
+    ws.cmap_len = 0;
+    ws.hmtx_len = 0;
+    ws.loca_len = 0;
     let num_tables = u16_at(f, 4);
     let mut off = 12u32;
     let (mut loc, mut glyf, mut hmtx, mut cmap, mut head, mut maxp, mut hhea) =
@@ -213,8 +229,11 @@ fn parse_font_info(f: &mut ActualFile, ws: &mut TtfWs) -> Option<FontInfo> {
     let (_, cmap_sub, cmap_fmt) = best?;
     // 整块读 cmap 子表进 ws.cmap_cache
     let sub_len = if cmap_fmt == 12 {
-        u32_at(f, cmap_sub + 2) as usize
+        // 格式 12: length(u32) 在 offset 4（offset 2 是 reserved）。读错会得到
+        // 荒谬的 sub_len，导致 cmap_cache 只填零碎字节却被当作有效缓存使用。
+        u32_at(f, cmap_sub + 4) as usize
     } else {
+        // 格式 4: length(u16) 在 offset 2
         u16_at(f, cmap_sub + 2) as usize
     };
     if sub_len > 0 && sub_len <= CMAP_CACHE_MAX {
