@@ -5,31 +5,30 @@
 #![feature(generic_const_exprs)]
 #![allow(unused_must_use)]
 
-
+mod display;
 mod epd2in9_txt;
-mod sd_mount;
 mod event;
+mod model;
+mod pages;
+mod random;
+mod request;
+mod sd_mount;
 mod sleep;
 mod utils;
+mod weather;
+mod widgets;
 mod wifi;
 mod worldtime;
-mod pages;
-mod display;
-mod widgets;
-mod model;
-mod weather;
-mod request;
-mod random;
 //mod web_service;
 mod battery;
-mod storage;
-mod panic;
-mod web_service;
 mod flash_sleep;
 mod location;
+mod panic;
+mod storage;
+mod ttf_sd;
 #[cfg(feature = "ttf_spike")]
 mod ttf_spike;
-mod ttf_sd;
+mod web_service;
 
 extern crate alloc;
 use core::cell::RefCell;
@@ -40,18 +39,18 @@ use embedded_graphics::Drawable;
 use embedded_graphics::mono_font::MonoTextStyleBuilder;
 use embedded_graphics::prelude::Point;
 use embedded_graphics::text::{Baseline, Text, TextStyleBuilder};
-use embedded_sdmmc::{sdcard::spi::AcquireOpts, SdCard, VolumeManager};
+use embedded_sdmmc::{SdCard, VolumeManager, sdcard::spi::AcquireOpts};
 
 use esp_hal::{
+    Config as HalConfig,
     analog::adc::{Adc, AdcCalCurve, AdcConfig, Attenuation},
     clock::CpuClock,
     gpio::{Level, Output, OutputConfig, RtcPin},
+    init as hal_init,
     interrupt::software::SoftwareInterruptControl,
     rng::Rng,
     spi::master::{Config as SpiConfig, Spi},
     time::Rate,
-    Config as HalConfig,
-    init as hal_init,
 };
 
 use esp_hal::spi::Mode;
@@ -67,13 +66,13 @@ use log::trace;
 use u8g2_fonts::FontRenderer;
 use u8g2_fonts::fonts;
 
+use crate::battery::Battery;
+use crate::sd_mount::{SD_MOUNT, SdMount};
+use crate::sleep::{add_rtcio, refresh_active_time, to_sleep_tips};
+use crate::wifi::{WIFI_MODEL, WifiModel};
+use alloc::string::ToString;
 use epd_waveshare::graphics::DisplayRotation;
 use esp_hal::rtc_cntl::sleep::WakeupLevel;
-use alloc::string::ToString;
-use crate::battery::Battery;
-use crate::sd_mount::{SdMount, SD_MOUNT};
-use crate::sleep::{add_rtcio, refresh_active_time, to_sleep_tips};
-use crate::wifi::{WifiModel, WIFI_MODEL};
 
 use critical_section::Mutex as CsMutex;
 
@@ -121,7 +120,8 @@ async fn main(spawner: Spawner) -> ! {
 
     trace!("test trace");
 
-    let reason = esp_hal::system::reset_reason().unwrap_or(esp_hal::rtc_cntl::SocResetReason::ChipPowerOn);
+    let reason =
+        esp_hal::system::reset_reason().unwrap_or(esp_hal::rtc_cntl::SocResetReason::ChipPowerOn);
     println!("reset reason: {:?}", reason);
     let wake_reason = esp_hal::system::wakeup_cause();
     println!("wake reason: {:?}", wake_reason);
@@ -144,7 +144,10 @@ async fn main(spawner: Spawner) -> ! {
     eink_pwr_ctrl.set_low();
     sd_pwr_ctrl.set_low();
 
-    crate::sleep::EINK_PWER_PIN.lock().await.replace(eink_pwr_ctrl);
+    crate::sleep::EINK_PWER_PIN
+        .lock()
+        .await
+        .replace(eink_pwr_ctrl);
     crate::sleep::SD_PWER_PIN.lock().await.replace(sd_pwr_ctrl);
 
     let sdcard_cs = Output::new(peripherals.GPIO5, Level::High, OutputConfig::default());
@@ -155,7 +158,8 @@ async fn main(spawner: Spawner) -> ! {
         SpiConfig::default()
             .with_frequency(Rate::from_mhz(32))
             .with_mode(Mode::_0),
-    ).unwrap()
+    )
+    .unwrap()
     .with_sck(epd_sclk)
     .with_miso(epd_miso)
     .with_mosi(epd_mosi);
@@ -168,8 +172,15 @@ async fn main(spawner: Spawner) -> ! {
     let adc_pin = unsafe { peripherals.GPIO2.clone_unchecked() };
     let rtc_pin = unsafe { peripherals.GPIO2.clone_unchecked() };
     let key2 = peripherals.GPIO2;
-    let adc1_pin = adc1_config.enable_pin_with_cal::<_, AdcCalCurve<esp_hal::peripherals::ADC1>>(adc_pin, Attenuation::_11dB);
-    let bat_adc1_pin = adc1_config.enable_pin_with_cal::<_, AdcCalCurve<esp_hal::peripherals::ADC1>>(peripherals.GPIO4, Attenuation::_11dB);
+    let adc1_pin = adc1_config.enable_pin_with_cal::<_, AdcCalCurve<esp_hal::peripherals::ADC1>>(
+        adc_pin,
+        Attenuation::_11dB,
+    );
+    let bat_adc1_pin = adc1_config
+        .enable_pin_with_cal::<_, AdcCalCurve<esp_hal::peripherals::ADC1>>(
+            peripherals.GPIO4,
+            Attenuation::_11dB,
+        );
 
     let adc1 = Adc::new(peripherals.ADC1, adc1_config);
     event::ADC_PER.lock().await.replace(adc1);
@@ -197,13 +208,18 @@ async fn main(spawner: Spawner) -> ! {
     spawner.spawn(display::render(spi_bus_epd, epd_busy, epd_rst, epd_dc).unwrap());
 
     let mut display: display::EpdDisplay = display::EpdDisplay::default();
-    
 
     #[cfg(not(feature = "epd2in7"))]
     display.set_rotation(DisplayRotation::Rotate90);
-    
 
-    let sdcard = SdCard::new_with_options(spi_bus_sd, embassy_time::Delay, AcquireOpts { use_crc: false, acquire_retries: 50 });
+    let sdcard = SdCard::new_with_options(
+        spi_bus_sd,
+        embassy_time::Delay,
+        AcquireOpts {
+            use_crc: false,
+            acquire_retries: 50,
+        },
+    );
     let volume_mgr = VolumeManager::new(sdcard, crate::sd_mount::TimeSource);
     let sd_mount = SdMount::new(volume_mgr);
     crate::sd_mount::SD_MOUNT.lock().await.replace(sd_mount);
@@ -253,11 +269,7 @@ async fn main(spawner: Spawner) -> ! {
         println!("entry ap");
         WIFI_MODEL.lock().await.replace(WifiModel::AP);
         println!("wifi_model:{:?}", WIFI_MODEL.lock().await.as_ref());
-        let _stack = crate::wifi::start_wifi_ap(
-            &spawner,
-            Rng::new(),
-            peripherals.WIFI,
-        ).await;
+        let _stack = crate::wifi::start_wifi_ap(&spawner, Rng::new(), peripherals.WIFI).await;
 
         loop {
             let mut qrcode_page = pages::setting_page::SettingPage::new();
@@ -275,11 +287,7 @@ async fn main(spawner: Spawner) -> ! {
         // 正常模式开机连 WiFi。阅读走独立重启模式（READING_MODE），不在此连。
         {
             WIFI_MODEL.lock().await.replace(WifiModel::STA);
-            let _stack = crate::wifi::connect_wifi(
-                &spawner,
-                Rng::new(),
-                peripherals.WIFI,
-            ).await;
+            let _stack = crate::wifi::connect_wifi(&spawner, Rng::new(), peripherals.WIFI).await;
         }
     }
 
@@ -297,7 +305,6 @@ async fn main(spawner: Spawner) -> ! {
         Timer::after(Duration::from_secs(5)).await;
     }
 }
-
 
 fn draw_text(display: &mut display::EpdDisplay, text: &str, x: i32, y: i32) {
     let style = MonoTextStyleBuilder::new()

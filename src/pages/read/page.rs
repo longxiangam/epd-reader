@@ -22,6 +22,7 @@ use crate::epd2in9_txt::TxtReader;
 use crate::event::EventType;
 use crate::pages::Page;
 use crate::sd_mount::{ActualDirectory, ActualFile, SD_MOUNT, SdMount, BOOK_NAME_MAX};
+use crate::widgets::battery::BODY_H;
 use core::ops::ControlFlow;
 use crate::sleep::to_sleep_tips;
 use crate::storage::NvsStorage;
@@ -46,6 +47,10 @@ fn is_ttf(name: &str) -> bool {
     let b = name.as_bytes();
     b.len() >= 4 && b[b.len() - 4..].eq_ignore_ascii_case(b".ttf")
 }
+
+/// 字体列表容量。末尾固定追加 3 个内置点阵字体，扫描 TTF 时预留这 3 位
+/// （TTF 最多收 FONT_LIST_CAP-3 个），避免 TTF 占满把点阵挤掉（push 静默失败）。
+const FONT_LIST_CAP: usize = 16;
 
 /// 内置点阵字体名 → 单元格像素（wqy12→12 … wqy16→16）。None 表示非点阵（走 TTF）。
 /// 点阵用 u8g2 内置 wqy 位图，不读 SD 字库、无光栅化，渲染比 TTF 快。
@@ -112,10 +117,28 @@ enum MenuState {
     BookmarkList { bm_index: u32, deleting: bool },
 }
 
+/// 菜单状态→id（只区分变体，不区分内部 cursor/index）。
+/// render 用它检测"跨状态切换"：不同状态面板几何不同，只局部重绘叠层会留下旧面板残影，故需全量重绘。
+fn menu_state_id(s: &MenuState) -> u8 {
+    match s {
+        MenuState::Closed => 0,
+        MenuState::Popup { .. } => 1,
+        MenuState::JumpInput { .. } => 2,
+        MenuState::Layout { .. } => 3,
+        MenuState::FontList { .. } => 4,
+        MenuState::BookmarkList { .. } => 5,
+    }
+}
+
 pub struct ReadPage {
     running: bool,
     reading: bool,
     need_render: bool,
+    /// 本次渲染是否需要重绘正文（清屏 + TTF 光栅化）。
+    /// 菜单打开时仅旋转/排版改值才置 true；同状态内移动光标保持 false → 只重绘菜单叠层。
+    need_text_render: bool,
+    /// 上次渲染时的菜单状态 id（检测跨状态切换：面板几何不同需全量重绘避免残影）。
+    last_menu_state_id: u8,
     choose_index: u32,
     menus: Option<Vec<String<BOOK_NAME_MAX>, 40>>,
     log_vec: Option<Vec<u32, LOG_VEC_MAX>>,
@@ -160,8 +183,8 @@ pub struct ReadPage {
     ttf_resume: bool,
     /// 当前字体文件名。
     font_name: String<32>,
-    /// SD 卡上可用的 .ttf 列表（进 run 时扫描一次）。
-    font_list: Vec<String<32>, 10>,
+    /// SD 卡上可用的字体列表（TTF 扫描 + 3 个内置点阵，进 run 时扫描一次）。
+    font_list: Vec<String<32>, FONT_LIST_CAP>,
     /// 换字体标志：run 循环据此重开字体 + 清字形/字体表缓存。
     need_reload_font: bool,
 }
@@ -331,6 +354,11 @@ impl ReadPage {
                 self.ttf_last_hint = true;
                 self.need_render = true;
                 return;
+            }
+            // 栈满丢最老记录，保持"最近 256 页"语义：否则满后 push 静默失败，
+            // 后退会一直弹到会话早期读过的老位置（长时间连续阅读后偶现的大幅回跳）。
+            if self.ttf_hist.is_full() {
+                self.ttf_hist.remove(0);
             }
             let _ = self.ttf_hist.push(self.ttf_offset);
             self.ttf_offset = self.ttf_end;
@@ -509,13 +537,8 @@ impl ReadPage {
             .stroke_width(2)
             .build();
 
-        // 右上角电量显示
+        // 电量：仅主菜单(Popup)底部进度行左侧显示，子菜单不显示
         let bat_pct = crate::battery::last_percent();
-        if bat_pct > 0 {
-            let _ = crate::widgets::battery::draw_battery(
-                bat_pct, Point::new(vw as i32 - 32, 2), Black, &font12, display,
-            );
-        }
 
         match self.menu_state {
             MenuState::Popup { menu_index } => {
@@ -571,13 +594,34 @@ impl ReadPage {
                     let page_text_y = menu_y + menu_height as i32 - menu_padding as i32;
                     font.render_aligned(
                         format_args!("{}.{:02}%", p / 100, p % 100),
-                        Point::new(menu_x + menu_width as i32 / 2, page_text_y),
+                        Point::new(menu_x + menu_width as i32 - menu_padding as i32, page_text_y),
                         VerticalPosition::Bottom,
-                        HorizontalAlignment::Center,
+                        HorizontalAlignment::Right,
                         FontColor::Transparent(Black),
                         display,
                     )
                     .ok();
+                    // 左侧同排显示电量
+                    if bat_pct > 0 {
+                        let bat_y = page_text_y - BODY_H as i32;
+                        let _ = crate::widgets::battery::draw_battery(
+                            bat_pct,
+                            Point::new(menu_x + menu_padding as i32, bat_y),
+                            Black,
+                            &font12,
+                            display,
+                        );
+                    }
+                } else if bat_pct > 0 {
+                    // 无进度信息（未打开书）时电量单独占底行左侧
+                    let bat_y = menu_y + menu_height as i32 - menu_padding as i32 - BODY_H as i32;
+                    let _ = crate::widgets::battery::draw_battery(
+                        bat_pct,
+                        Point::new(menu_x + menu_padding as i32, bat_y),
+                        Black,
+                        &font12,
+                        display,
+                    );
                 }
             }
             MenuState::JumpInput { input_pct } => {
@@ -1135,6 +1179,8 @@ impl Page for ReadPage {
             running: false,
             reading: false,
             need_render: false,
+            need_text_render: false,
+            last_menu_state_id: 0,
             choose_index: 0,
             menus: None,
             log_vec: None,
@@ -1182,6 +1228,33 @@ impl Page for ReadPage {
     async fn render(&mut self) {
         if self.need_render {
             self.need_render = false;
+
+            // 菜单打开时，仅跨状态切换（面板几何不同，避免旧面板残影）或文字确实改变
+            // （旋转屏幕 / 排版改字号行距）才清屏 + 重绘正文；同状态内移动光标只重绘
+            // 菜单叠层——跳过 SD 读 + TTF 光栅化，菜单操作明显更流畅。
+            // 叠层面板自带白色填充，重画时自擦除上一帧叠层内容，不清屏也不残留。
+            let menu_open = self.reading && !matches!(self.menu_state, MenuState::Closed);
+            let prev_id = self.last_menu_state_id;
+            let cur_id = menu_state_id(&self.menu_state);
+            // 跨"菜单已打开"的状态切换（如 Popup↔字体列表）：面板几何不同，只局部重绘
+            // 叠层会留下旧面板残影，故需全量重绘。从 Closed 刚打开菜单时无旧面板，可只重绘叠层。
+            let panel_change = prev_id != 0 && cur_id != 0 && prev_id != cur_id;
+            let do_text = !menu_open || panel_change || self.need_text_render;
+            if self.need_text_render {
+                // 字号/行距/旋转都改变分页边界 → 历史栈里的旧布局页起点全部作废（同换字体清栈）
+                self.ttf_hist.clear();
+            }
+            self.last_menu_state_id = cur_id;
+            self.need_text_render = false;
+
+            if !do_text {
+                // 仅菜单叠层重绘：缓冲区保留上一帧正文，叠层重画即可。
+                if let Some(display) = display_mut() {
+                    self.render_menu_overlay(display);
+                }
+                RENDER_CHANNEL.send(RenderInfo { time: 0, need_sleep: true }).await;
+                return;
+            }
 
             if let Some(display) = display_mut() {
                 let _ = display.clear_buffer(Color::White);
@@ -1429,7 +1502,7 @@ impl Page for ReadPage {
 
                                 // 扫描 .ttf 文件进 font_list（长文件名 + 短文件名回退）
                                 {
-                                    let mut fonts_found: Vec<String<32>, 10> = Vec::new();
+                                    let mut fonts_found: Vec<String<32>, FONT_LIST_CAP> = Vec::new();
                                     if let Some(fonts_dir) = fonts_dir_opt.as_mut() {
                                         let mut storage = [0u8; 512];
                                         let mut lfn_buffer = embedded_sdmmc::LfnBuffer::new(&mut storage);
@@ -1446,7 +1519,8 @@ impl Page for ReadPage {
                                                 } else { None }
                                             };
                                             if let Some(name) = name_opt {
-                                                if name.len() <= 32 {
+                                                // 预留末尾 3 个内置点阵位，TTF 超出直接跳过
+                                                if name.len() <= 32 && fonts_found.len() < FONT_LIST_CAP - 3 {
                                                     if let Ok(s) = String::<32>::from_str(&name) {
                                                         let _ = fonts_found.push(s);
                                                     }
@@ -1894,6 +1968,7 @@ impl Page for ReadPage {
                                     display.set_rotation(super::current_rotation());
                                 }
                                 mut_ref.save_reading_settings();
+                                mut_ref.need_text_render = true;
                                 mut_ref.need_render = true;
                                 return;
                             }
@@ -2017,7 +2092,7 @@ impl Page for ReadPage {
                         if *editing {
                             match *cursor {
                                 0 => {
-                                    let np = (mut_ref.ttf_px + 2.0).min(40.0);
+                                    let np = (mut_ref.ttf_px + 1.0).min(40.0);
                                     mut_ref.ttf_px = np;
                                     if let Some(ws) = mut_ref.ttf_ws.as_mut() {
                                         crate::ttf_sd::cache_clear(ws, np);
@@ -2026,6 +2101,7 @@ impl Page for ReadPage {
                                 1 => { mut_ref.line_gap = (mut_ref.line_gap + 1).min(10); }
                                 _ => {}
                             }
+                            mut_ref.need_text_render = true;
                             mut_ref.need_render = true;
                             Timer::after_millis(150).await;
                         }
@@ -2096,7 +2172,7 @@ impl Page for ReadPage {
                         if *editing {
                             match *cursor {
                                 0 => {
-                                    let np = (mut_ref.ttf_px - 2.0).max(12.0);
+                                    let np = (mut_ref.ttf_px - 1.0).max(12.0);
                                     mut_ref.ttf_px = np;
                                     if let Some(ws) = mut_ref.ttf_ws.as_mut() {
                                         crate::ttf_sd::cache_clear(ws, np);
@@ -2105,6 +2181,7 @@ impl Page for ReadPage {
                                 1 => { mut_ref.line_gap = (mut_ref.line_gap - 1).max(0); }
                                 _ => {}
                             }
+                            mut_ref.need_text_render = true;
                             mut_ref.need_render = true;
                             Timer::after_millis(150).await;
                         }
@@ -2172,7 +2249,7 @@ impl Page for ReadPage {
                         if *editing {
                             match *cursor {
                                 0 => {
-                                    let np = (mut_ref.ttf_px - 2.0).max(12.0);
+                                    let np = (mut_ref.ttf_px - 1.0).max(12.0);
                                     mut_ref.ttf_px = np;
                                     if let Some(ws) = mut_ref.ttf_ws.as_mut() {
                                         crate::ttf_sd::cache_clear(ws, np);
@@ -2181,6 +2258,7 @@ impl Page for ReadPage {
                                 1 => { mut_ref.line_gap = (mut_ref.line_gap - 1).max(0); }
                                 _ => {}
                             }
+                            mut_ref.need_text_render = true;
                         } else {
                             *cursor = (*cursor + 1) % 3; // Key1=下：0→1→2→0
                         }
@@ -2247,7 +2325,7 @@ impl Page for ReadPage {
                         if *editing {
                             match *cursor {
                                 0 => {
-                                    let np = (mut_ref.ttf_px + 2.0).min(40.0);
+                                    let np = (mut_ref.ttf_px + 1.0).min(40.0);
                                     mut_ref.ttf_px = np;
                                     if let Some(ws) = mut_ref.ttf_ws.as_mut() {
                                         crate::ttf_sd::cache_clear(ws, np);
@@ -2256,6 +2334,7 @@ impl Page for ReadPage {
                                 1 => { mut_ref.line_gap = (mut_ref.line_gap + 1).min(10); }
                                 _ => {}
                             }
+                            mut_ref.need_text_render = true;
                         } else {
                             *cursor = (*cursor + 3 - 1) % 3; // Key2=上：0→2→1→0
                         }

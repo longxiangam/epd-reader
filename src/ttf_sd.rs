@@ -34,7 +34,7 @@ const BOOK_BUF_MAX: usize = 2048;
 /// 大字号 → 槽大、槽少（字数少够用）；小字号 → 槽小、槽多（字数多需要）。总预算不变。
 const GC_CACHE_BUDGET: usize = 12288; // 12KB 扁平位图缓冲
 const GC_N_MAX: usize = 256; // 槽位元数据上限（gid/w/h/yoff 数组长度）
-const MAX_SLOT_BYTES: usize = 128; // rasterize_to_bitmap 栈缓冲上限（覆盖到 ~30px）
+const MAX_SLOT_BYTES: usize = 256; // rasterize_to_bitmap 栈缓冲上限（CJK 1-bit 位图，覆盖到 ~40px；更大走直绘回退）
 
 /// TTF 字体元信息（表偏移/度量）。Copy：首次解析后缓存在 TtfWs.fi，
 /// 避免每页翻页重复读表目录 + 重读 cmap 子表。

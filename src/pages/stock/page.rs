@@ -189,21 +189,36 @@ impl StockPage {
             }
             if let Ok(d) = minute_result {
                 let old_preclose = cache.preclose;
+                // 跨日标记：缓存日期与今天不同（且非首次）。仅用于周末/节假日让行情接口纠正昨收
+                // （此时 prev 是最近交易日，其收盘≠今日应有的昨收）。工作日昨收由下方分时数据直接算出。
+                let crossed_day = time_ok && cache.date != 0 && cache.date != today;
                 cache.reset();
                 cache.set_code(code);
-                if time_ok { cache.date = today; }
-                // 昨收：一天内只查一次（preclose 跨交易日才变）。
-                // 复用旧 preclose → Y 轴范围稳定 → 图表不会因 preclose 漂移而变形
+                // "今天"以分时数据最新一根的日期为准，不依赖设备时钟：
+                // 唤醒/重启后时钟可能未对时或滞后（如跨午夜阅读后，NTP 与股票拉取抢 WiFi 先后不定），
+                // 错的 today 会把今天的根全判成前一交易日 → n_today=0 → 跨天虚线消失、昨收错位。
+                // klines 已按日期升序，last() 即最新交易日。时钟仅在 crossed_day 兜底判断里使用。
+                let data_today = d.klines.last().map(|k| (k.date / 1_000_000) as u32).unwrap_or(today);
+                cache.date = data_today;
                 cache.preclose = old_preclose;
                 let nk = d.klines.len();
-                stock::merge_minute(cache, &d.klines, today);
-                println!("  fetched: nk={} n_prev={} n_today={} last_price={}", nk, cache.n_prev, cache.n_today, cache.last_price);
-                // 只在 preclose 还没有时查一次腾讯行情
-                if cache.preclose <= 0.0 {
+                stock::merge_minute(cache, &d.klines, data_today);
+                // 昨收 = 前一交易日的收盘价 = 分时数据 prev 部分最后一根（前一交易日 15:00 收盘）。
+                // 直接从权威分时数据重算：每个交易日自动滚到新的"昨天"，无需 cache.date/时钟的跨日检测，
+                // 即便行情接口拉取失败也能正确刷新昨收。同日内前一交易日收盘不变 → Y 轴范围稳定。
+                if cache.n_prev > 0 {
+                    let prev_close = cache.closes[(cache.n_prev - 1) as usize];
+                    if prev_close > 0.0 {
+                        cache.preclose = prev_close;
+                    }
+                }
+                println!("  fetched: nk={} data_today={} n_prev={} n_today={} last_price={} preclose={} crossed={}", nk, data_today, cache.n_prev, cache.n_today, cache.last_price, cache.preclose, crossed_day);
+                // 兜底/纠正：prev 为空（盘后/数据不足）或周末节假日（crossed_day）→ 腾讯行情 preclose 纠正。
+                if cache.preclose <= 0.0 || crossed_day {
                     if let Ok(q) = fetch_stock(ChartMode::Quote, code, name, 0).await {
                         cache.preclose = q.preclose;
                         if q.last_price > 0.0 { cache.last_price = q.last_price; }
-                        println!("  quote(first): preclose={} last_price={}", cache.preclose, cache.last_price);
+                        println!("  quote(refresh): preclose={} last_price={}", cache.preclose, cache.last_price);
                     }
                 }
             } else {
@@ -257,11 +272,9 @@ impl StockPage {
                         &mut (*core::ptr::addr_of_mut!(STOCK_MINUTE_CACHE))[si]
                     };
                     if cache.matches_code(code) {
-                        let today = match crate::worldtime::get_clock() {
-                            Some(c) => stock::today_yyyymmdd(&c.local().await),
-                            None => 0,
-                        };
-                        stock::merge_minute(cache, &d.klines, today);
+                        // 同 fetch_overview："今天"取数据最新一根的日期，时钟滞后时避免误判
+                        let data_today = d.klines.last().map(|k| (k.date / 1_000_000) as u32).unwrap_or(0);
+                        stock::merge_minute(cache, &d.klines, data_today);
                     }
                 }
                 self.data = Some(d);

@@ -7,7 +7,7 @@ use u8g2_fonts::FontRenderer;
 use u8g2_fonts::types::{FontColor, HorizontalAlignment, VerticalPosition};
 
 const BODY_W: u32 = 22;
-const BODY_H: u32 = 12;
+pub const BODY_H: u32 = 12;
 const NUB_W: u32 = 2;
 const NUB_H: u32 = 5;
 const PAD: u32 = 2;
