@@ -20,10 +20,18 @@ mod widgets;
 mod wifi;
 mod worldtime;
 //mod web_service;
+#[cfg(feature = "v22")]
+mod adc_key;
+#[cfg(feature = "v22")]
+mod aht20;
 mod battery;
 mod flash_sleep;
+#[cfg(feature = "v22")]
+mod i2c_bus;
 mod location;
 mod panic;
+#[cfg(feature = "v22")]
+mod pcf8563;
 mod storage;
 mod ttf_sd;
 #[cfg(feature = "ttf_spike")]
@@ -45,7 +53,7 @@ use esp_hal::{
     Config as HalConfig,
     analog::adc::{Adc, AdcCalCurve, AdcConfig, Attenuation},
     clock::CpuClock,
-    gpio::{Level, Output, OutputConfig, RtcPin},
+    gpio::{Input, InputConfig, Level, Output, OutputConfig, Pull, RtcPin, RtcPinWithResistors},
     init as hal_init,
     interrupt::software::SoftwareInterruptControl,
     rng::Rng,
@@ -136,19 +144,29 @@ async fn main(spawner: Spawner) -> ! {
     let epd_miso = peripherals.GPIO10;
 
     // RTC hold on GPIO1
-    peripherals.GPIO1.rtcio_pad_hold(true);
+    //peripherals.GPIO1.rtcio_pad_hold(false);
 
-    let mut eink_pwr_ctrl = Output::new(peripherals.GPIO21, Level::High, OutputConfig::default());
-    let mut sd_pwr_ctrl = Output::new(peripherals.GPIO1, Level::High, OutputConfig::default());
-
-    eink_pwr_ctrl.set_low();
-    sd_pwr_ctrl.set_low();
-
-    crate::sleep::EINK_PWER_PIN
-        .lock()
-        .await
-        .replace(eink_pwr_ctrl);
-    crate::sleep::SD_PWER_PIN.lock().await.replace(sd_pwr_ctrl);
+    // ── 电源控制 ──
+    // v22：IO1 同时控制 SD 与 EINK（共用电源轨），负载开关**低电平有效**：
+    // IO1=低 → 供电，IO1=高 → 断电。睡眠保持常供电（不锁存、不切换）。
+    #[cfg(feature = "v22")]
+    {
+        let pwr = Output::new(peripherals.GPIO1, Level::Low, OutputConfig::default());
+        crate::sleep::SD_PWER_PIN.lock().await.replace(pwr);
+    }
+    #[cfg(not(feature = "v22"))]
+    {
+        let mut eink_pwr_ctrl =
+            Output::new(peripherals.GPIO21, Level::High, OutputConfig::default());
+        let mut sd_pwr_ctrl = Output::new(peripherals.GPIO1, Level::High, OutputConfig::default());
+        eink_pwr_ctrl.set_low();
+        sd_pwr_ctrl.set_low();
+        crate::sleep::EINK_PWER_PIN
+            .lock()
+            .await
+            .replace(eink_pwr_ctrl);
+        crate::sleep::SD_PWER_PIN.lock().await.replace(sd_pwr_ctrl);
+    }
 
     let sdcard_cs = Output::new(peripherals.GPIO5, Level::High, OutputConfig::default());
 
@@ -165,13 +183,33 @@ async fn main(spawner: Spawner) -> ! {
     .with_mosi(epd_mosi);
 
     // Keys
+    // v22：GPIO9 归 I2C SDA，按键任务用克隆句柄（内部忽略 GPIO 路径）
+    #[cfg(feature = "v22")]
+    let key1 = unsafe { peripherals.GPIO9.clone_unchecked() };
+    #[cfg(not(feature = "v22"))]
     let key1 = peripherals.GPIO9;
 
+    // ── v22：I2C 总线（GPIO9=SDA GPIO21=SCL，100kHz，挂 AHT20 + PCF8563）──
+    #[cfg(feature = "v22")]
+    {
+        let i2c = esp_hal::i2c::master::I2c::new(
+            peripherals.I2C0,
+            esp_hal::i2c::master::Config::default(),
+        )
+        .expect("i2c init")
+        .with_sda(peripherals.GPIO9)
+        .with_scl(peripherals.GPIO21);
+        crate::i2c_bus::I2C.lock().await.replace(i2c);
+    }
+
     // ADC setup
-    let mut adc1_config = AdcConfig::new();
-    let adc_pin = unsafe { peripherals.GPIO2.clone_unchecked() };
     let rtc_pin = unsafe { peripherals.GPIO2.clone_unchecked() };
-    let key2 = peripherals.GPIO2;
+    let adc_pin = unsafe { peripherals.GPIO2.clone_unchecked() };
+    let key2 = unsafe { peripherals.GPIO2.clone_unchecked() };
+    // v22：ADC 初始化前快照 regi2c SAR 模拟配置（睡眠前恢复，见 sleep.rs）
+    #[cfg(feature = "v22")]
+    crate::adc_key::regi2c_capture();
+    let mut adc1_config = AdcConfig::new();
     let adc1_pin = adc1_config.enable_pin_with_cal::<_, AdcCalCurve<esp_hal::peripherals::ADC1>>(
         adc_pin,
         Attenuation::_11dB,
@@ -185,6 +223,21 @@ async fn main(spawner: Spawner) -> ! {
     let adc1 = Adc::new(peripherals.ADC1, adc1_config);
     event::ADC_PER.lock().await.replace(adc1);
     event::ADC_PIN.lock().await.replace(adc1_pin);
+
+    // v22：GPIO2 数字输入 + 上拉——**在 ADC 初始化之后再配一次**，
+    // 重新打开被 set_analog 关闭的 fun_ie/fun_wpu（输入断开 → 比较器悬空判低 → 秒醒）
+    #[cfg(feature = "v22")]
+    {
+        let k2_in = Input::new(
+            unsafe { peripherals.GPIO2.clone_unchecked() },
+            InputConfig::default().with_pull(Pull::Up),
+        );
+        core::mem::forget(k2_in); // 配置保持到整个运行期
+    }
+
+    // v22：AHT20 室内温湿度采样任务
+    #[cfg(feature = "v22")]
+    spawner.spawn(crate::aht20::sample_task().unwrap());
 
     spawner.spawn(event::run(key1, key2).unwrap());
 
@@ -205,12 +258,23 @@ async fn main(spawner: Spawner) -> ! {
     let font: FontRenderer = FontRenderer::new::<fonts::u8g2_font_wqy14_t_gb2312>();
     let _font = font.with_ignore_unknown_chars(true);
 
-    spawner.spawn(display::render(spi_bus_epd, epd_busy, epd_rst, epd_dc).unwrap());
+    // 显示控制脚驱动化（v22 dc=GPIO21，构造处按 feature 区分具体 GPIO）
+    let epd_busy_in = Input::new(
+        epd_busy,
+        esp_hal::gpio::InputConfig::default().with_pull(Pull::Down),
+    );
+    let epd_rst_out = Output::new(epd_rst, Level::High, OutputConfig::default());
+    let epd_dc_out = Output::new(epd_dc, Level::High, OutputConfig::default());
+    spawner.spawn(display::render(spi_bus_epd, epd_busy_in, epd_rst_out, epd_dc_out).unwrap());
 
     let mut display: display::EpdDisplay = display::EpdDisplay::default();
 
     #[cfg(not(feature = "epd2in7"))]
     display.set_rotation(DisplayRotation::Rotate90);
+
+    // ── v22：开机按键校准（无有效校准数据时进校准界面，完成后续接正常启动）──
+    #[cfg(feature = "v22")]
+    crate::adc_key::boot_calibration_if_needed().await;
 
     let sdcard = SdCard::new_with_options(
         spi_bus_sd,
@@ -239,6 +303,10 @@ async fn main(spawner: Spawner) -> ! {
         let reading_mode = unsafe { *core::ptr::addr_of!(crate::pages::read::READING_MODE) };
         if reading_mode {
             println!("[boot] 阅读模式：跳过 WiFi，独占堆做 TTF");
+            // v22：阅读模式没有 ntp_worker，用 PCF8563 恢复时钟
+            //（时间显示/跨天判断不再因无 WiFi 而滞后）
+            #[cfg(feature = "v22")]
+            crate::worldtime::init_clock_pcf().await;
             refresh_active_time().await;
             spawner.spawn(crate::pages::reading_task(spawner.clone()).unwrap());
             // main 不返回即可；睡眠/交互由 reading_task(ReadPage) 处理

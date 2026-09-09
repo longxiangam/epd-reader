@@ -81,8 +81,18 @@ pub async fn toggle_event(event_type: EventType,_ms:u64){
 
 #[embassy_executor::task]
 pub async fn run(key1: esp_hal::peripherals::GPIO9<'static>, key2: esp_hal::peripherals::GPIO2<'static>){
-    let mut key1 = Input::new(key1, esp_hal::gpio::InputConfig::default().with_pull(Pull::Up));
-    let mut key2 = Input::new(key2, esp_hal::gpio::InputConfig::default().with_pull(Pull::Up));
+    // v22：三键全走 GPIO2 ADC 分压，轮询采样（不依赖 GPIO 边沿——最弱的分压键
+    // 可能拉不过数字阈值）。key_task 永不返回，内部含开机校准逃逸监控。
+    #[cfg(feature = "v22")]
+    {
+        let _ = key1;
+        let _ = key2;
+        crate::adc_key::key_task().await;
+    }
+    #[cfg(not(feature = "v22"))]
+    {
+        let mut key1 = Input::new(key1, esp_hal::gpio::InputConfig::default().with_pull(Pull::Up));
+        let mut key2 = Input::new(key2, esp_hal::gpio::InputConfig::default().with_pull(Pull::Up));
 
     loop {
 
@@ -98,6 +108,7 @@ pub async fn run(key1: esp_hal::peripherals::GPIO9<'static>, key2: esp_hal::peri
         }
         refresh_active_time().await;
         Timer::after(Duration::from_millis(10)).await;
+    }
     }
 }
 

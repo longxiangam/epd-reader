@@ -329,22 +329,57 @@ pub async fn save_time_to_rtc() {
     }
 }
 
+/// v22：从 PCF8563 恢复 Clock。成功返回 true。
+#[cfg(feature = "v22")]
+async fn pcf_restore(clock: &Clock) -> bool {
+    let Some(ts) = crate::pcf8563::read_time().await else {
+        return false;
+    };
+    if !crate::pcf8563::ts_valid(ts) {
+        return false;
+    }
+    if let Ok(now) = OffsetDateTime::from_unix_timestamp(ts) {
+        clock.set_time(now).await;
+        println!("[time] restored from PCF8563");
+        true
+    } else {
+        false
+    }
+}
+
+/// v22：阅读模式时钟初始化（该模式不跑 ntp_worker，PCF8563 是唯一时间源）。
+#[cfg(feature = "v22")]
+pub async fn init_clock_pcf() {
+    let clock = CLOCK_CELL.init(Clock::new());
+    unsafe {
+        core::ptr::addr_of_mut!(CLOCK).write(Some(clock));
+    }
+    pcf_restore(get_clock().unwrap()).await;
+}
+
 #[embassy_executor::task]
 pub async fn ntp_worker() {
     let clock = CLOCK_CELL.init(Clock::new());
     unsafe {
         core::ptr::addr_of_mut!(CLOCK).write(Some(clock));
     }
-    unsafe {
-        let ts = *core::ptr::addr_of!(WHEN_SLEEP_TIME_TIMESTAMP);
-        // Sanity check: valid unix timestamps are between year 2020 and 2100
-        if ts > 1577836800 && ts < 4102444800 {
-            let current_second = ts + get_sleep_ms().await / 1000;
-            // 再次校验恢复后的时间落在合理区间：get_sleep_ms 若因 RTC 计时不连续而异常，
-            // current_second 会越界，此时跳过恢复，等待 NTP 重新对时（避免设置成错误时间）。
-            if current_second > 1577836800 && current_second < 4102444800 {
-                if let Ok(now) = OffsetDateTime::from_unix_timestamp(current_second as i64) {
-                    clock.set_time(now).await;
+    // v22：优先从 PCF8563 硬件时钟恢复（备电池维持，权威）；失败再退回 rtc_fast 估算
+    #[cfg(feature = "v22")]
+    let mut restored = pcf_restore(clock).await;
+    #[cfg(not(feature = "v22"))]
+    let restored = false;
+    if !restored {
+        unsafe {
+            let ts = *core::ptr::addr_of!(WHEN_SLEEP_TIME_TIMESTAMP);
+            // Sanity check: valid unix timestamps are between year 2020 and 2100
+            if ts > 1577836800 && ts < 4102444800 {
+                let current_second = ts + get_sleep_ms().await / 1000;
+                // 再次校验恢复后的时间落在合理区间：get_sleep_ms 若因 RTC 计时不连续而异常，
+                // current_second 会越界，此时跳过恢复，等待 NTP 重新对时（避免设置成错误时间）。
+                if current_second > 1577836800 && current_second < 4102444800 {
+                    if let Ok(now) = OffsetDateTime::from_unix_timestamp(current_second as i64) {
+                        clock.set_time(now).await;
+                    }
                 }
             }
         }
@@ -378,6 +413,14 @@ pub async fn ntp_worker() {
                                 core::ptr::addr_of_mut!(CLOCK_SYNC_TIME_SECOND).write(
                                     get_clock().unwrap().now().await.unix_timestamp() as u64
                                 );
+                            }
+                            // v22：对时成功 → 写入 PCF8563（备电池维持，唤醒/断电不丢）
+                            #[cfg(feature = "v22")]
+                            {
+                                let ts = get_clock().unwrap().now().await.unix_timestamp();
+                                if crate::pcf8563::write_time(ts).await {
+                                    println!("[time] PCF8563 synced");
+                                }
                             }
                             err_times = 0;
                             sleep_sec = 3600;

@@ -141,6 +141,22 @@ where
                 );
             }
         }
+
+        // v22：AHT20 室内温湿度（"内 23.5℃ 45%"）
+        #[cfg(feature = "v22")]
+        if let Some((t, h)) = crate::aht20::indoor_snapshot() {
+            use core::fmt::Write as _;
+            let mut s: heapless::String<24> = heapless::String::new();
+            let _ = write!(s, "内 {}℃ {}%", t as f32 / 10.0, h);
+            let _ = font_small.render_aligned(
+                s.as_str(),
+                Point::new(left_cx, y + 14),
+                VerticalPosition::Top,
+                HorizontalAlignment::Center,
+                FontColor::Transparent(Black),
+                display,
+            );
+        }
     }
 
     // 右面板：白天图标 → 折线图 → 夜间图标

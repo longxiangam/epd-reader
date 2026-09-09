@@ -114,15 +114,12 @@ pub fn get_full_refresh_times() -> u32 {
 #[embassy_executor::task]
 pub async fn render(
     mut spi_device: &'static mut ActualSpi<'static>,
-    busy: esp_hal::peripherals::GPIO6<'static>,
-    rst: esp_hal::peripherals::GPIO7<'static>,
-    dc: esp_hal::peripherals::GPIO20<'static>,
+    busy: Input<'static>,
+    rst: Output<'static>,
+    dc: Output<'static>,
 )
 {
-    let busy = Input::new(busy, esp_hal::gpio::InputConfig::default().with_pull(Pull::Down));
-    let rst = Output::new(rst, Level::High, esp_hal::gpio::OutputConfig::default());
-    let dc = Output::new(dc, Level::High, esp_hal::gpio::OutputConfig::default());
-
+    // v22 换脚（dc=GPIO21）：由调用方按 feature 构造驱动，本任务不再绑定具体 GPIO
     let mut epd = EpdControl::new(&mut spi_device, busy, dc, rst, &mut embassy_time::Delay).unwrap();
     let mut display: EpdDisplay = EpdDisplay::default();
     display.clear_buffer(Color::White);

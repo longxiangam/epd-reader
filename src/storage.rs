@@ -234,6 +234,44 @@ impl Default for ReadingSettings {
     }
 }
 
+/// v22 三键 ADC 校准数据（分压电阻有个体差异，阈值必须实测标定）。
+/// 追加在末尾，不动既有结构。magic 无效/间隔不足 → 开机进入校准界面。
+#[derive(Debug, Clone, Copy)]
+pub struct AdcCalStorage {
+    pub magic: u32, // 0x41444331 = "ADC1"，有效标志
+    pub idle: u16,  // 未按下时的 ADC 均值（上拉 → 高）
+    pub key1: u16,  // 按键1 按住时的 ADC 均值
+    pub key2: u16,
+    pub key3: u16,
+}
+
+impl Default for AdcCalStorage {
+    fn default() -> Self {
+        Self { magic: 0, idle: 0, key1: 0, key2: 0, key3: 0 }
+    }
+}
+
+impl AdcCalStorage {
+    pub const MAGIC: u32 = 0x4144_4331;
+    /// 判定相邻键值最小间隔（12bit ADC）：小于此值视为无法可靠区分。
+    pub const MIN_GAP: i32 = 120;
+
+    /// 校准数据有效性：magic 正确 + idle 与三键值两两间隔足够。
+    pub fn valid(&self) -> bool {
+        if self.magic != Self::MAGIC || self.idle == 0 {
+            return false;
+        }
+        let mut v = [self.idle as i32, self.key1 as i32, self.key2 as i32, self.key3 as i32];
+        v.sort_unstable();
+        for w in v.windows(2) {
+            if w[1] - w[0] < Self::MIN_GAP {
+                return false;
+            }
+        }
+        true
+    }
+}
+
 impl ReadingSettings {
     /// 取 font_name 的 &str（到首个 \0 或全长）。
     pub fn font_name_str(&self) -> &str {
@@ -254,6 +292,9 @@ impl_storage!(ErrorLogStorage, ERROR_LOG_OFFSET);
 impl_storage!(StockStorage, STOCK_STORAGE_OFFSET);
 impl_storage!(DisplayStorage, DISPLAY_STORAGE_OFFSET);
 impl_storage!(ReadingSettings, READING_SETTINGS_OFFSET);
+
+const ADC_CAL_OFFSET: usize = READING_SETTINGS_OFFSET + size_of::<ReadingSettings>();
+impl_storage!(AdcCalStorage, ADC_CAL_OFFSET);
 
 // 为 HolidayStorage 手动实现 NvsStorage，使用分块写入避免栈溢出
 impl NvsStorage for HolidayStorage {
@@ -317,4 +358,5 @@ pub fn init_storage_area(){
     // 0 = 未配置，display 侧回退到平台默认（无需在此处区分 feature）
     DisplayStorage::default().write();
     ReadingSettings::default().write();
+    AdcCalStorage::default().write();
 }
