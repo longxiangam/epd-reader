@@ -28,8 +28,6 @@ const ESCAPE_HOLD_MS: u64 = 15_000;
 
 /// 校准界面进行中标志：监控任务据此暂停逃逸判定（校准时按住按键是正常操作）
 static IN_CALIBRATION: AtomicBool = AtomicBool::new(false);
-/// 睡眠入口置位：让 key_task 停止 ADC 轮询（深睡掉电时 SAR ADC 不能有挂起状态）
-static ADC_PAUSED: AtomicBool = AtomicBool::new(false);
 
 // ── ADC 采样 ──
 
@@ -317,12 +315,6 @@ pub async fn key_task() -> ! {
     let mut mon = EscapeMonitor { dev_since_ms: 0 };
 
     loop {
-        // 睡眠入口暂停轮询：深睡掉电时 SAR ADC 不能有挂起的转换状态
-        if ADC_PAUSED.load(Ordering::Relaxed) {
-            Timer::after_millis(50).await;
-            continue;
-        }
-
         let avg = match adc_avg(8).await {
             Some(v) => v,
             None => {
@@ -332,9 +324,7 @@ pub async fn key_task() -> ! {
         };
 
         // 15s 逃逸监控：校准进行中不判定（校准本来就要按住按键）
-        if IN_CALIBRATION.load(Ordering::Relaxed) {
-            mon.dev_since_ms = 0;
-        } else if mon.tick(avg, boot_idle) {
+        if !IN_CALIBRATION.load(Ordering::Relaxed) && mon.tick(avg, boot_idle) {
             escalate(&mut mon).await;
         }
 
@@ -530,15 +520,6 @@ pub async fn boot_calibration_if_needed() {
         println!("[adc_key] 无有效校准数据，进入开机校准");
         run_calibration(false).await;
     }
-}
-
-/// 睡眠入口调用：暂停 ADC 轮询并重建 ADC 实例，确保深睡掉电时
-/// SAR ADC 没有任何挂起的转换状态（挂起状态与低电平唤醒互相作用曾导致秒醒）。
-pub async fn pause_for_sleep() {
-    ADC_PAUSED.store(true, Ordering::Relaxed);
-    // 等 key_task 完成当前一轮采样
-    Timer::after_millis(60).await;
-    heal_adc().await;
 }
 
 // ── regi2c SAR ADC 模拟配置快照/恢复 ──

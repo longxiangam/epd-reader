@@ -2,8 +2,6 @@ use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::mutex::Mutex;
 use embassy_time::{ Duration, Instant};
 use esp_hal::gpio::{Output, RtcPinWithResistors};
-#[cfg(feature = "v22")]
-use esp_hal::gpio::RtcPin;
 use esp_hal::ram;
 use esp_hal::rtc_cntl::sleep::{RtcioWakeupSource, TimerWakeupSource, WakeSource, WakeupLevel};
 use heapless::Vec;
@@ -57,13 +55,8 @@ pub async fn to_sleep_tips(sleep_time:Duration, idle_time:Duration, show_sleep:b
         unsafe {
             *core::ptr::addr_of_mut!(WHEN_SLEEP_RTC_MS) = get_rtc_ms().await;
 
-            // 电源处理：v22 IO1 = SD+EINK 共用电源（低电平有效），**睡眠保持常供电**
-            // （不切轨）：确保低电平并锁存穿越深睡（深睡数字域断电，不锁存 pad 会悬空，
-            // 低有效的负载开关状态不确定）。其它板型维持原行为。
-            #[cfg(feature = "v22")]
-            {
-                if let Some(mut p) = SD_PWER_PIN.lock().await.as_mut() { p.set_low(); }
-            }
+            // v22：IO1 常供电，睡眠不做任何电源切换。
+            // 其它板型：睡眠前把电源脚置高（维持原行为）。
             #[cfg(not(feature = "v22"))]
             {
                 if let Some(mut p) = EINK_PWER_PIN.lock().await.take() { p.set_high(); }
@@ -99,11 +92,7 @@ pub async fn reboot_sleep() {
     // 同 to_sleep_tips：切电前确保面板不在刷新/睡眠中途。
     crate::display::await_render_idle().await;
     unsafe {
-        #[cfg(feature = "v22")]
-        {
-            // IO1 共用电源（低有效）：睡眠保持常供电
-            if let Some(mut p) = SD_PWER_PIN.lock().await.as_mut() { p.set_low(); }
-        }
+        // v22：IO1 常供电，睡眠不切换电源。其它板型：置高维持供电。
         #[cfg(not(feature = "v22"))]
         {
             if let Some(mut p) = EINK_PWER_PIN.lock().await.take() { p.set_high(); }

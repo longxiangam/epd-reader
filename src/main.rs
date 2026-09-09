@@ -53,7 +53,7 @@ use esp_hal::{
     Config as HalConfig,
     analog::adc::{Adc, AdcCalCurve, AdcConfig, Attenuation},
     clock::CpuClock,
-    gpio::{Input, InputConfig, Level, Output, OutputConfig, Pull, RtcPin, RtcPinWithResistors},
+    gpio::{Input, InputConfig, Level, Output, OutputConfig, Pull},
     init as hal_init,
     interrupt::software::SoftwareInterruptControl,
     rng::Rng,
@@ -142,9 +142,6 @@ async fn main(spawner: Spawner) -> ! {
     let epd_sclk = peripherals.GPIO8;
     let epd_mosi = peripherals.GPIO0;
     let epd_miso = peripherals.GPIO10;
-
-    // RTC hold on GPIO1
-    //peripherals.GPIO1.rtcio_pad_hold(false);
 
     // ── 电源控制 ──
     // v22：IO1 同时控制 SD 与 EINK（共用电源轨），负载开关**低电平有效**：
