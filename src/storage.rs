@@ -296,6 +296,35 @@ impl_storage!(ReadingSettings, READING_SETTINGS_OFFSET);
 const ADC_CAL_OFFSET: usize = READING_SETTINGS_OFFSET + size_of::<ReadingSettings>();
 impl_storage!(AdcCalStorage, ADC_CAL_OFFSET);
 
+/// 最后所在页（跨深睡唤醒恢复）。IO（RTCIO）唤醒时 rtc_fast 状态不可靠
+/// （BOOTED/PAGE_INDEX 会丢，设备落到默认页），故页面变化时同步落到 NVS。
+#[derive(Debug, Clone, Copy)]
+pub struct SleepPageStorage {
+    pub magic: u32, // 0x50414745 = "PAGE"
+    pub page: i32,  // 主网格页索引，-1=网格
+}
+
+impl Default for SleepPageStorage {
+    fn default() -> Self {
+        Self { magic: 0, page: -1 }
+    }
+}
+
+impl SleepPageStorage {
+    pub const MAGIC: u32 = 0x5041_4745;
+
+    /// 读取有效值；未初始化/非法返回 None
+    pub fn valid_page(&self) -> Option<i32> {
+        if self.magic != Self::MAGIC || !(-1..=6).contains(&self.page) {
+            return None;
+        }
+        Some(self.page)
+    }
+}
+
+const SLEEP_PAGE_OFFSET: usize = ADC_CAL_OFFSET + size_of::<AdcCalStorage>();
+impl_storage!(SleepPageStorage, SLEEP_PAGE_OFFSET);
+
 // 为 HolidayStorage 手动实现 NvsStorage，使用分块写入避免栈溢出
 impl NvsStorage for HolidayStorage {
     fn read() -> Result<Self, FlashStorageError> {

@@ -56,6 +56,19 @@ pub fn read_default_page() -> i32 {
     1 // 默认天气
 }
 
+/// 保存最后所在页到 NVS（页面变化时调用；值未变化时跳过写入，避免磨损）
+pub(crate) fn save_last_page(page: i32) {
+    if let Ok(sp) = crate::storage::SleepPageStorage::read() {
+        if sp.valid_page() == Some(page) {
+            return;
+        }
+    }
+    let mut sp = crate::storage::SleepPageStorage::read().unwrap_or_default();
+    sp.magic = crate::storage::SleepPageStorage::MAGIC;
+    sp.page = page;
+    let _ = sp.write();
+}
+
 pub fn write_default_page(page: i32) {
     use core::fmt::Write;
     let mut o = crate::storage::OtherStorage::read().unwrap_or_default();
@@ -98,7 +111,18 @@ impl MainPage {
                 println!("================================");
                 page_index = 5;
             }
-        } 
+        }
+
+        // v22：IO（RTCIO）唤醒会丢 rtc_fast 状态（BOOTED=false → 落到默认页）。
+        // 页面变化时已同步存 NVS，此处优先从 NVS 恢复最后所在页。
+        if let Ok(sp) = crate::storage::SleepPageStorage::read() {
+            if let Some(p) = sp.valid_page() {
+                page_index = p;
+                unsafe { *core::ptr::addr_of_mut!(PAGE_INDEX) = p; }
+            }
+        }
+        save_last_page(page_index);
+        println!("[page] booted={} page_index={}", booted, page_index);
         MAIN_PAGE.lock().await.replace(MainPage::new());
 
         Self::bind_event(MAIN_PAGE.lock().await.as_mut().unwrap()).await;
@@ -202,6 +226,7 @@ impl Page for  MainPage{
                 unsafe {
                     unsafe { *core::ptr::addr_of_mut!(PAGE_INDEX) = mut_ref.choose_index as i32; }
                 }
+                save_last_page(mut_ref.choose_index as i32);
                 println!("current_page:{}",Self::get_mut().await.unwrap().choose_index );
             });
         }).await;

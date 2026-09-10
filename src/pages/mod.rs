@@ -114,5 +114,6 @@ pub async fn reading_task(spawner: Spawner) {
         core::ptr::addr_of_mut!(read::READING_MODE).write(false);
         core::ptr::addr_of_mut!(main_page::PAGE_INDEX).write(-1);
     }
+    main_page::save_last_page(-1);
     crate::sleep::reboot_sleep().await;
 }

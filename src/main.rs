@@ -141,7 +141,18 @@ async fn main(spawner: Spawner) -> ! {
     let epd_cs = Output::new(peripherals.GPIO3, Level::High, OutputConfig::default());
     let epd_sclk = peripherals.GPIO8;
     let epd_mosi = peripherals.GPIO0;
-    let epd_miso = peripherals.GPIO10;
+    let epd_miso = unsafe { peripherals.GPIO10.clone_unchecked() };
+    // v22：MISO(GPIO10) 内部上拉——SD 卡未初始化前 DO 高阻，无上拉时 CMD0 应答
+    // 读不可靠（Arduino 的 SD 库会启用内部上拉，所以它能正常读）。
+    // 需在 SPI 占用 GPIO10 之前配置，pull-up 位会一直保留。
+    #[cfg(feature = "v22")]
+    {
+        let miso_pu = Input::new(
+            unsafe { peripherals.GPIO10.clone_unchecked() },
+            InputConfig::default().with_pull(Pull::Up),
+        );
+        core::mem::forget(miso_pu);
+    }
 
     // ── 电源控制 ──
     // v22：IO1 同时控制 SD 与 EINK（共用电源轨），负载开关**低电平有效**：
@@ -286,7 +297,10 @@ async fn main(spawner: Spawner) -> ! {
     crate::sd_mount::SD_MOUNT.lock().await.replace(sd_mount);
     // SD上电后要通信一次，不然对显示通信有干扰
     if let Some(ref mut sd) = *SD_MOUNT.lock().await {
-        let _ = sd.volume_manager.open_volume(embedded_sdmmc::VolumeIdx(0));
+        match sd.volume_manager.open_volume(embedded_sdmmc::VolumeIdx(0)) {
+            Ok(_) => println!("[sd] volume open ok"),
+            Err(e) => println!("[sd] open_volume fail: {:?}", e),
+        }
     }
 
     // RTC 唤醒键注册：必须在阅读分支之前——阅读模式睡眠(to_sleep_tips/reboot_sleep)
