@@ -57,17 +57,6 @@ pub fn read_default_page() -> i32 {
 }
 
 /// 保存最后所在页到 NVS（页面变化时调用；值未变化时跳过写入，避免磨损）
-pub(crate) fn save_last_page(page: i32) {
-    if let Ok(sp) = crate::storage::SleepPageStorage::read() {
-        if sp.valid_page() == Some(page) {
-            return;
-        }
-    }
-    let mut sp = crate::storage::SleepPageStorage::read().unwrap_or_default();
-    sp.magic = crate::storage::SleepPageStorage::MAGIC;
-    sp.page = page;
-    let _ = sp.write();
-}
 
 pub fn write_default_page(page: i32) {
     use core::fmt::Write;
@@ -115,13 +104,15 @@ impl MainPage {
 
         // v22：IO（RTCIO）唤醒会丢 rtc_fast 状态（BOOTED=false → 落到默认页）。
         // 页面变化时已同步存 NVS，此处优先从 NVS 恢复最后所在页。
-        if let Ok(sp) = crate::storage::SleepPageStorage::read() {
-            if let Some(p) = sp.valid_page() {
-                page_index = p;
-                unsafe { *core::ptr::addr_of_mut!(PAGE_INDEX) = p; }
+        // （值 100 = 阅读模式哨兵，该路径在 main 的阅读分支处理，不会走到 init）
+        if let Some(mut p) = crate::storage::read_sleep_page() {
+            if p == crate::storage::SleepPageStorage::PAGE_READING {
+                p = -1;
             }
+            page_index = p;
+            unsafe { *core::ptr::addr_of_mut!(PAGE_INDEX) = p; }
         }
-        save_last_page(page_index);
+        crate::storage::write_sleep_page(page_index);
         println!("[page] booted={} page_index={}", booted, page_index);
         MAIN_PAGE.lock().await.replace(MainPage::new());
 
@@ -226,7 +217,7 @@ impl Page for  MainPage{
                 unsafe {
                     unsafe { *core::ptr::addr_of_mut!(PAGE_INDEX) = mut_ref.choose_index as i32; }
                 }
-                save_last_page(mut_ref.choose_index as i32);
+                crate::storage::write_sleep_page(mut_ref.choose_index as i32);
                 println!("current_page:{}",Self::get_mut().await.unwrap().choose_index );
             });
         }).await;
@@ -301,6 +292,11 @@ impl Page for  MainPage{
                         core::ptr::addr_of_mut!(crate::pages::read::READING_MODE).write(true);
                         core::ptr::addr_of_mut!(crate::pages::read::PAGE_INDEX).write(None);
                     }
+                    // v22：IO 唤醒会丢 rtc_fast 的 READING_MODE——哨兵值落 NVS，
+                    // 唤醒重启后 main 据此直接进阅读模式（不连网）
+                    crate::storage::write_sleep_page(
+                        crate::storage::SleepPageStorage::PAGE_READING,
+                    );
                     crate::sleep::reboot_sleep().await;
                 }
                 EImageListPage => {

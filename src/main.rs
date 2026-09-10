@@ -310,6 +310,15 @@ async fn main(spawner: Spawner) -> ! {
 
     // 重启分模式：阅读模式启动时不初始化 WiFi，独占整块堆做 TTF（大字形缓存）。
     // 模式标志存 rtc_fast（跨 reboot_sleep 深睡保留）；直接进 reading_task。
+    // v22：IO（RTCIO）唤醒会丢 rtc_fast 的 READING_MODE——从 NVS 恢复"上次在阅读"，
+    // 直接走阅读模式（不连网），与旧行为一致。
+    #[cfg(feature = "v22")]
+    if crate::storage::read_sleep_page() == Some(crate::storage::SleepPageStorage::PAGE_READING) {
+        unsafe {
+            core::ptr::addr_of_mut!(crate::pages::read::READING_MODE).write(true);
+        }
+        println!("[boot] NVS: 上次在阅读 → 恢复阅读模式");
+    }
     {
         let reading_mode = unsafe { *core::ptr::addr_of!(crate::pages::read::READING_MODE) };
         if reading_mode {

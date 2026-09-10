@@ -312,10 +312,14 @@ impl Default for SleepPageStorage {
 
 impl SleepPageStorage {
     pub const MAGIC: u32 = 0x5041_4745;
+    /// 哨兵值：上次处于阅读模式（区别于"网格选中电子书页"，后者冷启动不该进阅读模式）
+    pub const PAGE_READING: i32 = 100;
 
     /// 读取有效值；未初始化/非法返回 None
     pub fn valid_page(&self) -> Option<i32> {
-        if self.magic != Self::MAGIC || !(-1..=6).contains(&self.page) {
+        if self.magic != Self::MAGIC
+            || !(self.page == Self::PAGE_READING || (-1..=6).contains(&self.page))
+        {
             return None;
         }
         Some(self.page)
@@ -324,6 +328,22 @@ impl SleepPageStorage {
 
 const SLEEP_PAGE_OFFSET: usize = ADC_CAL_OFFSET + size_of::<AdcCalStorage>();
 impl_storage!(SleepPageStorage, SLEEP_PAGE_OFFSET);
+
+/// 读取睡眠前最后所在页（NVS）。None=无记录
+pub fn read_sleep_page() -> Option<i32> {
+    SleepPageStorage::read().ok().and_then(|sp| sp.valid_page())
+}
+
+/// 写入睡眠前最后所在页（值未变化时跳过写入，避免磨损）
+pub fn write_sleep_page(page: i32) {
+    if read_sleep_page() == Some(page) {
+        return;
+    }
+    let mut sp = SleepPageStorage::read().unwrap_or_default();
+    sp.magic = SleepPageStorage::MAGIC;
+    sp.page = page;
+    let _ = sp.write();
+}
 
 // 为 HolidayStorage 手动实现 NvsStorage，使用分块写入避免栈溢出
 impl NvsStorage for HolidayStorage {
