@@ -49,11 +49,12 @@ use embedded_graphics::prelude::Point;
 use embedded_graphics::text::{Baseline, Text, TextStyleBuilder};
 use embedded_sdmmc::{SdCard, VolumeManager, sdcard::spi::AcquireOpts};
 
+use esp_hal::ram;
 use esp_hal::{
     Config as HalConfig,
     analog::adc::{Adc, AdcCalCurve, AdcConfig, Attenuation},
     clock::CpuClock,
-    gpio::{Input, InputConfig, Level, Output, OutputConfig, Pull},
+    gpio::{Input, InputConfig, Level, Output, OutputConfig, Pull, RtcPin},
     init as hal_init,
     interrupt::software::SoftwareInterruptControl,
     rng::Rng,
@@ -93,6 +94,11 @@ esp_bootloader_esp_idf::esp_app_desc!();
 #[unsafe(link_section = ".dram2_uninit")]
 static mut DRAM2_HEAP: core::mem::MaybeUninit<[u8; 65280]> = core::mem::MaybeUninit::uninit();
 
+/// v22 诊断：每次启动自增。rtc_fast 若跨深睡保留则持续递增；归 1 = 丢失。
+#[cfg(feature = "v22")]
+#[ram(unstable(rtc_fast))]
+static mut RTC_FAST_BOOT_SEQ: u32 = 0;
+
 #[esp_rtos::main]
 async fn main(spawner: Spawner) -> ! {
     // 堆放进 dram2 独立段（不占主 DRAM）→ 主 DRAM 全给栈，堆栈不再争抢。
@@ -109,13 +115,34 @@ async fn main(spawner: Spawner) -> ! {
     // 改为在主页直接渲染矢量字做端到端验证（见 main_page render）。
 
     println!("entry");
+
     let config = HalConfig::default().with_cpu_clock(CpuClock::max());
-    let peripherals = hal_init(config);
+    let mut peripherals = hal_init(config);
 
     // Timer for embassy runtime
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     let sw_int = SoftwareInterruptControl::new(peripherals.SW_INTERRUPT);
     esp_rtos::start(timg0.timer0, sw_int.software_interrupt0);
+
+    // v22 诊断：RTC_FAST_BOOT_SEQ 每次启动自增——
+    // 跨深睡唤醒保持递增 = rtc_fast 保留正常；归 1 = rtc_fast 在深睡中丢失。
+    // 先等 3 秒：唤醒重启后 USB 重枚举需要时间，不等则最开始的打印会丢。
+    #[cfg(feature = "v22")]
+    {
+        let delay = esp_hal::delay::Delay::new();
+        delay.delay_millis(3000);
+        let (when_ts, clk_sync) = crate::worldtime::diag_rtc_fast();
+        unsafe {
+            let p = core::ptr::addr_of_mut!(RTC_FAST_BOOT_SEQ);
+            *p = p.read_volatile().wrapping_add(1);
+            esp_println::println!(
+                "[diag] rtc_fast boot_seq={} when_sleep_ts={} clk_sync={}",
+                p.read_volatile(),
+                when_ts,
+                clk_sync
+            );
+        }
+    }
 
     // RTC
     let rtc = esp_hal::rtc_cntl::Rtc::new(peripherals.LPWR);
@@ -155,13 +182,13 @@ async fn main(spawner: Spawner) -> ! {
     }
 
     // ── 电源控制 ──
-    // v22：IO1 同时控制 SD 与 EINK（共用电源轨），负载开关**低电平有效**：
-    // IO1=低 → 供电，IO1=高 → 断电。睡眠保持常供电（不锁存、不切换）。
-    // 注意：不要对 IO1 做 rtcio_pad_hold——对数字功能 pad 使能 hold 会让 pad
-    // 变高阻（负载开关输入悬空 → 轨断电 → 屏幕不显示）。
+    // v22：IO1 同时控制 SD 与 EINK（共用电源轨），**低电平有效**：
+    // 开机驱低 → 轨常开。不做 pad hold（hold 会把 pad 冻成高阻、后续驱低
+    // 写不进去 → 轨断电屏幕黑，实测确认），深睡时 pad 悬空实测轨保持导通。
     #[cfg(feature = "v22")]
     {
-        let pwr = Output::new(peripherals.GPIO1, Level::Low, OutputConfig::default());
+        let mut pwr = Output::new(peripherals.GPIO1, Level::Low, OutputConfig::default());
+        pwr.set_low();
         crate::sleep::SD_PWER_PIN.lock().await.replace(pwr);
     }
     #[cfg(not(feature = "v22"))]
