@@ -157,6 +157,8 @@ async fn main(spawner: Spawner) -> ! {
     // ── 电源控制 ──
     // v22：IO1 同时控制 SD 与 EINK（共用电源轨），负载开关**低电平有效**：
     // IO1=低 → 供电，IO1=高 → 断电。睡眠保持常供电（不锁存、不切换）。
+    // 注意：不要对 IO1 做 rtcio_pad_hold——对数字功能 pad 使能 hold 会让 pad
+    // 变高阻（负载开关输入悬空 → 轨断电 → 屏幕不显示）。
     #[cfg(feature = "v22")]
     {
         let pwr = Output::new(peripherals.GPIO1, Level::Low, OutputConfig::default());
