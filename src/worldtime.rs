@@ -340,6 +340,12 @@ async fn pcf_restore(clock: &Clock) -> bool {
     }
     if let Ok(now) = OffsetDateTime::from_unix_timestamp(ts) {
         clock.set_time(now).await;
+        // PCF8563 时间可信 → 同步标志一并恢复。该标志在 rtc_fast，IO 唤醒会丢：
+        // 不恢复的话 sync_time_success()=false → 天气页不满足睡眠条件、
+        // ntp_worker 立刻连网对时（PCF8563 明明有准确时间）。
+        unsafe {
+            core::ptr::addr_of_mut!(CLOCK_SYNC_TIME_SECOND).write(ts as u64);
+        }
         println!("[time] restored from PCF8563");
         true
     } else {

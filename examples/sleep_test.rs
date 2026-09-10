@@ -69,11 +69,13 @@ fn regi2c_restore() {
     }
 }
 
-// ── APB_SARADC / I2C_ANA_MST 整块快照 → ADC 操作后比对差异并恢复 ──
+// ── APB_SARADC / I2C_ANA_MST / RTC_CNTL.ANA_CONF 整块快照 → ADC 操作后比对差异并恢复 ──
 const APB_SARADC: u32 = 0x6000_E000;
 const I2C_ANA_MST: u32 = 0x6004_8C00;
+const RTC_ANA_CONF: u32 = 0x6000_8034; // RTC_CNTL 基址 0x6000_8000 + 0x34
 static mut SNAP_SAR: [u32; 26] = [0; 26]; // 0x00..0x64
 static mut SNAP_ANA: [u32; 3] = [0; 3]; // 0x00..0x08
+static mut SNAP_ANACONF: u32 = 0;
 
 unsafe fn blocks_snapshot() {
     for i in 0..26 {
@@ -82,6 +84,7 @@ unsafe fn blocks_snapshot() {
     for i in 0..3 {
         SNAP_ANA[i] = ((I2C_ANA_MST + 4 * i as u32) as *const u32).read_volatile();
     }
+    SNAP_ANACONF = (RTC_ANA_CONF as *const u32).read_volatile();
 }
 
 /// 打印 ADC 造成的寄存器差异，并恢复为 ADC 操作前的状态
@@ -101,6 +104,13 @@ unsafe fn blocks_diff_restore() {
             println!("ANAMST+{:#04x}: {:08x} -> {:08x}", i * 4, SNAP_ANA[i], now);
             addr.write_volatile(SNAP_ANA[i]);
         }
+    }
+    let ac = RTC_ANA_CONF as *mut u32;
+    let now = ac.read_volatile();
+    let was = SNAP_ANACONF;
+    if now != was {
+        println!("ANACONF: {:08x} -> {:08x}", was, now);
+        ac.write_volatile(was);
     }
 }
 
