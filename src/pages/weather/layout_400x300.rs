@@ -183,7 +183,21 @@ where
             FontColor::Transparent(Black),
             display,
         );
-        y += 20;
+        y += 16;
+
+        // AHT20 室内温湿度（传感器实测，左面板中部）
+        if let Some((t, hum)) = crate::aht20::indoor_snapshot() {
+            let _ = font_small.render_aligned(
+                format_args!("室内: {}℃ {}%", t as f32 / 10.0, hum),
+                Point::new(6, y),
+                VerticalPosition::Top,
+                HorizontalAlignment::Left,
+                FontColor::Transparent(Black),
+                display,
+            );
+            y += 16;
+        }
+        y += 4;
 
         Line::new(Point::new(4, y), Point::new(left_w - 4, y))
             .into_styled(separator_style.clone())
