@@ -35,14 +35,12 @@ pub fn sd_miso_pullup(p: &mut esp_hal::peripherals::Peripherals) {
     core::mem::forget(miso_pu); // 配置保持到整个运行期
 }
 
-/// v22：AHT20 温湿度采样任务。
-#[cfg(feature = "v22")]
+/// AHT20 温湿度采样任务。
 pub fn spawn_sensors(sp: &embassy_executor::Spawner) {
     sp.spawn(crate::aht20::sample_task().unwrap());
 }
 
-/// v22 诊断打印（rtc_fast 状态）
-#[cfg(feature = "v22")]
+/// 诊断打印（rtc_fast 状态）
 pub fn print_boot_diag() {
     let (when_ts, clk_sync) = crate::worldtime::diag_rtc_fast();
     unsafe {

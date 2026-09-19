@@ -4,8 +4,6 @@ use heapless::Vec;
 
 use core::future::Future;
 use core::pin::Pin;
-use embassy_futures::select::select;
-use embassy_futures::select::Either::{First, Second};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::mutex::Mutex;
 use embassy_time::{Duration, Instant, Timer};
@@ -79,54 +77,22 @@ pub async fn toggle_event(event_type: EventType,_ms:u64){
 }
 
 
-// 按键 2 所在引脚（板级定义：v22=GPIO4，其它板型=GPIO2）
-pub type Key2Pin = esp_hal::peripherals::GPIO4<'static>;
-
 #[embassy_executor::task]
-pub async fn run(key1: esp_hal::peripherals::GPIO9<'static>, key2: Key2Pin){
-    // v22：三键共用 GPIO4，按下都会拉到数字低电平（实测键1≈20mV/键2≈282mV/
+pub async fn run(key2: esp_hal::peripherals::GPIO4<'static>){
+    // 三键共用 GPIO4，按下都会拉到数字低电平（实测键1≈20mV/键2≈282mV/
     // 键3≈519mV，均低于数字低阈值）→ 下降沿检测按键，ADC 平均值仅用于区分键号
-    #[cfg(feature = "v22")]
-    {
-        let mut key_all = Input::new(key2, esp_hal::gpio::InputConfig::default().with_pull(Pull::Up));
-        loop {
-            key_all.wait_for_falling_edge().await;
-            Timer::after_millis(30).await; // 等分压稳定
-            let num = judge_adc_num_v22().await;
-            if num == 0 {
-                Timer::after_millis(10).await;
-                continue;
-            }
-            key_detection(&mut key_all, num).await;
-            refresh_active_time().await;
-            Timer::after_millis(10).await;
-        }
-    }
-    #[cfg(not(feature = "v22"))]
-    {
-        let mut key1 = Input::new(key1, esp_hal::gpio::InputConfig::default().with_pull(Pull::Up));
-        let mut key2 = Input::new(key2, esp_hal::gpio::InputConfig::default().with_pull(Pull::Up));
-
+    let mut key_all = Input::new(key2, esp_hal::gpio::InputConfig::default().with_pull(Pull::Up));
     loop {
-
-        let key1_edge = key1.wait_for_falling_edge();
-        let key2_edge = key2.wait_for_falling_edge();
-        match  select(key1_edge, key2_edge).await {
-            First(_) => {
-                key_detection(&mut key1, 1).await;
-            }
-            Second(_) => {
-                let num = judge_adc_num().await;
-                if num == 0 {
-                    Timer::after_millis(10).await;
-                } else {
-                    key_detection(&mut key2, num).await;
-                }
-            }
+        key_all.wait_for_falling_edge().await;
+        Timer::after_millis(30).await; // 等分压稳定
+        let num = judge_adc_num().await;
+        if num == 0 {
+            Timer::after_millis(10).await;
+            continue;
         }
+        key_detection(&mut key_all, num).await;
         refresh_active_time().await;
-        Timer::after(Duration::from_millis(10)).await;
-    }
+        Timer::after_millis(10).await;
     }
 }
 
@@ -211,50 +177,10 @@ pub async fn key_detection<P:InputPin>(key: &mut P, key_num: usize)
     }
 }
 
-/// GPIO2 分压多键：用 ADC 电压区分键 2/3，采样取平均抗噪。
-/// ADC 偶发 Err 需重试（冷启动常见），仅在总尝试超限时放弃，避免卡死事件任务。
-async fn judge_adc_num() -> usize {
-    const SAMPLES: usize = 20;
-    const MAX_TRIES: usize = 200;
-    // 分压门限（12bit ADC）：< AVG_KEY2 → 键2；介于之间 → 键3；> AVG_NONE → 抖动忽略。
-    const AVG_KEY2: u32 = 200;
-    const AVG_NONE: u32 = 1000;
-
-    let mut need = SAMPLES;
-    let mut sum: u32 = 0;
-    let mut tries = 0usize;
-    while need > 0 {
-        tries += 1;
-        if tries > MAX_TRIES {
-            println!("btn adc too many tries, give up");
-            return 0;
-        }
-        if let Some(pin) = ADC_PIN.lock().await.as_mut() {
-            if let Some(adc) = ADC_PER.lock().await.as_mut() {
-                match adc.read_oneshot(pin) {
-                    Ok(v) => {
-                        sum = sum.saturating_add(v as u32);
-                        need -= 1;
-                    }
-                    Err(_e) => {
-                        Timer::after_millis(2).await;
-                    }
-                }
-            }
-        }
-    }
-    let avg = sum / SAMPLES as u32;
-    println!("btn avg:{:?}", avg);
-    if avg > AVG_NONE {
-        return 0;
-    }
-    if avg < AVG_KEY2 { 2 } else { 3 }
-}
-
 /// v22 三键梯（GPIO4，内部 45k 上拉）实测分压（12bit）：
 /// 键1 ≈ 44 / 键2 ≈ 409 / 键3 ≈ 645——按下都低于数字低阈值，故用边沿检测按键、
 /// ADC 平均值仅区分键号。阈值取相邻实测值的中点；明显高于键3 → 视为抖动忽略。
-async fn judge_adc_num_v22() -> usize {
+async fn judge_adc_num() -> usize {
     const SAMPLES: usize = 20;
     const T_KEY1: u32 = 220; // < 220 → 键1（实测 ~44）
     const T_KEY2: u32 = 520; // 220~520 → 键2（实测 ~409）

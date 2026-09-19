@@ -20,16 +20,13 @@ mod widgets;
 mod wifi;
 mod worldtime;
 //mod web_service;
-#[cfg(feature = "v22")]
 mod aht20;
 mod battery;
 mod board;
 mod flash_sleep;
-#[cfg(feature = "v22")]
 mod i2c_bus;
 mod location;
 mod panic;
-#[cfg(feature = "v22")]
 mod pcf8563;
 mod storage;
 mod ttf_sd;
@@ -131,11 +128,8 @@ async fn main(spawner: Spawner) -> ! {
 
     // v22 诊断：rtc_fast 状态自增——跨深睡唤醒保持递增 = 保留正常。
     // 先等 3 秒：唤醒重启后 USB 重枚举需要时间，不等则最开始的打印会丢。
-    #[cfg(feature = "v22")]
-    {
-        esp_hal::delay::Delay::new().delay_millis(3000);
-        crate::board::print_boot_diag();
-    }
+    esp_hal::delay::Delay::new().delay_millis(3000);
+    crate::board::print_boot_diag();
 
     // RTC
     let rtc = esp_hal::rtc_cntl::Rtc::new(peripherals.LPWR);
@@ -188,17 +182,13 @@ async fn main(spawner: Spawner) -> ! {
     .with_miso(epd_miso)
     .with_mosi(epd_mosi);
 
-    // Keys（v22：三键全部在 GPIO4 分压梯；GPIO9 归 I2C SDA 无按键）
-    let key1 = unsafe { peripherals.GPIO9.clone_unchecked() };
+    // 按键梯（三键全部在 GPIO4）
     let key2 = unsafe { peripherals.GPIO4.clone_unchecked() };
 
     // ── I2C 总线（v22：GPIO9=SDA GPIO21=SCL，挂 AHT20 + PCF8563；旧板无）──
-    #[cfg(feature = "v22")]
     if let Some(i2c) = i2c {
         crate::i2c_bus::I2C.lock().await.replace(i2c);
     }
-    #[cfg(not(feature = "v22"))]
-    drop(i2c);
 
     // ADC setup（按键梯 GPIO4 / 电池分压 GPIO2）
     let mut adc1_config = AdcConfig::new();
@@ -225,11 +215,10 @@ async fn main(spawner: Spawner) -> ! {
         core::mem::forget(k2_in);
     }
 
-    // 板载传感器任务（v22：AHT20 温湿度；旧板无）
-    #[cfg(feature = "v22")]
+    // 板载传感器任务（AHT20 温湿度）
     crate::board::spawn_sensors(&spawner);
 
-    spawner.spawn(event::run(key1, key2).unwrap());
+    spawner.spawn(event::run(key2).unwrap());
 
     let battery = Battery::new();
     battery::BATTERY.lock().await.replace(battery);
@@ -290,7 +279,6 @@ async fn main(spawner: Spawner) -> ! {
     // 模式标志存 rtc_fast（跨 reboot_sleep 深睡保留）；直接进 reading_task。
     // v22：IO（RTCIO）唤醒会丢 rtc_fast 的 READING_MODE——从 NVS 恢复"上次在阅读"，
     // 直接走阅读模式（不连网），与旧行为一致。
-    #[cfg(feature = "v22")]
     if crate::storage::read_sleep_page() == Some(crate::storage::SleepPageStorage::PAGE_READING) {
         unsafe {
             core::ptr::addr_of_mut!(crate::pages::read::READING_MODE).write(true);
@@ -303,7 +291,6 @@ async fn main(spawner: Spawner) -> ! {
             println!("[boot] 阅读模式：跳过 WiFi，独占堆做 TTF");
             // v22：阅读模式没有 ntp_worker，用 PCF8563 恢复时钟
             //（时间显示/跨天判断不再因无 WiFi 而滞后）
-            #[cfg(feature = "v22")]
             crate::worldtime::init_clock_pcf().await;
             refresh_active_time().await;
             spawner.spawn(crate::pages::reading_task(spawner.clone()).unwrap());

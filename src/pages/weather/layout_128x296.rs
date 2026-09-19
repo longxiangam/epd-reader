@@ -142,8 +142,7 @@ where
             }
         }
 
-        // v22：AHT20 室内温湿度（"内 23.5℃ 45%"）
-        #[cfg(feature = "v22")]
+        // AHT20 室内温湿度（"内 23.5℃ 45%"）
         if let Some((t, h)) = crate::aht20::indoor_snapshot() {
             use core::fmt::Write as _;
             let mut s: heapless::String<24> = heapless::String::new();

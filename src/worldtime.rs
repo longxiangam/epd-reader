@@ -329,8 +329,7 @@ pub async fn save_time_to_rtc() {
     }
 }
 
-/// v22 诊断：rtc_fast 里的时间相关状态转储
-#[cfg(feature = "v22")]
+/// 诊断：rtc_fast 里的时间相关状态转储
 pub fn diag_rtc_fast() -> (u64, u64) {
     unsafe {
         (
@@ -340,8 +339,7 @@ pub fn diag_rtc_fast() -> (u64, u64) {
     }
 }
 
-/// v22：从 PCF8563 恢复 Clock。成功返回 true。
-#[cfg(feature = "v22")]
+/// 从 PCF8563 恢复 Clock。成功返回 true。
 async fn pcf_restore(clock: &Clock) -> bool {
     let Some(ts) = crate::pcf8563::read_time().await else {
         return false;
@@ -364,8 +362,7 @@ async fn pcf_restore(clock: &Clock) -> bool {
     }
 }
 
-/// v22：阅读模式时钟初始化（该模式不跑 ntp_worker，PCF8563 是唯一时间源）。
-#[cfg(feature = "v22")]
+/// 阅读模式时钟初始化（该模式不跑 ntp_worker，PCF8563 是唯一时间源）。
 pub async fn init_clock_pcf() {
     let clock = CLOCK_CELL.init(Clock::new());
     unsafe {
@@ -380,11 +377,8 @@ pub async fn ntp_worker() {
     unsafe {
         core::ptr::addr_of_mut!(CLOCK).write(Some(clock));
     }
-    // v22：优先从 PCF8563 硬件时钟恢复（备电池维持，权威）；失败再退回 rtc_fast 估算
-    #[cfg(feature = "v22")]
-    let mut restored = pcf_restore(clock).await;
-    #[cfg(not(feature = "v22"))]
-    let restored = false;
+    // 优先从 PCF8563 硬件时钟恢复（备电池维持，权威）；失败再退回 rtc_fast 估算
+    let restored = pcf_restore(clock).await;
     if !restored {
         unsafe {
             let ts = *core::ptr::addr_of!(WHEN_SLEEP_TIME_TIMESTAMP);
@@ -431,8 +425,7 @@ pub async fn ntp_worker() {
                                     get_clock().unwrap().now().await.unix_timestamp() as u64
                                 );
                             }
-                            // v22：对时成功 → 写入 PCF8563（备电池维持，唤醒/断电不丢）
-                            #[cfg(feature = "v22")]
+                            // 对时成功 → 写入 PCF8563（备电池维持，唤醒/断电不丢）
                             {
                                 let ts = get_clock().unwrap().now().await.unix_timestamp();
                                 if crate::pcf8563::write_time(ts).await {
