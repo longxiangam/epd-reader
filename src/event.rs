@@ -79,15 +79,28 @@ pub async fn toggle_event(event_type: EventType,_ms:u64){
 }
 
 
+// 按键 2 所在引脚（板级定义：v22=GPIO4，其它板型=GPIO2）
+pub type Key2Pin = esp_hal::peripherals::GPIO4<'static>;
+
 #[embassy_executor::task]
-pub async fn run(key1: esp_hal::peripherals::GPIO9<'static>, key2: esp_hal::peripherals::GPIO2<'static>){
-    // v22：三键全走 GPIO2 ADC 分压，轮询采样（不依赖 GPIO 边沿——最弱的分压键
-    // 可能拉不过数字阈值）。key_task 永不返回，内部含开机校准逃逸监控。
+pub async fn run(key1: esp_hal::peripherals::GPIO9<'static>, key2: Key2Pin){
+    // v22：三键共用 GPIO4，按下都会拉到数字低电平（实测键1≈20mV/键2≈282mV/
+    // 键3≈519mV，均低于数字低阈值）→ 下降沿检测按键，ADC 平均值仅用于区分键号
     #[cfg(feature = "v22")]
     {
-        let _ = key1;
-        let _ = key2;
-        crate::adc_key::key_task().await;
+        let mut key_all = Input::new(key2, esp_hal::gpio::InputConfig::default().with_pull(Pull::Up));
+        loop {
+            key_all.wait_for_falling_edge().await;
+            Timer::after_millis(30).await; // 等分压稳定
+            let num = judge_adc_num_v22().await;
+            if num == 0 {
+                Timer::after_millis(10).await;
+                continue;
+            }
+            key_detection(&mut key_all, num).await;
+            refresh_active_time().await;
+            Timer::after_millis(10).await;
+        }
     }
     #[cfg(not(feature = "v22"))]
     {
@@ -100,10 +113,15 @@ pub async fn run(key1: esp_hal::peripherals::GPIO9<'static>, key2: esp_hal::peri
         let key2_edge = key2.wait_for_falling_edge();
         match  select(key1_edge, key2_edge).await {
             First(_) => {
-                key_detection::<_,1>(&mut key1).await;
+                key_detection(&mut key1, 1).await;
             }
             Second(_) => {
-                key_detection::<_,2>(&mut key2).await;
+                let num = judge_adc_num().await;
+                if num == 0 {
+                    Timer::after_millis(10).await;
+                } else {
+                    key_detection(&mut key2, num).await;
+                }
             }
         }
         refresh_active_time().await;
@@ -112,7 +130,8 @@ pub async fn run(key1: esp_hal::peripherals::GPIO9<'static>, key2: esp_hal::peri
     }
 }
 
-pub static ADC_PIN: Mutex<CriticalSectionRawMutex, Option<AdcPin<esp_hal::peripherals::GPIO2<'static>, esp_hal::peripherals::ADC1, AdcCalCurve<esp_hal::peripherals::ADC1>>>> = Mutex::new(None);
+// 按键 ADC 引脚随 Key2Pin 走（板级定义）
+pub static ADC_PIN: Mutex<CriticalSectionRawMutex, Option<AdcPin<esp_hal::peripherals::GPIO4<'static>, esp_hal::peripherals::ADC1, AdcCalCurve<esp_hal::peripherals::ADC1>>>> = Mutex::new(None);
 pub static ADC_PER: Mutex<CriticalSectionRawMutex, Option<Adc<'static, esp_hal::peripherals::ADC1, esp_hal::Blocking>>> = Mutex::new(None);
 
 pub static  ENABLE_DOUBLE:Mutex<CriticalSectionRawMutex,bool> = Mutex::new(false);
@@ -122,21 +141,13 @@ pub async fn enable_double_click(){
 pub async fn disable_double_click(){
     *ENABLE_DOUBLE.lock().await = false;
 }
-pub async fn key_detection<P,const NUM:usize>(key: &mut P)
-where P:InputPin
+pub async fn key_detection<P:InputPin>(key: &mut P, key_num: usize)
 {
     // KeyLongIng 节流：主循环 ~1ms 一轮，不限流会 ~1kHz 派发、纯耗电。
     const LONG_ING_INTERVAL_MS: u64 = 100;
     let begin_ms = Instant::now().as_millis();
     let mut last_long_ing_ms = begin_ms;
     let mut is_long = false;
-    let mut key_num:usize = NUM;
-    if NUM == 2 {
-        key_num = judge_adc_num().await ;
-        if key_num == 0 {
-            return;
-        }
-    }
 
     loop {
         let mut is_low_times = 0;
@@ -238,4 +249,47 @@ async fn judge_adc_num() -> usize {
         return 0;
     }
     if avg < AVG_KEY2 { 2 } else { 3 }
+}
+
+/// v22 三键梯（GPIO4，内部 45k 上拉）实测分压（12bit）：
+/// 键1 ≈ 44 / 键2 ≈ 409 / 键3 ≈ 645——按下都低于数字低阈值，故用边沿检测按键、
+/// ADC 平均值仅区分键号。阈值取相邻实测值的中点；明显高于键3 → 视为抖动忽略。
+async fn judge_adc_num_v22() -> usize {
+    const SAMPLES: usize = 20;
+    const T_KEY1: u32 = 220; // < 220 → 键1（实测 ~44）
+    const T_KEY2: u32 = 520; // 220~520 → 键2（实测 ~409）
+    const T_KEY3: u32 = 900; // 520~900 → 键3（实测 ~645）
+
+    let mut need = SAMPLES;
+    let mut sum: u32 = 0;
+    let mut tries = 0usize;
+    while need > 0 {
+        tries += 1;
+        if tries > 200 {
+            println!("[adc_key] v22 judge adc too many tries, give up");
+            return 0;
+        }
+        if let Some(pin) = ADC_PIN.lock().await.as_mut() {
+            if let Some(adc) = ADC_PER.lock().await.as_mut() {
+                match adc.read_oneshot(pin) {
+                    Ok(v) => {
+                        sum = sum.saturating_add(v as u32);
+                        need -= 1;
+                    }
+                    Err(_) => Timer::after_millis(2).await,
+                }
+            }
+        }
+    }
+    let avg = sum / SAMPLES as u32;
+    println!("[adc_key] press avg={}", avg);
+    if avg < T_KEY1 {
+        1
+    } else if avg < T_KEY2 {
+        2
+    } else if avg < T_KEY3 {
+        3
+    } else {
+        0
+    }
 }

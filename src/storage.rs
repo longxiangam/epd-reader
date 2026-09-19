@@ -252,7 +252,8 @@ impl Default for AdcCalStorage {
 }
 
 impl AdcCalStorage {
-    pub const MAGIC: u32 = 0x4144_4331;
+    /// "ADC2"：按键引脚换到 GPIO4 后分压点变化，旧校准数据作废，需重新校准
+    pub const MAGIC: u32 = 0x4144_4332;
     /// 判定相邻键值最小间隔（12bit ADC）：小于此值视为无法可靠区分。
     pub const MIN_GAP: i32 = 120;
 

@@ -21,10 +21,9 @@ mod wifi;
 mod worldtime;
 //mod web_service;
 #[cfg(feature = "v22")]
-mod adc_key;
-#[cfg(feature = "v22")]
 mod aht20;
 mod battery;
+mod board;
 mod flash_sleep;
 #[cfg(feature = "v22")]
 mod i2c_bus;
@@ -49,12 +48,11 @@ use embedded_graphics::prelude::Point;
 use embedded_graphics::text::{Baseline, Text, TextStyleBuilder};
 use embedded_sdmmc::{SdCard, VolumeManager, sdcard::spi::AcquireOpts};
 
-use esp_hal::ram;
 use esp_hal::{
     Config as HalConfig,
     analog::adc::{Adc, AdcCalCurve, AdcConfig, Attenuation},
     clock::CpuClock,
-    gpio::{Input, InputConfig, Level, Output, OutputConfig, Pull, RtcPin},
+    gpio::{Input, InputConfig, Level, Output, OutputConfig, Pull, RtcPin, RtcPinWithResistors},
     init as hal_init,
     interrupt::software::SoftwareInterruptControl,
     rng::Rng,
@@ -94,11 +92,6 @@ esp_bootloader_esp_idf::esp_app_desc!();
 #[unsafe(link_section = ".dram2_uninit")]
 static mut DRAM2_HEAP: core::mem::MaybeUninit<[u8; 65280]> = core::mem::MaybeUninit::uninit();
 
-/// v22 诊断：每次启动自增。rtc_fast 若跨深睡保留则持续递增；归 1 = 丢失。
-#[cfg(feature = "v22")]
-#[ram(unstable(rtc_fast))]
-static mut RTC_FAST_BOOT_SEQ: u32 = 0;
-
 #[esp_rtos::main]
 async fn main(spawner: Spawner) -> ! {
     // 堆放进 dram2 独立段（不占主 DRAM）→ 主 DRAM 全给栈，堆栈不再争抢。
@@ -119,29 +112,29 @@ async fn main(spawner: Spawner) -> ! {
     let config = HalConfig::default().with_cpu_clock(CpuClock::max());
     let mut peripherals = hal_init(config);
 
+    // 释放上次深睡布下的 pad hold（RTC 域跨深睡保留——不释放的话，
+    // GPIO1 的驱低上轨写不进去 → 轨断电 → 显示/SD 全灭）
+    esp_hal::peripherals::LPWR::regs()
+        .pad_hold()
+        .modify(|_, w| unsafe { w.bits(0) });
+
+    // I2C 总线（v22：GPIO9=SDA GPIO21=SCL，挂 AHT20 + PCF8563；旧板无）——
+    // 在任何外设被 move 之前构造
+    let i2c = crate::board::init_i2c(&mut peripherals);
+    // MISO(GPIO10) 内部上拉（v22：SD 兼容；需在 SPI 占用 GPIO10 前配置）
+    crate::board::sd_miso_pullup(&mut peripherals);
+
     // Timer for embassy runtime
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     let sw_int = SoftwareInterruptControl::new(peripherals.SW_INTERRUPT);
     esp_rtos::start(timg0.timer0, sw_int.software_interrupt0);
 
-    // v22 诊断：RTC_FAST_BOOT_SEQ 每次启动自增——
-    // 跨深睡唤醒保持递增 = rtc_fast 保留正常；归 1 = rtc_fast 在深睡中丢失。
+    // v22 诊断：rtc_fast 状态自增——跨深睡唤醒保持递增 = 保留正常。
     // 先等 3 秒：唤醒重启后 USB 重枚举需要时间，不等则最开始的打印会丢。
     #[cfg(feature = "v22")]
     {
-        let delay = esp_hal::delay::Delay::new();
-        delay.delay_millis(3000);
-        let (when_ts, clk_sync) = crate::worldtime::diag_rtc_fast();
-        unsafe {
-            let p = core::ptr::addr_of_mut!(RTC_FAST_BOOT_SEQ);
-            *p = p.read_volatile().wrapping_add(1);
-            esp_println::println!(
-                "[diag] rtc_fast boot_seq={} when_sleep_ts={} clk_sync={}",
-                p.read_volatile(),
-                when_ts,
-                clk_sync
-            );
-        }
+        esp_hal::delay::Delay::new().delay_millis(3000);
+        crate::board::print_boot_diag();
     }
 
     // RTC
@@ -169,41 +162,17 @@ async fn main(spawner: Spawner) -> ! {
     let epd_sclk = peripherals.GPIO8;
     let epd_mosi = peripherals.GPIO0;
     let epd_miso = unsafe { peripherals.GPIO10.clone_unchecked() };
-    // v22：MISO(GPIO10) 内部上拉——SD 卡未初始化前 DO 高阻，无上拉时 CMD0 应答
-    // 读不可靠（Arduino 的 SD 库会启用内部上拉，所以它能正常读）。
-    // 需在 SPI 占用 GPIO10 之前配置，pull-up 位会一直保留。
-    #[cfg(feature = "v22")]
-    {
-        let miso_pu = Input::new(
-            unsafe { peripherals.GPIO10.clone_unchecked() },
-            InputConfig::default().with_pull(Pull::Up),
-        );
-        core::mem::forget(miso_pu);
-    }
 
-    // ── 电源控制 ──
-    // v22：IO1 同时控制 SD 与 EINK（共用电源轨），**低电平有效**：
-    // 开机驱低 → 轨常开。不做 pad hold（hold 会把 pad 冻成高阻、后续驱低
-    // 写不进去 → 轨断电屏幕黑，实测确认），深睡时 pad 悬空实测轨保持导通。
-    #[cfg(feature = "v22")]
-    {
-        let mut pwr = Output::new(peripherals.GPIO1, Level::Low, OutputConfig::default());
-        pwr.set_low();
-        crate::sleep::SD_PWER_PIN.lock().await.replace(pwr);
-    }
-    #[cfg(not(feature = "v22"))]
-    {
-        let mut eink_pwr_ctrl =
-            Output::new(peripherals.GPIO21, Level::High, OutputConfig::default());
-        let mut sd_pwr_ctrl = Output::new(peripherals.GPIO1, Level::High, OutputConfig::default());
-        eink_pwr_ctrl.set_low();
-        sd_pwr_ctrl.set_low();
-        crate::sleep::EINK_PWER_PIN
-            .lock()
-            .await
-            .replace(eink_pwr_ctrl);
-        crate::sleep::SD_PWER_PIN.lock().await.replace(sd_pwr_ctrl);
-    }
+    // ── 电源控制（master 结构；v22：IO1 单轨同时供 SD+EINK，低电平有效=开）──
+    // 两个槽都填同一轨的句柄：睡眠时统一置高断轨，与 master 双电源脚等价
+    let mut eink_pwr_ctrl = Output::new(
+        unsafe { peripherals.GPIO1.clone_unchecked() },
+        Level::Low,
+        OutputConfig::default(),
+    );
+    let mut sd_pwr_ctrl = Output::new(peripherals.GPIO1, Level::Low, OutputConfig::default());
+    crate::sleep::EINK_PWER_PIN.lock().await.replace(eink_pwr_ctrl);
+    crate::sleep::SD_PWER_PIN.lock().await.replace(sd_pwr_ctrl);
 
     let sdcard_cs = Output::new(peripherals.GPIO5, Level::High, OutputConfig::default());
 
@@ -219,41 +188,27 @@ async fn main(spawner: Spawner) -> ! {
     .with_miso(epd_miso)
     .with_mosi(epd_mosi);
 
-    // Keys
-    // v22：GPIO9 归 I2C SDA，按键任务用克隆句柄（内部忽略 GPIO 路径）
-    #[cfg(feature = "v22")]
+    // Keys（v22：三键全部在 GPIO4 分压梯；GPIO9 归 I2C SDA 无按键）
     let key1 = unsafe { peripherals.GPIO9.clone_unchecked() };
-    #[cfg(not(feature = "v22"))]
-    let key1 = peripherals.GPIO9;
+    let key2 = unsafe { peripherals.GPIO4.clone_unchecked() };
 
-    // ── v22：I2C 总线（GPIO9=SDA GPIO21=SCL，100kHz，挂 AHT20 + PCF8563）──
+    // ── I2C 总线（v22：GPIO9=SDA GPIO21=SCL，挂 AHT20 + PCF8563；旧板无）──
     #[cfg(feature = "v22")]
-    {
-        let i2c = esp_hal::i2c::master::I2c::new(
-            peripherals.I2C0,
-            esp_hal::i2c::master::Config::default(),
-        )
-        .expect("i2c init")
-        .with_sda(peripherals.GPIO9)
-        .with_scl(peripherals.GPIO21);
+    if let Some(i2c) = i2c {
         crate::i2c_bus::I2C.lock().await.replace(i2c);
     }
+    #[cfg(not(feature = "v22"))]
+    drop(i2c);
 
-    // ADC setup
-    let rtc_pin = unsafe { peripherals.GPIO2.clone_unchecked() };
-    let adc_pin = unsafe { peripherals.GPIO2.clone_unchecked() };
-    let key2 = unsafe { peripherals.GPIO2.clone_unchecked() };
-    // v22：ADC 初始化前快照 regi2c SAR 模拟配置（睡眠前恢复，见 sleep.rs）
-    #[cfg(feature = "v22")]
-    crate::adc_key::regi2c_capture();
+    // ADC setup（按键梯 GPIO4 / 电池分压 GPIO2）
     let mut adc1_config = AdcConfig::new();
     let adc1_pin = adc1_config.enable_pin_with_cal::<_, AdcCalCurve<esp_hal::peripherals::ADC1>>(
-        adc_pin,
+        unsafe { peripherals.GPIO4.clone_unchecked() },
         Attenuation::_11dB,
     );
     let bat_adc1_pin = adc1_config
         .enable_pin_with_cal::<_, AdcCalCurve<esp_hal::peripherals::ADC1>>(
-            peripherals.GPIO4,
+            peripherals.GPIO2,
             Attenuation::_11dB,
         );
 
@@ -261,20 +216,18 @@ async fn main(spawner: Spawner) -> ! {
     event::ADC_PER.lock().await.replace(adc1);
     event::ADC_PIN.lock().await.replace(adc1_pin);
 
-    // v22：GPIO2 数字输入 + 上拉——**在 ADC 初始化之后再配一次**，
-    // 重新打开被 set_analog 关闭的 fun_ie/fun_wpu（输入断开 → 比较器悬空判低 → 秒醒）
-    #[cfg(feature = "v22")]
+    // 按键脚数字输入 + 上拉——在 ADC 初始化之后再配一次（set_analog 会剥掉）
     {
         let k2_in = Input::new(
-            unsafe { peripherals.GPIO2.clone_unchecked() },
+            unsafe { peripherals.GPIO4.clone_unchecked() },
             InputConfig::default().with_pull(Pull::Up),
         );
-        core::mem::forget(k2_in); // 配置保持到整个运行期
+        core::mem::forget(k2_in);
     }
 
-    // v22：AHT20 室内温湿度采样任务
+    // 板载传感器任务（v22：AHT20 温湿度；旧板无）
     #[cfg(feature = "v22")]
-    spawner.spawn(crate::aht20::sample_task().unwrap());
+    crate::board::spawn_sensors(&spawner);
 
     spawner.spawn(event::run(key1, key2).unwrap());
 
@@ -309,10 +262,6 @@ async fn main(spawner: Spawner) -> ! {
     #[cfg(not(feature = "epd2in7"))]
     display.set_rotation(DisplayRotation::Rotate90);
 
-    // ── v22：开机按键校准（无有效校准数据时进校准界面，完成后续接正常启动）──
-    #[cfg(feature = "v22")]
-    crate::adc_key::boot_calibration_if_needed().await;
-
     let sdcard = SdCard::new_with_options(
         spi_bus_sd,
         embassy_time::Delay,
@@ -334,7 +283,7 @@ async fn main(spawner: Spawner) -> ! {
 
     // RTC 唤醒键注册：必须在阅读分支之前——阅读模式睡眠(to_sleep_tips/reboot_sleep)
     // 也要靠这个 RTC IO 唤醒源，否则睡下唤不醒。
-    let rtc_io = static_cell::make_static!(rtc_pin);
+    let rtc_io = static_cell::make_static!(unsafe { peripherals.GPIO4.clone_unchecked() });
     add_rtcio(rtc_io, WakeupLevel::Low).await;
 
     // 重启分模式：阅读模式启动时不初始化 WiFi，独占整块堆做 TTF（大字形缓存）。

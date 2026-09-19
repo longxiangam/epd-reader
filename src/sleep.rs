@@ -54,22 +54,19 @@ pub async fn to_sleep_tips(sleep_time:Duration, idle_time:Duration, show_sleep:b
 
         unsafe {
             *core::ptr::addr_of_mut!(WHEN_SLEEP_RTC_MS) = get_rtc_ms().await;
+        }
 
-            // v22：IO1 常供电，睡眠不做任何电源切换。
-            // 其它板型：睡眠前把电源脚置高（维持原行为）。
-            #[cfg(not(feature = "v22"))]
-            {
-                if let Some(mut p) = EINK_PWER_PIN.lock().await.take() { p.set_high(); }
-                if let Some(mut p) = SD_PWER_PIN.lock().await.take() { p.set_high(); }
-            }
+        // 电源轨断电：板级差异在 PWER 单例的填充侧——v22 只填 SD 槽（轨），
+        // 旧板填 EINK+SD 两路；空槽 take 出 None 自动跳过。
+        // 带轨入睡会在唤醒瞬间拉塌电池轨 → POR 丢 rtc_fast。
+        if let Some(mut p) = EINK_PWER_PIN.lock().await.take() {
+            p.set_high();
+        }
+        if let Some(mut p) = SD_PWER_PIN.lock().await.take() {
+            p.set_high();
         }
 
         save_time_to_rtc().await;
-
-        // v22：深睡前把 regi2c 的 SAR ADC 模拟配置恢复为上电默认值
-        //（ADC 校准/参考残留会把 GPIO2 唤醒比较器拉低 → 秒醒）
-        #[cfg(feature = "v22")]
-        crate::adc_key::regi2c_restore();
 
         RTC_MANGE.lock().await.as_mut().unwrap().sleep_deep(ws.as_slice());
     }
@@ -91,14 +88,15 @@ pub async fn reboot_sleep() {
     let _ = ws.push(&timer);
     // 同 to_sleep_tips：切电前确保面板不在刷新/睡眠中途。
     crate::display::await_render_idle().await;
-    unsafe {
-        // v22：IO1 常供电，睡眠不切换电源。其它板型：置高维持供电。
-        #[cfg(not(feature = "v22"))]
-        {
-            if let Some(mut p) = EINK_PWER_PIN.lock().await.take() { p.set_high(); }
-            if let Some(mut p) = SD_PWER_PIN.lock().await.take() { p.set_high(); }
-        }
+
+    // 电源轨断电（同 to_sleep_tips）
+    if let Some(mut p) = EINK_PWER_PIN.lock().await.take() {
+        p.set_high();
     }
+    if let Some(mut p) = SD_PWER_PIN.lock().await.take() {
+        p.set_high();
+    }
+
     RTC_MANGE.lock().await.as_mut().unwrap().sleep_deep(ws.as_slice());
 }
 pub async fn get_sleep_ms()->u64{

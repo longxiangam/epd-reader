@@ -329,6 +329,17 @@ pub async fn save_time_to_rtc() {
     }
 }
 
+/// v22 诊断：rtc_fast 里的时间相关状态转储
+#[cfg(feature = "v22")]
+pub fn diag_rtc_fast() -> (u64, u64) {
+    unsafe {
+        (
+            *core::ptr::addr_of!(WHEN_SLEEP_TIME_TIMESTAMP),
+            *core::ptr::addr_of!(CLOCK_SYNC_TIME_SECOND),
+        )
+    }
+}
+
 /// v22：从 PCF8563 恢复 Clock。成功返回 true。
 #[cfg(feature = "v22")]
 async fn pcf_restore(clock: &Clock) -> bool {
