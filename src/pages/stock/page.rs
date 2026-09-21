@@ -1,18 +1,16 @@
 use alloc::boxed::Box;
 use embassy_executor::Spawner;
 use embassy_time::{Duration, Timer};
-use esp_println::println;
 use embedded_graphics::prelude::Dimensions;
 use epd_waveshare::color::Color::White;
 use epd_waveshare::prelude::{Display, DisplayRotation};
+use esp_println::println;
 
 use super::render_data::StockRenderData;
-use crate::display::{display_mut, RENDER_CHANNEL, RenderInfo};
+use crate::display::{RENDER_CHANNEL, RenderInfo, display_mut};
 use crate::event;
 use crate::event::EventType;
-use crate::model::stock::{
-    self, parse_kline, parse_quote, ChartMode, StockData, DEFAULT_STOCK,
-};
+use crate::model::stock::{self, ChartMode, DEFAULT_STOCK, StockData, parse_kline, parse_quote};
 use crate::pages::Page;
 use crate::request::{RequestClient, RequestError};
 use crate::sleep::{refresh_active_time, to_sleep_tips};
@@ -66,7 +64,9 @@ pub struct StockPage {
 impl StockPage {
     async fn back(&mut self) {
         // 退出到主界面：重置视图为总览，下次进入从总览开始
-        unsafe { *core::ptr::addr_of_mut!(STOCK_VIEW) = 0; }
+        unsafe {
+            *core::ptr::addr_of_mut!(STOCK_VIEW) = 0;
+        }
         self.running = false;
     }
 
@@ -75,10 +75,16 @@ impl StockPage {
     /// 不清空 data：拉取期间保留旧数据用于显示（参考天气页），新数据回来后再替换。
     fn switch_mode(&mut self, forward: bool) -> bool {
         let old_source = self.mode.source();
-        let new_mode = if forward { self.mode.next() } else { self.mode.prev() };
+        let new_mode = if forward {
+            self.mode.next()
+        } else {
+            self.mode.prev()
+        };
         let new_source = new_mode.source();
         self.mode = new_mode;
-        unsafe { *core::ptr::addr_of_mut!(STOCK_MODE) = new_mode.encode(); }
+        unsafe {
+            *core::ptr::addr_of_mut!(STOCK_MODE) = new_mode.encode();
+        }
         new_source != old_source
     }
 
@@ -89,7 +95,11 @@ impl StockPage {
         if ss.count > 1 {
             let c = ss.count as usize;
             let cur = (ss.selected as usize).min(c - 1);
-            let nxt = if forward { (cur + 1) % c } else { (cur + c - 1) % c };
+            let nxt = if forward {
+                (cur + 1) % c
+            } else {
+                (cur + c - 1) % c
+            };
             ss.selected = nxt as u8;
             let _ = ss.write();
             true
@@ -100,7 +110,10 @@ impl StockPage {
 
     /// 已配置的股票数量（0..=6）。
     fn overview_count(&self) -> usize {
-        (crate::storage::StockStorage::read().unwrap_or_default().count as usize).min(6)
+        (crate::storage::StockStorage::read()
+            .unwrap_or_default()
+            .count as usize)
+            .min(6)
     }
 
     /// 总览页移动选中格（夹 0..count）。
@@ -131,7 +144,9 @@ impl StockPage {
         let _ = ss.write();
         self.mode = ChartMode::decode(unsafe { *core::ptr::addr_of!(STOCK_MODE) });
         self.view = StockView::Detail;
-        unsafe { *core::ptr::addr_of_mut!(STOCK_VIEW) = 1; }
+        unsafe {
+            *core::ptr::addr_of_mut!(STOCK_VIEW) = 1;
+        }
         self.data = None;
         self.err_msg = None;
         self.need_fetch = true;
@@ -140,11 +155,17 @@ impl StockPage {
     /// 明细返回总览：复用已缓存 overview，不重拉。
     fn back_to_overview(&mut self) {
         self.view = StockView::Overview;
-        unsafe { *core::ptr::addr_of_mut!(STOCK_VIEW) = 0; }
+        unsafe {
+            *core::ptr::addr_of_mut!(STOCK_VIEW) = 0;
+        }
         // cursor 恢复到 selected（刚从该支明细返回）
         let ss = crate::storage::StockStorage::read().unwrap_or_default();
         let c = (ss.count as usize).min(6);
-        self.cursor = if c > 0 { (ss.selected as usize).min(c - 1) } else { 0 };
+        self.cursor = if c > 0 {
+            (ss.selected as usize).min(c - 1)
+        } else {
+            0
+        };
         self.need_render = true;
     }
 
@@ -161,7 +182,12 @@ impl StockPage {
         let count = (storage.count as usize).min(6);
         println!("[stock] storage.count={} entries:", count);
         for j in 0..count {
-            println!("  [{}] code={} name={}", j, storage.entries[j].code.as_str(), storage.entries[j].name.as_str());
+            println!(
+                "  [{}] code={} name={}",
+                j,
+                storage.entries[j].code.as_str(),
+                storage.entries[j].name.as_str()
+            );
         }
 
         // 当前时间（跨日判断 + 增量槽位）。无时钟或年份<2024 视为未同步 → 回退全量。
@@ -175,17 +201,20 @@ impl StockPage {
         for i in 0..count {
             let code = storage.entries[i].code.as_str();
             let name = storage.entries[i].name.as_str();
-            if code.is_empty() { continue; }
-            let cache: &mut stock::StockMinuteCache = unsafe {
-                &mut (*core::ptr::addr_of_mut!(STOCK_MINUTE_CACHE))[i]
-            };
+            if code.is_empty() {
+                continue;
+            }
+            let cache: &mut stock::StockMinuteCache =
+                unsafe { &mut (*core::ptr::addr_of_mut!(STOCK_MINUTE_CACHE))[i] };
             println!("[stock] i={} code={} today={}", i, code, today);
 
             // 每次全量拉取 + 全量重建缓存（不做增量，避免槽位残留导致数据不一致）
-            let mut minute_result = fetch_stock(ChartMode::Minute, code, name, stock::MINUTE_SLOTS).await;
+            let mut minute_result =
+                fetch_stock(ChartMode::Minute, code, name, stock::MINUTE_SLOTS).await;
             if minute_result.is_err() {
                 Timer::after(Duration::from_millis(500)).await;
-                minute_result = fetch_stock(ChartMode::Minute, code, name, stock::MINUTE_SLOTS).await;
+                minute_result =
+                    fetch_stock(ChartMode::Minute, code, name, stock::MINUTE_SLOTS).await;
             }
             if let Ok(d) = minute_result {
                 let old_preclose = cache.preclose;
@@ -198,7 +227,11 @@ impl StockPage {
                 // 唤醒/重启后时钟可能未对时或滞后（如跨午夜阅读后，NTP 与股票拉取抢 WiFi 先后不定），
                 // 错的 today 会把今天的根全判成前一交易日 → n_today=0 → 跨天虚线消失、昨收错位。
                 // klines 已按日期升序，last() 即最新交易日。时钟仅在 crossed_day 兜底判断里使用。
-                let data_today = d.klines.last().map(|k| (k.date / 1_000_000) as u32).unwrap_or(today);
+                let data_today = d
+                    .klines
+                    .last()
+                    .map(|k| (k.date / 1_000_000) as u32)
+                    .unwrap_or(today);
                 cache.date = data_today;
                 cache.preclose = old_preclose;
                 let nk = d.klines.len();
@@ -212,13 +245,27 @@ impl StockPage {
                         cache.preclose = prev_close;
                     }
                 }
-                println!("  fetched: nk={} data_today={} n_prev={} n_today={} last_price={} preclose={} crossed={}", nk, data_today, cache.n_prev, cache.n_today, cache.last_price, cache.preclose, crossed_day);
+                println!(
+                    "  fetched: nk={} data_today={} n_prev={} n_today={} last_price={} preclose={} crossed={}",
+                    nk,
+                    data_today,
+                    cache.n_prev,
+                    cache.n_today,
+                    cache.last_price,
+                    cache.preclose,
+                    crossed_day
+                );
                 // 兜底/纠正：prev 为空（盘后/数据不足）或周末节假日（crossed_day）→ 腾讯行情 preclose 纠正。
                 if cache.preclose <= 0.0 || crossed_day {
                     if let Ok(q) = fetch_stock(ChartMode::Quote, code, name, 0).await {
                         cache.preclose = q.preclose;
-                        if q.last_price > 0.0 { cache.last_price = q.last_price; }
-                        println!("  quote(refresh): preclose={} last_price={}", cache.preclose, cache.last_price);
+                        if q.last_price > 0.0 {
+                            cache.last_price = q.last_price;
+                        }
+                        println!(
+                            "  quote(refresh): preclose={} last_price={}",
+                            cache.preclose, cache.last_price
+                        );
                     }
                 }
             } else {
@@ -241,19 +288,26 @@ impl StockPage {
         // 读 web 配置的股票（选中那支）；未配置则用默认 sh600519
         let code_storage = crate::storage::StockStorage::read().unwrap_or_default();
         let (code, name) = if code_storage.count > 0 {
-            let i = (code_storage.selected as usize).min((code_storage.count as usize).saturating_sub(1));
-            (code_storage.entries[i].code.as_str(), code_storage.entries[i].name.as_str())
+            let i = (code_storage.selected as usize)
+                .min((code_storage.count as usize).saturating_sub(1));
+            (
+                code_storage.entries[i].code.as_str(),
+                code_storage.entries[i].name.as_str(),
+            )
         } else {
             (DEFAULT_STOCK, "")
         };
         // 分时模式优先复用总览 rtc_fast 缓存（免去网络拉取，秒进）；force_fetch 时跳过
         if self.mode.is_minute() && !self.force_fetch && code_storage.count > 0 {
-            let si = (code_storage.selected as usize).min((code_storage.count as usize).saturating_sub(1));
-            let cache: &stock::StockMinuteCache = unsafe {
-                &(*core::ptr::addr_of!(STOCK_MINUTE_CACHE))[si]
-            };
+            let si = (code_storage.selected as usize)
+                .min((code_storage.count as usize).saturating_sub(1));
+            let cache: &stock::StockMinuteCache =
+                unsafe { &(*core::ptr::addr_of!(STOCK_MINUTE_CACHE))[si] };
             if let Some(d) = stock::stock_data_from_cache(cache, code, name) {
-                println!("[stock] detail minute from cache: n_prev={} n_today={} last_price={}", cache.n_prev, cache.n_today, cache.last_price);
+                println!(
+                    "[stock] detail minute from cache: n_prev={} n_today={} last_price={}",
+                    cache.n_prev, cache.n_today, cache.last_price
+                );
                 self.data = Some(d);
                 self.err_msg = None;
                 crate::wifi::set_request_loading(false);
@@ -267,13 +321,17 @@ impl StockPage {
             Ok(d) => {
                 // 分时网络拉取成功后回写缓存（保持缓存新鲜）
                 if self.mode.is_minute() && code_storage.count > 0 {
-                    let si = (code_storage.selected as usize).min((code_storage.count as usize).saturating_sub(1));
-                    let cache: &mut stock::StockMinuteCache = unsafe {
-                        &mut (*core::ptr::addr_of_mut!(STOCK_MINUTE_CACHE))[si]
-                    };
+                    let si = (code_storage.selected as usize)
+                        .min((code_storage.count as usize).saturating_sub(1));
+                    let cache: &mut stock::StockMinuteCache =
+                        unsafe { &mut (*core::ptr::addr_of_mut!(STOCK_MINUTE_CACHE))[si] };
                     if cache.matches_code(code) {
                         // 同 fetch_overview："今天"取数据最新一根的日期，时钟滞后时避免误判
-                        let data_today = d.klines.last().map(|k| (k.date / 1_000_000) as u32).unwrap_or(0);
+                        let data_today = d
+                            .klines
+                            .last()
+                            .map(|k| (k.date / 1_000_000) as u32)
+                            .unwrap_or(0);
                         stock::merge_minute(cache, &d.klines, data_today);
                     }
                 }
@@ -320,17 +378,29 @@ impl Page for StockPage {
                 let _ = display.clear_buffer(White);
 
                 let (w, h) = if cfg!(feature = "epd2in7") {
-                    (display.bounding_box().size.height as i32,
-                     display.bounding_box().size.width as i32)
+                    (
+                        display.bounding_box().size.height as i32,
+                        display.bounding_box().size.width as i32,
+                    )
                 } else {
-                    (display.bounding_box().size.width as i32,
-                     display.bounding_box().size.height as i32)
+                    (
+                        display.bounding_box().size.width as i32,
+                        display.bounding_box().size.height as i32,
+                    )
                 };
 
-                let battery_percent = crate::battery::BATTERY.lock().await.as_ref().map(|b| b.percent);
+                let battery_percent = crate::battery::BATTERY
+                    .lock()
+                    .await
+                    .as_ref()
+                    .map(|b| b.percent);
                 let wifi_state = crate::wifi::WIFI_STATE.lock().await;
-                let wifi_connected = matches!(wifi_state.as_ref(), Some(crate::wifi::WifiNetState::WifiConnected));
-                let wifi_connecting = matches!(*wifi_state, Some(crate::wifi::WifiNetState::WifiConnecting));
+                let wifi_connected = matches!(
+                    wifi_state.as_ref(),
+                    Some(crate::wifi::WifiNetState::WifiConnected)
+                );
+                let wifi_connecting =
+                    matches!(*wifi_state, Some(crate::wifi::WifiNetState::WifiConnecting));
                 drop(wifi_state);
                 let request_loading = crate::wifi::is_request_loading();
 
@@ -370,7 +440,12 @@ impl Page for StockPage {
                         let _ = super::draw(display, &data);
                     }
                 }
-                RENDER_CHANNEL.send(RenderInfo { time: 0, need_sleep: true }).await;
+                RENDER_CHANNEL
+                    .send(RenderInfo {
+                        time: 0,
+                        need_sleep: true,
+                    })
+                    .await;
 
                 #[cfg(feature = "epd2in7")]
                 display.set_rotation(DisplayRotation::Rotate0);
@@ -398,7 +473,11 @@ impl Page for StockPage {
             {
                 let ss = crate::storage::StockStorage::read().unwrap_or_default();
                 let c = (ss.count as usize).min(6);
-                self.cursor = if c > 0 { (ss.selected as usize).min(c - 1) } else { 0 };
+                self.cursor = if c > 0 {
+                    (ss.selected as usize).min(c - 1)
+                } else {
+                    0
+                };
             }
             // 距上次拉取不足 30 秒 → 跳过，直接用 rtc_fast 缓存渲染
             let now_ms = crate::sleep::get_rtc_ms().await;
@@ -408,9 +487,14 @@ impl Page for StockPage {
                 println!("[stock] overview skip fetch: elapsed={}ms < 30s", elapsed);
                 self.need_render = true;
             } else {
-                println!("[stock] overview fetch: elapsed={}ms >= 30s (or first)", elapsed);
+                println!(
+                    "[stock] overview fetch: elapsed={}ms >= 30s (or first)",
+                    elapsed
+                );
                 self.fetch_overview().await;
-                unsafe { *core::ptr::addr_of_mut!(STOCK_LAST_FETCH_MS) = now_ms; }
+                unsafe {
+                    *core::ptr::addr_of_mut!(STOCK_LAST_FETCH_MS) = now_ms;
+                }
             }
         }
         loop {
@@ -450,9 +534,14 @@ impl Page for StockPage {
             let idle_secs = if sleep_storage.weather_sleep_seconds > 0 {
                 sleep_storage.weather_sleep_seconds
             } else {
-                5
+                15
             };
-            to_sleep_tips(Duration::from_secs(sleep_secs), Duration::from_secs(idle_secs), true).await;
+            to_sleep_tips(
+                Duration::from_secs(sleep_secs),
+                crate::sleep::idle_for(Duration::from_secs(idle_secs)),
+                true,
+            )
+            .await;
             Timer::after(Duration::from_millis(50)).await;
         }
         crate::display::set_sleep_renderer(None);
@@ -461,80 +550,115 @@ impl Page for StockPage {
     async fn bind_event(&mut self) {
         event::clear().await;
         // 短按1：总览=上一格 / 明细=上一个图模式
-        event::on_target(EventType::KeyShort(1), Self::mut_to_ptr(self), move |info| {
-            Box::pin(async move {
-                let mut_ref: &mut Self = Self::mut_by_ptr(info.ptr).unwrap();
-                if mut_ref.view == StockView::Overview {
-                    mut_ref.overview_move_cursor(false);
-                } else if mut_ref.switch_mode(false) {
-                    mut_ref.need_fetch = true;       // 跨源：重新请求（保留旧数据用于显示）
-                } else {
-                    mut_ref.need_clean_render = true; // 同源：仅重渲染
-                }
-            })
-        }).await;
+        event::on_target(
+            EventType::KeyShort(1),
+            Self::mut_to_ptr(self),
+            move |info| {
+                Box::pin(async move {
+                    let mut_ref: &mut Self = Self::mut_by_ptr(info.ptr).unwrap();
+                    if mut_ref.view == StockView::Overview {
+                        mut_ref.overview_move_cursor(false);
+                    } else if mut_ref.switch_mode(false) {
+                        mut_ref.need_fetch = true; // 跨源：重新请求（保留旧数据用于显示）
+                    } else {
+                        mut_ref.need_clean_render = true; // 同源：仅重渲染
+                    }
+                })
+            },
+        )
+        .await;
         // 短按2：总览=下一格 / 明细=下一个图模式
-        event::on_target(EventType::KeyShort(2), Self::mut_to_ptr(self), move |info| {
-            Box::pin(async move {
-                let mut_ref: &mut Self = Self::mut_by_ptr(info.ptr).unwrap();
-                if mut_ref.view == StockView::Overview {
-                    mut_ref.overview_move_cursor(true);
-                } else if mut_ref.switch_mode(true) {
-                    mut_ref.need_fetch = true;
-                } else {
-                    mut_ref.need_clean_render = true;
-                }
-            })
-        }).await;
+        event::on_target(
+            EventType::KeyShort(2),
+            Self::mut_to_ptr(self),
+            move |info| {
+                Box::pin(async move {
+                    let mut_ref: &mut Self = Self::mut_by_ptr(info.ptr).unwrap();
+                    if mut_ref.view == StockView::Overview {
+                        mut_ref.overview_move_cursor(true);
+                    } else if mut_ref.switch_mode(true) {
+                        mut_ref.need_fetch = true;
+                    } else {
+                        mut_ref.need_clean_render = true;
+                    }
+                })
+            },
+        )
+        .await;
         // 长按1：总览=强制刷新 / 明细=上一支股票
-        event::on_target(EventType::KeyLongEnd(1), Self::mut_to_ptr(self), move |info| {
-            Box::pin(async move {
-                let mut_ref: &mut Self = Self::mut_by_ptr(info.ptr).unwrap();
-                if mut_ref.view == StockView::Overview {
-                    // 总览长按1：强制刷新（直接触发 fetch_overview，不走间隔判断）
-                    mut_ref.need_fetch = true;
-                } else if mut_ref.switch_stock(false) {
-                    mut_ref.need_fetch = true;
-                }
-            })
-        }).await;
+        event::on_target(
+            EventType::KeyLongEnd(1),
+            Self::mut_to_ptr(self),
+            move |info| {
+                Box::pin(async move {
+                    let mut_ref: &mut Self = Self::mut_by_ptr(info.ptr).unwrap();
+                    if mut_ref.view == StockView::Overview {
+                        // 总览长按1：强制刷新（直接触发 fetch_overview，不走间隔判断）
+                        mut_ref.need_fetch = true;
+                    } else if mut_ref.switch_stock(false) {
+                        mut_ref.need_fetch = true;
+                    }
+                })
+            },
+        )
+        .await;
         // 长按2：总览=下一格 / 明细=下一支股票
-        event::on_target(EventType::KeyLongEnd(2), Self::mut_to_ptr(self), move |info| {
-            Box::pin(async move {
-                let mut_ref: &mut Self = Self::mut_by_ptr(info.ptr).unwrap();
-                if mut_ref.view == StockView::Overview {
-                    mut_ref.overview_move_cursor(true);
-                } else if mut_ref.switch_stock(true) {
-                    mut_ref.need_fetch = true;
-                }
-            })
-        }).await;
+        event::on_target(
+            EventType::KeyLongEnd(2),
+            Self::mut_to_ptr(self),
+            move |info| {
+                Box::pin(async move {
+                    let mut_ref: &mut Self = Self::mut_by_ptr(info.ptr).unwrap();
+                    if mut_ref.view == StockView::Overview {
+                        mut_ref.overview_move_cursor(true);
+                    } else if mut_ref.switch_stock(true) {
+                        mut_ref.need_fetch = true;
+                    }
+                })
+            },
+        )
+        .await;
         // 短按3：总览=进入明细 / 明细=重新请求当前模式
-        event::on_target(EventType::KeyShort(3), Self::mut_to_ptr(self), move |info| {
-            Box::pin(async move {
-                let mut_ref: &mut Self = Self::mut_by_ptr(info.ptr).unwrap();
-                if mut_ref.view == StockView::Overview {
-                    mut_ref.enter_detail();
-                } else {
-                    mut_ref.need_fetch = true;
-                }
-            })
-        }).await;
+        event::on_target(
+            EventType::KeyShort(3),
+            Self::mut_to_ptr(self),
+            move |info| {
+                Box::pin(async move {
+                    let mut_ref: &mut Self = Self::mut_by_ptr(info.ptr).unwrap();
+                    if mut_ref.view == StockView::Overview {
+                        mut_ref.enter_detail();
+                    } else {
+                        mut_ref.need_fetch = true;
+                    }
+                })
+            },
+        )
+        .await;
         // 长按3：总览=返回主界面 / 明细=返回总览（逐级返回）
-        event::on_target(EventType::KeyLongEnd(3), Self::mut_to_ptr(self), move |info| {
-            Box::pin(async move {
-                let mut_ref: &mut Self = Self::mut_by_ptr(info.ptr).unwrap();
-                if mut_ref.view == StockView::Overview {
-                    mut_ref.back().await;
-                } else {
-                    mut_ref.back_to_overview();
-                }
-            })
-        }).await;
+        event::on_target(
+            EventType::KeyLongEnd(3),
+            Self::mut_to_ptr(self),
+            move |info| {
+                Box::pin(async move {
+                    let mut_ref: &mut Self = Self::mut_by_ptr(info.ptr).unwrap();
+                    if mut_ref.view == StockView::Overview {
+                        mut_ref.back().await;
+                    } else {
+                        mut_ref.back_to_overview();
+                    }
+                })
+            },
+        )
+        .await;
     }
 }
 
-async fn fetch_stock(mode: ChartMode, code: &str, name: &str, count: usize) -> Result<Box<StockData>, &'static str> {
+async fn fetch_stock(
+    mode: ChartMode,
+    code: &str,
+    name: &str,
+    count: usize,
+) -> Result<Box<StockData>, &'static str> {
     let stack = crate::wifi::use_wifi().await.map_err(|e| {
         println!("stock use_wifi err: {:?}", e);
         wifi_err_msg(e)
@@ -549,7 +673,10 @@ async fn fetch_stock(mode: ChartMode, code: &str, name: &str, count: usize) -> R
         crate::wifi::set_request_loading(false);
         match result {
             Ok(data) => parse_quote(data, code, name).ok_or("解析失败"),
-            Err(e) => { println!("stock quote request err: {:?}", e); Err(reason_of(&e)) }
+            Err(e) => {
+                println!("stock quote request err: {:?}", e);
+                Err(reason_of(&e))
+            }
         }
     } else {
         let url = stock::build_url(code, mode, count);
@@ -557,7 +684,10 @@ async fn fetch_stock(mode: ChartMode, code: &str, name: &str, count: usize) -> R
         crate::wifi::set_request_loading(false);
         match result {
             Ok(data) => parse_kline(data, code, name, mode).ok_or("解析失败"),
-            Err(e) => { println!("stock request err: {:?}", e); Err(reason_of(&e)) }
+            Err(e) => {
+                println!("stock request err: {:?}", e);
+                Err(reason_of(&e))
+            }
         }
     };
     crate::wifi::finish_wifi().await;

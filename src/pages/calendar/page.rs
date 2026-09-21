@@ -8,13 +8,13 @@ use time::OffsetDateTime;
 
 use super::render_data::CalendarRenderData;
 use crate::battery::BATTERY;
-use crate::display::{display_mut, RENDER_CHANNEL, RenderInfo};
+use crate::display::{RENDER_CHANNEL, RenderInfo, display_mut};
 use crate::event;
 use crate::event::EventType;
 use crate::pages::Page;
 use crate::sleep::{refresh_active_time, to_sleep_tips};
 use crate::storage::NvsStorage;
-use crate::weather::{sync_holiday_success, sync_weather_success, HolidayInfo, Weather};
+use crate::weather::{HolidayInfo, Weather, sync_holiday_success, sync_weather_success};
 use crate::wifi::WIFI_STATE;
 use crate::worldtime::{clock_restored, get_clock, sync_time_success};
 
@@ -49,18 +49,26 @@ impl Page for CalendarPage {
                 let _ = display.clear_buffer(White);
 
                 let (w, h) = if cfg!(feature = "epd2in7") {
-                    (display.bounding_box().size.height as i32,
-                     display.bounding_box().size.width as i32)
+                    (
+                        display.bounding_box().size.height as i32,
+                        display.bounding_box().size.width as i32,
+                    )
                 } else {
-                    (display.bounding_box().size.width as i32,
-                     display.bounding_box().size.height as i32)
+                    (
+                        display.bounding_box().size.width as i32,
+                        display.bounding_box().size.height as i32,
+                    )
                 };
 
                 // 收集布局数据
                 let battery_percent = BATTERY.lock().await.as_ref().map(|b| b.percent);
                 let wifi_state = WIFI_STATE.lock().await;
-                let wifi_connected = matches!(wifi_state.as_ref(), Some(crate::wifi::WifiNetState::WifiConnected));
-                let wifi_connecting = matches!(*wifi_state, Some(crate::wifi::WifiNetState::WifiConnecting));
+                let wifi_connected = matches!(
+                    wifi_state.as_ref(),
+                    Some(crate::wifi::WifiNetState::WifiConnected)
+                );
+                let wifi_connecting =
+                    matches!(*wifi_state, Some(crate::wifi::WifiNetState::WifiConnecting));
                 drop(wifi_state);
                 let request_loading = crate::wifi::is_request_loading();
                 let weather_synced = sync_weather_success();
@@ -88,7 +96,12 @@ impl Page for CalendarPage {
 
                 let _ = super::draw(display, &data);
 
-                RENDER_CHANNEL.send(RenderInfo { time: 0, need_sleep: true }).await;
+                RENDER_CHANNEL
+                    .send(RenderInfo {
+                        time: 0,
+                        need_sleep: true,
+                    })
+                    .await;
 
                 #[cfg(feature = "epd2in7")]
                 display.set_rotation(DisplayRotation::Rotate0);
@@ -112,7 +125,8 @@ impl Page for CalendarPage {
             }
 
             if clock_restored() {
-                if Instant::now().duration_since(last_refresh_time).as_secs() > 60 || wait_sync_time {
+                if Instant::now().duration_since(last_refresh_time).as_secs() > 60 || wait_sync_time
+                {
                     if let Some(clock) = get_clock() {
                         self.current_date = Some(clock.local().await);
                     }
@@ -165,9 +179,14 @@ impl Page for CalendarPage {
                 let calendar_sleep_seconds = if sleep_storage.weather_sleep_seconds > 0 {
                     sleep_storage.weather_sleep_seconds
                 } else {
-                    5
+                    15
                 };
-                to_sleep_tips(Duration::from_secs(60), Duration::from_secs(calendar_sleep_seconds), true).await;
+                to_sleep_tips(
+                    Duration::from_secs(60),
+                    crate::sleep::idle_for(Duration::from_secs(calendar_sleep_seconds)),
+                    true,
+                )
+                .await;
             }
             Timer::after(Duration::from_millis(50)).await;
         }
@@ -177,106 +196,136 @@ impl Page for CalendarPage {
     async fn bind_event(&mut self) {
         event::clear().await;
         // 上一月
-        event::on_target(EventType::KeyShort(1), Self::mut_to_ptr(self), move |info| {
-            return Box::pin(async move {
-                let mut_ref: &mut Self = Self::mut_by_ptr(info.ptr).unwrap();
-                if let Some(ref mut clock) = mut_ref.current_date {
-                    let year = clock.year();
-                    let pre_month = clock.month().previous();
-                    if let Some(current_clock) = get_clock() {
-                        let now = current_clock.local().await;
-                        if now.month() == pre_month && now.year() == year {
-                            *clock = now;
-                        } else if clock.month() as u8 > 1 {
-                            *clock = clock.replace_day(1).unwrap();
-                            *clock = clock.replace_month(pre_month).unwrap();
-                        } else {
-                            *clock = clock.replace_year(year - 1).unwrap();
-                            *clock = clock.replace_day(1).unwrap();
-                            *clock = clock.replace_month(pre_month).unwrap();
+        event::on_target(
+            EventType::KeyShort(1),
+            Self::mut_to_ptr(self),
+            move |info| {
+                return Box::pin(async move {
+                    let mut_ref: &mut Self = Self::mut_by_ptr(info.ptr).unwrap();
+                    if let Some(ref mut clock) = mut_ref.current_date {
+                        let year = clock.year();
+                        let pre_month = clock.month().previous();
+                        if let Some(current_clock) = get_clock() {
+                            let now = current_clock.local().await;
+                            if now.month() == pre_month && now.year() == year {
+                                *clock = now;
+                            } else if clock.month() as u8 > 1 {
+                                *clock = clock.replace_day(1).unwrap();
+                                *clock = clock.replace_month(pre_month).unwrap();
+                            } else {
+                                *clock = clock.replace_year(year - 1).unwrap();
+                                *clock = clock.replace_day(1).unwrap();
+                                *clock = clock.replace_month(pre_month).unwrap();
+                            }
                         }
+                        mut_ref.need_render = true;
                     }
-                    mut_ref.need_render = true;
-                }
-            });
-        }).await;
+                });
+            },
+        )
+        .await;
         // 下一月
-        event::on_target(EventType::KeyShort(2), Self::mut_to_ptr(self), move |info| {
-            return Box::pin(async move {
-                let mut_ref: &mut Self = Self::mut_by_ptr(info.ptr).unwrap();
-                if let Some(ref mut clock) = mut_ref.current_date {
-                    let year = clock.year();
-                    let next_month = clock.month().next();
-                    if let Some(current_clock) = get_clock() {
-                        let now = current_clock.local().await;
-                        if now.month() == next_month && now.year() == year {
-                            *clock = now;
-                        } else if 12 > clock.month() as u8 {
-                            *clock = clock.replace_day(1).unwrap();
-                            *clock = clock.replace_month(next_month).unwrap();
-                        } else {
-                            *clock = clock.replace_year(year + 1).unwrap();
-                            *clock = clock.replace_day(1).unwrap();
-                            *clock = clock.replace_month(next_month).unwrap();
+        event::on_target(
+            EventType::KeyShort(2),
+            Self::mut_to_ptr(self),
+            move |info| {
+                return Box::pin(async move {
+                    let mut_ref: &mut Self = Self::mut_by_ptr(info.ptr).unwrap();
+                    if let Some(ref mut clock) = mut_ref.current_date {
+                        let year = clock.year();
+                        let next_month = clock.month().next();
+                        if let Some(current_clock) = get_clock() {
+                            let now = current_clock.local().await;
+                            if now.month() == next_month && now.year() == year {
+                                *clock = now;
+                            } else if 12 > clock.month() as u8 {
+                                *clock = clock.replace_day(1).unwrap();
+                                *clock = clock.replace_month(next_month).unwrap();
+                            } else {
+                                *clock = clock.replace_year(year + 1).unwrap();
+                                *clock = clock.replace_day(1).unwrap();
+                                *clock = clock.replace_month(next_month).unwrap();
+                            }
                         }
+                        mut_ref.need_render = true;
                     }
-                    mut_ref.need_render = true;
-                }
-            });
-        }).await;
+                });
+            },
+        )
+        .await;
         // 长按3回到当前月
         // 短按3：回到今天（原为长按，统一交互后移到短按）
-        event::on_target(EventType::KeyShort(3), Self::mut_to_ptr(self), move |info| {
-            return Box::pin(async move {
-                let mut_ref: &mut Self = Self::mut_by_ptr(info.ptr).unwrap();
-                if let Some(clock) = get_clock() {
-                    mut_ref.current_date = Some(clock.local().await);
-                    mut_ref.need_render = true;
-                }
-            });
-        }).await;
+        event::on_target(
+            EventType::KeyShort(3),
+            Self::mut_to_ptr(self),
+            move |info| {
+                return Box::pin(async move {
+                    let mut_ref: &mut Self = Self::mut_by_ptr(info.ptr).unwrap();
+                    if let Some(clock) = get_clock() {
+                        mut_ref.current_date = Some(clock.local().await);
+                        mut_ref.need_render = true;
+                    }
+                });
+            },
+        )
+        .await;
         // 长按1刷新天气
-        event::on_target(EventType::KeyLongEnd(1), Self::mut_to_ptr(self), move |info| {
-            return Box::pin(async move {
-                crate::wifi::set_request_loading(true);
-                let mut_ref: &mut Self = Self::mut_by_ptr(info.ptr).unwrap();
-                crate::display::QUICKLY_LUT_CHANNEL.send(false).await;
-                mut_ref.need_render = true;
-                mut_ref.render().await;
-                crate::display::QUICKLY_LUT_CHANNEL.send(true).await;
-                let _ = Weather::request().await;
-                crate::wifi::set_request_loading(false);
-                crate::display::QUICKLY_LUT_CHANNEL.send(false).await;
-                mut_ref.need_render = true;
-                Timer::after(Duration::from_millis(50)).await;
-                crate::display::QUICKLY_LUT_CHANNEL.send(true).await;
-            });
-        }).await;
+        event::on_target(
+            EventType::KeyLongEnd(1),
+            Self::mut_to_ptr(self),
+            move |info| {
+                return Box::pin(async move {
+                    crate::wifi::set_request_loading(true);
+                    let mut_ref: &mut Self = Self::mut_by_ptr(info.ptr).unwrap();
+                    crate::display::QUICKLY_LUT_CHANNEL.send(false).await;
+                    mut_ref.need_render = true;
+                    mut_ref.render().await;
+                    crate::display::QUICKLY_LUT_CHANNEL.send(true).await;
+                    let _ = Weather::request().await;
+                    crate::wifi::set_request_loading(false);
+                    crate::display::QUICKLY_LUT_CHANNEL.send(false).await;
+                    mut_ref.need_render = true;
+                    Timer::after(Duration::from_millis(50)).await;
+                    crate::display::QUICKLY_LUT_CHANNEL.send(true).await;
+                });
+            },
+        )
+        .await;
         // 长按2刷新节假日
-        event::on_target(EventType::KeyLongEnd(2), Self::mut_to_ptr(self), move |info| {
-            return Box::pin(async move {
-                crate::wifi::set_request_loading(true);
-                let mut_ref: &mut Self = Self::mut_by_ptr(info.ptr).unwrap();
-                crate::display::QUICKLY_LUT_CHANNEL.send(false).await;
-                mut_ref.need_render = true;
-                mut_ref.render().await;
-                crate::display::QUICKLY_LUT_CHANNEL.send(true).await;
-                let _ = get_clock().unwrap().local().await;
-                let _ = HolidayInfo::request().await;
-                crate::wifi::set_request_loading(false);
-                crate::display::QUICKLY_LUT_CHANNEL.send(false).await;
-                mut_ref.need_render = true;
-                Timer::after(Duration::from_millis(50)).await;
-                crate::display::QUICKLY_LUT_CHANNEL.send(true).await;
-            });
-        }).await;
+        event::on_target(
+            EventType::KeyLongEnd(2),
+            Self::mut_to_ptr(self),
+            move |info| {
+                return Box::pin(async move {
+                    crate::wifi::set_request_loading(true);
+                    let mut_ref: &mut Self = Self::mut_by_ptr(info.ptr).unwrap();
+                    crate::display::QUICKLY_LUT_CHANNEL.send(false).await;
+                    mut_ref.need_render = true;
+                    mut_ref.render().await;
+                    crate::display::QUICKLY_LUT_CHANNEL.send(true).await;
+                    let _ = get_clock().unwrap().local().await;
+                    let _ = HolidayInfo::request().await;
+                    crate::wifi::set_request_loading(false);
+                    crate::display::QUICKLY_LUT_CHANNEL.send(false).await;
+                    mut_ref.need_render = true;
+                    Timer::after(Duration::from_millis(50)).await;
+                    crate::display::QUICKLY_LUT_CHANNEL.send(true).await;
+                });
+            },
+        )
+        .await;
         // 短按3退出
         // 长按3：返回主界面（统一交互）
-        event::on_target(EventType::KeyLongEnd(3), Self::mut_to_ptr(self), move |info| {
-            return Box::pin(async move {
-                let mut_ref: &mut Self = Self::mut_by_ptr(info.ptr).unwrap();
-                mut_ref.running = false;
-            });
-        }).await;
+        event::on_target(
+            EventType::KeyLongEnd(3),
+            Self::mut_to_ptr(self),
+            move |info| {
+                return Box::pin(async move {
+                    let mut_ref: &mut Self = Self::mut_by_ptr(info.ptr).unwrap();
+                    mut_ref.running = false;
+                });
+            },
+        )
+        .await;
     }
 }

@@ -22,7 +22,7 @@ use crate::widgets::list_widget::ListWidget;
 use crate::wifi::{IP_ADDRESS, WIFI_MODEL, WifiModel};
 use crate::web_service::{web_service,STOP_WEB_SERVICE};
 
-const SETTINGS_COUNT: usize = 8;
+const SETTINGS_COUNT: usize = 10;
 const READ_SLEEP_MIN: u64 = 10;
 const WEATHER_SLEEP_MIN: u64 = 5;
 const SLEEP_STEP: u64 = 5;
@@ -57,6 +57,8 @@ pub struct SettingPage {
     last_location_loaded: bool,
     read_sleep_seconds: u64,
     weather_sleep_seconds: u64,
+    /// 7网络对时 / 8更新节假日 的执行状态：0空闲 1执行中 2成功 3失败
+    sync_status: u8,
     stock_edit_selected: u8,
     home_edit: i32,
     full_refresh_edit: u32,
@@ -147,7 +149,7 @@ impl SettingPage {
         self.need_render = true;
     }
 
-    fn settings_key_confirm(&mut self) {
+    async fn settings_key_confirm(&mut self) {
         let (select, editing) = match self.mode {
             SettingMode::Settings { select, editing } => (select, editing),
             _ => return,
@@ -210,6 +212,26 @@ impl SettingPage {
                     self.mode = SettingMode::Settings { select, editing: true };
                 }
                 7 => {
+                    // 网络对时：连网 + NTP 对时 + 写 PCF8563
+                    if self.sync_status != 1 {
+                        self.sync_status = 1;
+                        self.need_render = true;
+                        let ok = crate::worldtime::manual_time_sync().await;
+                        self.sync_status = if ok { 2 } else { 3 };
+                        self.need_render = true;
+                    }
+                }
+                8 => {
+                    // 更新节假日
+                    if self.sync_status != 1 {
+                        self.sync_status = 1;
+                        self.need_render = true;
+                        let ok = crate::weather::HolidayInfo::request().await.is_ok();
+                        self.sync_status = if ok { 2 } else { 3 };
+                        self.need_render = true;
+                    }
+                }
+                9 => {
                     // 返回：STA 退出设置页回到主菜单；AP（首次配网）返回二维码根界面
                     match self.wifi_model {
                         Some(WifiModel::STA) => { self.running = false; }
@@ -287,6 +309,49 @@ impl SettingPage {
             }
         };
 
+        // 上次成功时间戳（NVS 持久化，跨深睡保留）
+        let (t_stamp, h_stamp) = crate::storage::SyncStampStorage::read_stamps();
+        let fmt_stamp = |sec: u64| -> heapless::String<20> {
+            if sec == 0 {
+                heapless::String::try_from("从未").unwrap_or_default()
+            } else if let Ok(dt) = time::OffsetDateTime::from_unix_timestamp(sec as i64) {
+                let dt = dt.to_offset(time::UtcOffset::from_hms(8, 0, 0).unwrap());
+                let mut s: heapless::String<20> = heapless::String::new();
+                use core::fmt::Write as _;
+                let _ = write!(
+                    s,
+                    "{:02}-{:02} {:02}:{:02}",
+                    dt.month() as u8,
+                    dt.day(),
+                    dt.hour(),
+                    dt.minute()
+                );
+                s
+            } else {
+                heapless::String::new()
+            }
+        };
+        let time_sync_str = if select == 7 {
+            let tag = match self.sync_status {
+                1 => ": >>同步中<<",
+                3 => ": 失败",
+                _ => "",
+            };
+            format!("网络对时{} {}", tag, fmt_stamp(t_stamp).as_str())
+        } else {
+            format!("网络对时: {}", fmt_stamp(t_stamp).as_str())
+        };
+        let holiday_sync_str = if select == 8 {
+            let tag = match self.sync_status {
+                1 => ": >>更新中<<",
+                3 => ": 失败",
+                _ => "",
+            };
+            format!("更新节假日{} {}", tag, fmt_stamp(h_stamp).as_str())
+        } else {
+            format!("更新节假日: {}", fmt_stamp(h_stamp).as_str())
+        };
+
         let mut items: Vec<&str, 20> = Vec::new();
         let _ = items.push(read_str.as_str());
         let _ = items.push(weather_str.as_str());
@@ -295,6 +360,8 @@ impl SettingPage {
         let _ = items.push(stock_str.as_str());
         let _ = items.push(home_str.as_str());
         let _ = items.push(refresh_str.as_str());
+        let _ = items.push(time_sync_str.as_str());
+        let _ = items.push(holiday_sync_str.as_str());
         let _ = items.push("返回");
 
         let mut list_widget = ListWidget::new(
@@ -428,6 +495,7 @@ impl Page for SettingPage {
             stock_edit_selected: 0,
             home_edit: 1,
             full_refresh_edit: crate::display::get_full_refresh_times(),
+            sync_status: 0,
         }
     }
 
@@ -629,7 +697,7 @@ impl Page for SettingPage {
             return Box::pin(async move {
                 let mut_ref: &mut Self = Self::mut_by_ptr(info.ptr).unwrap();
                 if matches!(mut_ref.mode, SettingMode::Settings { .. }) {
-                    mut_ref.settings_key_confirm();
+                    mut_ref.settings_key_confirm().await;
                     if matches!(mut_ref.mode, SettingMode::QrCode) {
                         crate::display::QUICKLY_LUT_CHANNEL.send(false).await;
                     }

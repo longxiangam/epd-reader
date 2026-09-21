@@ -190,6 +190,20 @@ async fn main(spawner: Spawner) -> ! {
         crate::i2c_bus::I2C.lock().await.replace(i2c);
     }
 
+    // 深睡唤醒分类：PCF8563 TF=1 → PCF 定时唤醒（PCF INT 拉低 GPIO4）；
+    // ESP RTC Timer → PCF 布防失败时的 ESP 定时回退唤醒；否则按钮唤醒。
+    // 读完清标志 + 关定时器（INT 释放，防运行期假按键）
+    let timed_wake = crate::pcf8563::consume_timer_wake().await
+        || matches!(wake_reason, esp_hal::system::SleepSource::Timer);
+    // 天气数据过期才需要联网刷新（8 秒窗口等 WiFi+同步）；
+    // 数据新鲜则无窗口：读完温度重绘后立刻回睡
+    let stale = crate::weather::Weather::weather_stale().await;
+    crate::sleep::set_timed_wake(timed_wake, if stale { 8_000 } else { 0 });
+    println!(
+        "[wake] pcf timer={} timed_wake={} stale={} reason={:?}",
+        timed_wake, timed_wake, stale, wake_reason
+    );
+
     // ADC setup（按键梯 GPIO4 / 电池分压 GPIO2）
     let mut adc1_config = AdcConfig::new();
     let adc1_pin = adc1_config.enable_pin_with_cal::<_, AdcCalCurve<esp_hal::peripherals::ADC1>>(
@@ -293,6 +307,8 @@ async fn main(spawner: Spawner) -> ! {
             //（时间显示/跨天判断不再因无 WiFi 而滞后）
             crate::worldtime::init_clock_pcf().await;
             refresh_active_time().await;
+            // 阅读模式也采样电池（60s 一轮，状态行显示用）
+            spawner.spawn(crate::battery::test_bat_adc().unwrap());
             spawner.spawn(crate::pages::reading_task(spawner.clone()).unwrap());
             // main 不返回即可；睡眠/交互由 reading_task(ReadPage) 处理
             loop {
@@ -354,7 +370,7 @@ async fn main(spawner: Spawner) -> ! {
             println!("Current_time: {} {}", clock.get_date_str().await, str);
         }
 
-        to_sleep_tips(Duration::from_secs(0), Duration::from_secs(180), true).await;
+        to_sleep_tips(Duration::from_secs(0), crate::sleep::idle_for(Duration::from_secs(180)), true).await;
         Timer::after(Duration::from_secs(5)).await;
     }
 }

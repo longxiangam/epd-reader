@@ -362,6 +362,24 @@ async fn pcf_restore(clock: &Clock) -> bool {
     }
 }
 
+/// 手动网络对时（设置页触发）：连网 + NTP 对时 + 写 PCF8563 + 更新同步标志。
+pub async fn manual_time_sync() -> bool {
+    let Ok(stack) = use_wifi().await else {
+        return false;
+    };
+    let ok = ntp_request(stack, get_clock().unwrap()).await.is_ok();
+    if ok {
+        let ts = get_clock().unwrap().now().await.unix_timestamp();
+        unsafe {
+            core::ptr::addr_of_mut!(CLOCK_SYNC_TIME_SECOND).write(ts as u64);
+        }
+        let _ = crate::pcf8563::write_time(ts).await;
+        crate::storage::SyncStampStorage::write_time_stamp(ts as u64);
+    }
+    crate::wifi::finish_wifi().await;
+    ok
+}
+
 /// 阅读模式时钟初始化（该模式不跑 ntp_worker，PCF8563 是唯一时间源）。
 pub async fn init_clock_pcf() {
     let clock = CLOCK_CELL.init(Clock::new());
@@ -431,6 +449,7 @@ pub async fn ntp_worker() {
                                 if crate::pcf8563::write_time(ts).await {
                                     println!("[time] PCF8563 synced");
                                 }
+                                crate::storage::SyncStampStorage::write_time_stamp(ts as u64);
                             }
                             err_times = 0;
                             sleep_sec = 3600;

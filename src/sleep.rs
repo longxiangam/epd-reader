@@ -3,6 +3,7 @@ use embassy_sync::mutex::Mutex;
 use embassy_time::{ Duration, Instant};
 use esp_hal::gpio::{Output, RtcPinWithResistors};
 use esp_hal::ram;
+use esp_println::println;
 use esp_hal::rtc_cntl::sleep::{RtcioWakeupSource, TimerWakeupSource, WakeSource, WakeupLevel};
 use heapless::Vec;
 
@@ -16,6 +17,39 @@ static mut WAKEUP_PINS: Vec<(&'static mut dyn RtcPinWithResistors, WakeupLevel),
 pub static EINK_PWER_PIN: Mutex<CriticalSectionRawMutex, Option<Output<'static>>> = Mutex::new(None);
 pub static SD_PWER_PIN: Mutex<CriticalSectionRawMutex, Option<Output<'static>>> = Mutex::new(None);
 
+/// 本次唤醒是否为定时唤醒（PCF 倒计时 INT，或 PCF 布防失败时的 ESP RTC 定时回退）。
+/// main 启动时分类并设置；页面据此决定"刷完显示立刻回睡"。
+static mut TIMED_WAKE: bool = false;
+/// 定时唤醒的数据刷新窗口截止时刻（ms）：窗口内 to_sleep_tips 不放行睡眠
+/// （仅天气数据过期需要联网刷新时启用；数据新鲜则无窗口，读完温度立刻睡）
+static mut TIMED_HOLD_OFF_UNTIL: u64 = 0;
+
+pub fn set_timed_wake(timed: bool, hold_off_ms: u64) {
+    unsafe {
+        TIMED_WAKE = timed;
+        TIMED_HOLD_OFF_UNTIL = if timed && hold_off_ms > 0 {
+            Instant::now().as_millis() as u64 + hold_off_ms
+        } else {
+            0
+        };
+    }
+}
+
+/// 定时唤醒的数据刷新窗口（开机后 15 秒）：窗口内 to_sleep_tips 不放行睡眠
+/// ——留给 WiFi 连接/天气时间同步/AHT20 首次采样完成。
+pub fn timed_hold_off() -> bool {
+    unsafe { TIMED_WAKE && (Instant::now().as_millis() as u64) < TIMED_HOLD_OFF_UNTIL }
+}
+
+/// 页面空闲超时：定时唤醒的窗口期内 → 永不满足（由 hold-off 决定）；否则用页面配置值
+pub fn idle_for(default: Duration) -> Duration {
+    if timed_hold_off() {
+        Duration::from_secs(3600)
+    } else {
+        default
+    }
+}
+
 #[ram(unstable(rtc_fast))]
 static mut WHEN_SLEEP_RTC_MS:u64 = 0;
 
@@ -28,6 +62,10 @@ pub async fn to_sleep(sleep_time:Duration, idle_time:Duration) {
 }
 
 pub async fn to_sleep_tips(sleep_time:Duration, idle_time:Duration, show_sleep:bool) {
+    // 定时唤醒的数据刷新窗口内不放行睡眠（等 WiFi/天气/AHT20 就绪）
+    if timed_hold_off() {
+        return;
+    }
     if *LAST_ACTIVE_TIME.lock().await == Instant::MAX {
         return;
     }
@@ -37,12 +75,26 @@ pub async fn to_sleep_tips(sleep_time:Duration, idle_time:Duration, show_sleep:b
         let wakeup_pins = unsafe { core::ptr::addr_of_mut!(WAKEUP_PINS).as_mut().unwrap() };
         let rtcio = RtcioWakeupSource::new(wakeup_pins.as_mut_slice());
 
-        let wakeup_source = TimerWakeupSource::new(core::time::Duration::from_micros(sleep_time.as_micros()));
+        // PCF 布防失败时的兜底定时器（先声明：drop 晚于 ws，借用合法）
+        let mut fallback_timer: Option<TimerWakeupSource> = None;
 
         let mut ws: Vec<& dyn WakeSource, 2> = Vec::new();
         ws.push(&rtcio);
-        if sleep_time.as_ticks() > 0 {
-            ws.push(&wakeup_source);
+
+        // 定时唤醒改用 PCF8563 倒计时（INT → GPIO4 拉醒 CPU）：PCF 走纽扣电池，
+        // 深睡电流更低。布防失败自动退回 ESP RTC 定时唤醒。sleep_time=0 → 不布防。
+        if sleep_time.as_secs() > 0 {
+            let secs = sleep_time.as_secs().clamp(1, 255) as u8;
+            if crate::pcf8563::arm_timer_secs(secs).await {
+                println!("[sleep] pcf timer armed {}s", secs);
+            } else {
+                fallback_timer = Some(TimerWakeupSource::new(core::time::Duration::from_secs(
+                    sleep_time.as_secs(),
+                )));
+            }
+        }
+        if let Some(t) = fallback_timer.as_ref() {
+            let _ = ws.push(t);
         }
         if show_sleep {
             crate::display::show_sleep().await;

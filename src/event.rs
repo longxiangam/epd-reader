@@ -84,7 +84,8 @@ pub async fn run(key2: esp_hal::peripherals::GPIO4<'static>){
     let mut key_all = Input::new(key2, esp_hal::gpio::InputConfig::default().with_pull(Pull::Up));
     loop {
         key_all.wait_for_falling_edge().await;
-        Timer::after_millis(30).await; // 等分压稳定
+        // 边沿后立即采样区分键号（快速点按可能在几十 ms 内松开，
+        // 采样必须赶在松开前完成）；中位数抗过渡期毛刺
         let num = judge_adc_num().await;
         if num == 0 {
             Timer::after_millis(10).await;
@@ -181,39 +182,38 @@ pub async fn key_detection<P:InputPin>(key: &mut P, key_num: usize)
 /// 键1 ≈ 44 / 键2 ≈ 409 / 键3 ≈ 645——按下都低于数字低阈值，故用边沿检测按键、
 /// ADC 平均值仅区分键号。阈值取相邻实测值的中点；明显高于键3 → 视为抖动忽略。
 async fn judge_adc_num() -> usize {
-    const SAMPLES: usize = 20;
-    const T_KEY1: u32 = 220; // < 220 → 键1（实测 ~44）
+    const SAMPLES: usize = 12;
+    const T_KEY1: u32 = 220; // < 220 → 键1（实测 ~25）
     const T_KEY2: u32 = 520; // 220~520 → 键2（实测 ~409）
     const T_KEY3: u32 = 900; // 520~900 → 键3（实测 ~645）
 
-    let mut need = SAMPLES;
-    let mut sum: u32 = 0;
-    let mut tries = 0usize;
-    while need > 0 {
-        tries += 1;
-        if tries > 200 {
-            println!("[adc_key] v22 judge adc too many tries, give up");
-            return 0;
-        }
-        if let Some(pin) = ADC_PIN.lock().await.as_mut() {
-            if let Some(adc) = ADC_PER.lock().await.as_mut() {
-                match adc.read_oneshot(pin) {
-                    Ok(v) => {
-                        sum = sum.saturating_add(v as u32);
-                        need -= 1;
-                    }
-                    Err(_) => Timer::after_millis(2).await,
+    let mut buf = [0u16; SAMPLES];
+    for slot in buf.iter_mut() {
+        loop {
+            let v = {
+                let mut pin = ADC_PIN.lock().await;
+                let mut adc = ADC_PER.lock().await;
+                if let (Some(pin), Some(adc)) = (pin.as_mut(), adc.as_mut()) {
+                    adc.read_oneshot(pin).ok()
+                } else {
+                    None
                 }
+            };
+            if let Some(v) = v {
+                *slot = v;
+                break;
             }
+            Timer::after_millis(2).await;
         }
     }
-    let avg = sum / SAMPLES as u32;
-    println!("[adc_key] press avg={}", avg);
-    if avg < T_KEY1 {
+    buf.sort_unstable();
+    let mid = buf[SAMPLES / 2] as u32;
+    println!("[adc_key] press median={}", mid);
+    if mid < T_KEY1 {
         1
-    } else if avg < T_KEY2 {
+    } else if mid < T_KEY2 {
         2
-    } else if avg < T_KEY3 {
+    } else if mid < T_KEY3 {
         3
     } else {
         0

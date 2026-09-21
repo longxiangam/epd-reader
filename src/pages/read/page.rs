@@ -1112,8 +1112,8 @@ impl ReadPage {
         }
     }
 
-    /// 底部字节偏移百分比进度条。
-    fn render_progress(&self, display: &mut crate::display::EpdDisplay) {
+    /// 底部状态行（左：电量图标+时间；右：阅读进度%）+ 进度条。
+    fn render_progress(&self, display: &mut crate::display::EpdDisplay, time_str: &str) {
         let total = self.ttf_file_len;
         if total == 0 {
             return;
@@ -1131,6 +1131,70 @@ impl ReadPage {
         let bar_y = vh as i32 - bar_height as i32 - margin;
         let bar_full_width = vw as i32 - margin * 2;
 
+        // 状态行：进度条上方。左：电量图标（16×9）+ 时间；右：阅读进度百分比
+        let icon_h: i32 = 9;
+        let status_top = bar_y - icon_h - 2;
+        let icon_cy = status_top + icon_h / 2;
+        let bat_pct = crate::battery::last_percent();
+        let font12: FontRenderer = FontRenderer::new::<fonts::u8g2_font_wqy12_t_gb2312>()
+            .with_ignore_unknown_chars(true);
+
+        // 电池图标：轮廓 + 右侧电极 + 电量填充（画法同 widgets/battery.rs，无百分比文字）
+        let origin = Point::new(margin, status_top);
+        let outline = PrimitiveStyleBuilder::new()
+            .stroke_color(Black)
+            .stroke_width(1)
+            .build();
+        let fill = PrimitiveStyleBuilder::new().fill_color(Black).build();
+        Rectangle::new(origin, Size::new(16, 9))
+            .into_styled(outline)
+            .draw(display)
+            .ok();
+        Rectangle::new(Point::new(origin.x + 16, status_top + 2), Size::new(2, 5))
+            .into_styled(fill)
+            .draw(display)
+            .ok();
+        let inner_w: u32 = 16u32.saturating_sub(4);
+        if bat_pct > 0 {
+            let fill_w = (inner_w * bat_pct.min(100)) / 100;
+            if fill_w > 0 {
+                Rectangle::new(
+                    Point::new(origin.x + 2, status_top + 2),
+                    Size::new(fill_w, 5),
+                )
+                .into_styled(fill)
+                .draw(display)
+                .ok();
+            }
+        }
+
+        // 时间：图标右侧
+        if !time_str.is_empty() {
+            let _ = font12.render_aligned(
+                time_str,
+                Point::new(margin + 16 + 2 + 4, icon_cy),
+                VerticalPosition::Center,
+                HorizontalAlignment::Left,
+                FontColor::Transparent(Black),
+                display,
+            );
+        }
+
+        // 右：阅读进度（两位小数）
+        let v = (current as u64 * 10_000 / total as u64) as u32; // 百分比×100
+        let mut pct_s: heapless::String<12> = heapless::String::new();
+        use core::fmt::Write as _;
+        let _ = write!(pct_s, "{}.{:02}%", v / 100, v % 100);
+        let _ = font12.render_aligned(
+            pct_s.as_str(),
+            Point::new(vw as i32 - margin, icon_cy),
+            VerticalPosition::Center,
+            HorizontalAlignment::Right,
+            FontColor::Transparent(Black),
+            display,
+        );
+
+        // 进度条
         Rectangle::new(Point::new(margin, bar_y), Size::new(bar_full_width as u32, bar_height))
             .into_styled(
                 PrimitiveStyleBuilder::new().fill_color(White).stroke_color(Black).stroke_width(1).build(),
@@ -1438,7 +1502,17 @@ impl Page for ReadPage {
                             display,
                         );
                     }
-                    self.render_progress(display);
+                    // 底部状态行数据：时间（左）+ 电量（右），位于进度条上方
+                    let time_str = if let Some(clock) = crate::worldtime::get_clock() {
+                        let t = clock.local().await;
+                        let mut s: heapless::String<8> = heapless::String::new();
+                        use core::fmt::Write as _;
+                        let _ = write!(s, "{:02}:{:02}", t.hour(), t.minute());
+                        s
+                    } else {
+                        heapless::String::new()
+                    };
+                    self.render_progress(display, &time_str);
                 }
 
                 if self.reading && !matches!(self.menu_state, MenuState::Closed) {

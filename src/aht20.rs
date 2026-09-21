@@ -30,6 +30,11 @@ pub fn indoor_snapshot() -> Option<(i32, u32)> {
     }
 }
 
+/// 首次采样是否已完成（唤醒后页面渲染前等待用）
+pub fn has_data() -> bool {
+    INDOOR_T.load(Ordering::Relaxed) != i32::MIN
+}
+
 async fn read_status() -> Option<u8> {
     let mut b = [0u8; 1];
     i2c_bus::write_read(ADDR, &[], &mut b).await.ok()?;
@@ -77,12 +82,17 @@ pub async fn measure() -> Option<(i32, u32)> {
         return None;
     }
     if i2c_bus::write(ADDR, &[0xAC, 0x33, 0x00]).await.is_err() {
+        println!("[aht20] trigger fail");
         return None;
     }
     Timer::after_millis(80).await; // 测量完成时间（datasheet ≤80ms）
     let mut b = [0u8; 7];
-    i2c_bus::write_read(ADDR, &[], &mut b).await.ok()?;
+    if i2c_bus::write_read(ADDR, &[], &mut b).await.is_err() {
+        println!("[aht20] read fail");
+        return None;
+    }
     if b[0] & 0x80 != 0 {
+        println!("[aht20] busy");
         return None; // 仍忙
     }
     if !crc_ok(&b) {
@@ -109,14 +119,34 @@ pub async fn sample_task() -> ! {
             }
         }
     }
+    println!("[aht20] ready");
+
+    let mut fail_round = 0u32;
     loop {
-        match measure().await {
+        // 唤醒后首次测量常因传感器忙而失败（深睡打断测量周期）：
+        // 失败快速重试 3 次（间隔 200ms），避免空窗 60 秒
+        let mut got: Option<(i32, u32)> = None;
+        for _ in 0..3 {
+            match measure().await {
+                Some((t, h)) => {
+                    got = Some((t, h));
+                    break;
+                }
+                None => Timer::after_millis(200).await,
+            }
+        }
+
+        match got {
             Some((t, h)) => {
+                fail_round = 0;
                 INDOOR_T.store(t, Ordering::Relaxed);
                 INDOOR_H.store(h, Ordering::Relaxed);
+                println!("[aht20] sample t={}.{}℃ h={}%", t / 10, t % 10, h);
             }
             None => {
-                // 偶发失败清空显示（避免长期陈旧值），下轮重试
+                fail_round += 1;
+                println!("[aht20] measure failed x{}", fail_round);
+                // 连续失败清空显示（避免长期陈旧值），下轮重试
                 INDOOR_T.store(i32::MIN, Ordering::Relaxed);
             }
         }

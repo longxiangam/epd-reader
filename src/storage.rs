@@ -234,42 +234,43 @@ impl Default for ReadingSettings {
     }
 }
 
-/// v22 三键 ADC 校准数据（分压电阻有个体差异，阈值必须实测标定）。
-/// 追加在末尾，不动既有结构。magic 无效/间隔不足 → 开机进入校准界面。
-#[derive(Debug, Clone, Copy)]
-pub struct AdcCalStorage {
-    pub magic: u32, // 0x41444331 = "ADC1"，有效标志
-    pub idle: u16,  // 未按下时的 ADC 均值（上拉 → 高）
-    pub key1: u16,  // 按键1 按住时的 ADC 均值
-    pub key2: u16,
-    pub key3: u16,
+/// 手动对时 / 节假日更新的时间戳（Unix 秒；0 = 从未）。
+/// 占用原 ADC 校准槽（该机制已随固定阈值按键方案移除）。
+#[derive(Debug, Default, Clone, Copy)]
+pub struct SyncStampStorage {
+    pub magic: u32, // "SYNC"
+    pub time_sync_sec: u64,
+    pub holiday_sync_sec: u64,
 }
 
-impl Default for AdcCalStorage {
-    fn default() -> Self {
-        Self { magic: 0, idle: 0, key1: 0, key2: 0, key3: 0 }
+impl SyncStampStorage {
+    pub const MAGIC: u32 = 0x5359_4E43;
+
+    /// 读取两个时间戳；magic 无效 → (0, 0)（从未同步）
+    pub fn read_stamps() -> (u64, u64) {
+        match Self::read() {
+            Ok(s) if s.magic == Self::MAGIC => (s.time_sync_sec, s.holiday_sync_sec),
+            _ => (0, 0),
+        }
     }
-}
 
-impl AdcCalStorage {
-    /// "ADC2"：按键引脚换到 GPIO4 后分压点变化，旧校准数据作废，需重新校准
-    pub const MAGIC: u32 = 0x4144_4332;
-    /// 判定相邻键值最小间隔（12bit ADC）：小于此值视为无法可靠区分。
-    pub const MIN_GAP: i32 = 120;
+    pub fn write_stamps(time_sync_sec: u64, holiday_sync_sec: u64) {
+        let s = Self {
+            magic: Self::MAGIC,
+            time_sync_sec,
+            holiday_sync_sec,
+        };
+        let _ = s.write();
+    }
 
-    /// 校准数据有效性：magic 正确 + idle 与三键值两两间隔足够。
-    pub fn valid(&self) -> bool {
-        if self.magic != Self::MAGIC || self.idle == 0 {
-            return false;
-        }
-        let mut v = [self.idle as i32, self.key1 as i32, self.key2 as i32, self.key3 as i32];
-        v.sort_unstable();
-        for w in v.windows(2) {
-            if w[1] - w[0] < Self::MIN_GAP {
-                return false;
-            }
-        }
-        true
+    pub fn write_time_stamp(sec: u64) {
+        let (t, h) = Self::read_stamps();
+        Self::write_stamps(sec, h);
+    }
+
+    pub fn write_holiday_stamp(sec: u64) {
+        let (t, _) = Self::read_stamps();
+        Self::write_stamps(t, sec);
     }
 }
 
@@ -294,8 +295,8 @@ impl_storage!(StockStorage, STOCK_STORAGE_OFFSET);
 impl_storage!(DisplayStorage, DISPLAY_STORAGE_OFFSET);
 impl_storage!(ReadingSettings, READING_SETTINGS_OFFSET);
 
-const ADC_CAL_OFFSET: usize = READING_SETTINGS_OFFSET + size_of::<ReadingSettings>();
-impl_storage!(AdcCalStorage, ADC_CAL_OFFSET);
+const SYNC_STAMP_OFFSET: usize = READING_SETTINGS_OFFSET + size_of::<ReadingSettings>();
+impl_storage!(SyncStampStorage, SYNC_STAMP_OFFSET);
 
 /// 最后所在页（跨深睡唤醒恢复）。IO（RTCIO）唤醒时 rtc_fast 状态不可靠
 /// （BOOTED/PAGE_INDEX 会丢，设备落到默认页），故页面变化时同步落到 NVS。
@@ -327,7 +328,7 @@ impl SleepPageStorage {
     }
 }
 
-const SLEEP_PAGE_OFFSET: usize = ADC_CAL_OFFSET + size_of::<AdcCalStorage>();
+const SLEEP_PAGE_OFFSET: usize = SYNC_STAMP_OFFSET + size_of::<SyncStampStorage>();
 impl_storage!(SleepPageStorage, SLEEP_PAGE_OFFSET);
 
 /// 读取睡眠前最后所在页（NVS）。None=无记录
@@ -408,5 +409,5 @@ pub fn init_storage_area(){
     // 0 = 未配置，display 侧回退到平台默认（无需在此处区分 feature）
     DisplayStorage::default().write();
     ReadingSettings::default().write();
-    AdcCalStorage::default().write();
+    SyncStampStorage::default().write();
 }

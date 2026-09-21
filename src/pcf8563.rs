@@ -78,3 +78,46 @@ pub async fn write_time(ts: i64) -> bool {
 pub fn ts_valid(ts: i64) -> bool {
     (1577836800..4102444800).contains(&ts)
 }
+
+// ── 倒计时定时器（INT 脚 → GPIO4，深睡定时唤醒）──
+//
+// 寄存器：0x0E Timer_control（bit7 TE 使能，bits1:0 TD 频率：00=4096Hz 01=64Hz
+// 10=1Hz 11=1/60Hz）；0x0F Timer_A（倒计数值）。到 0 时 TF（Control_status_2
+// bit2）置位、INT 脚拉低（TIE=1 时）。TF 置位后保持，需软件写 0 清除。
+
+const REG_CTRL2: u8 = 0x01; // bit2 TF / bit3 AF / bit0 TIE
+const REG_TIMER_CTRL: u8 = 0x0E; // bit7 TE，bits1:0 TD
+const REG_TIMER_A: u8 = 0x0F;
+
+/// 深睡前布防倒计时定时器：count 秒后 INT 拉低（经 GPIO4 唤醒 CPU）。
+/// count: 1..=255（1Hz 倒计时，最长 4 分 15 秒）。
+pub async fn arm_timer_secs(count: u8) -> bool {
+    // 停定时器 → 装载倒计时 → 清 TF/AF + 使能 TIE → 启动（TE=1，TD=1Hz）
+    if i2c_bus::write(ADDR, &[REG_TIMER_CTRL, 0x00]).await.is_err() {
+        return false;
+    }
+    if i2c_bus::write(ADDR, &[REG_TIMER_A, count]).await.is_err() {
+        return false;
+    }
+    if i2c_bus::write(ADDR, &[REG_CTRL2, 0x01]).await.is_err() {
+        return false;
+    }
+    i2c_bus::write(ADDR, &[REG_TIMER_CTRL, 0x82]).await.is_ok()
+}
+
+/// 关闭倒计时定时器（唤醒后调用：TE=0 后 INT 不再拉低 GPIO4，
+/// 防止运行期把按键网络拉低造成假按键）。
+pub async fn disarm_timer() -> bool {
+    i2c_bus::write(ADDR, &[REG_TIMER_CTRL, 0x00]).await.is_ok()
+}
+
+/// 深睡唤醒后调用：读 TF 判断是否定时唤醒，并清标志 + 关定时器。
+/// true = PCF 定时唤醒；false = 按钮唤醒。
+pub async fn consume_timer_wake() -> bool {
+    let mut b = [0u8; 1];
+    let ok = i2c_bus::write_read(ADDR, &[REG_CTRL2], &mut b).await.is_ok();
+    // 清 TF/AF（写 0）+ 停定时器
+    let _ = i2c_bus::write(ADDR, &[REG_CTRL2, 0x01]).await;
+    let _ = i2c_bus::write(ADDR, &[REG_TIMER_CTRL, 0x00]).await;
+    ok && (b[0] & 0x04 != 0)
+}

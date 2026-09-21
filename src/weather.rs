@@ -130,6 +130,18 @@ impl Weather {
         }
     }
   
+    /// 天气数据是否过期（未同步或同步超过 5 小时）——决定定时唤醒后是否需要联网
+    pub async fn weather_stale() -> bool {
+        if !sync_weather_success() {
+            return true;
+        }
+        let Some(clock) = get_clock() else {
+            return true;
+        };
+        let now_sec = clock.now().await.unix_timestamp() as u64;
+        unsafe { now_sec - *addr_of!(WEATHER_SYNC_SECOND) > 3600 * 5 }
+    }
+
     pub async fn sync_weather(){
 
         if unsafe { *addr_of!(WEATHER_SYNC_SECOND) } == 0 {
@@ -204,6 +216,9 @@ impl HolidayInfo {
                         if let Some(mut v) = holiday_result {
                             v.year = current_year;
                             Self::save(v).await;
+                            // 记录节假日更新时间（设置页显示用）
+                            let now_sec = get_clock().unwrap().now().await.unix_timestamp() as u64;
+                            crate::storage::SyncStampStorage::write_holiday_stamp(now_sec);
                             println!("节假日请求成功");
                             finish_wifi().await;
                             Ok(())

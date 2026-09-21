@@ -273,7 +273,7 @@ impl Page for  MainPage{
 
             if  None == self.current_page {
                 self.render().await;
-                to_sleep_tips(Duration::from_secs(0), Duration::from_secs(30),true).await;
+                to_sleep_tips(Duration::from_secs(0), crate::sleep::idle_for(Duration::from_secs(30)), true).await;
                 Timer::after(Duration::from_millis(50)).await;
                 continue;
             }
@@ -343,7 +343,7 @@ impl Page for  MainPage{
                 }
                 _ => { self.back().await;}
             }
-            to_sleep_tips(Duration::from_secs(0), Duration::from_secs(30),true).await;
+            to_sleep_tips(Duration::from_secs(0), crate::sleep::idle_for(Duration::from_secs(30)), true).await;
             Timer::after(Duration::from_millis(50)).await;
         }
     }

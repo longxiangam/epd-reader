@@ -1,20 +1,25 @@
-use core::str::FromStr;
+//! IP 定位（设置页自动定位）。
+//!
+//! 服务：myip.ipip.net/json（国内 CDN，UTF-8，免 key）。
+//! 响应：{"ret":"ok","data":{"ip":"...","location":["中国","湖北","武汉","","移动"]}}
+//! location[2] 即城市名（心知天气 location 参数可直接使用城市名）。
+//! 旧源 ip-api.com 为境外服务，国内直连 TCP 常超时，故弃用。
+
 use heapless::String;
-use mini_json::parse_json;
-use esp_println::println;
 
 use crate::request::RequestClient;
 use crate::wifi::{finish_wifi, use_wifi};
+use esp_println::println;
 
-const LOCATE_URL: &str =
-    "http://ip-api.com/json/?fields=status,lat,lon,city&lang=zh-CN";
+const LOCATE_URL: &str = "https://myip.ipip.net/json";
 
 pub struct LocateResult {
     pub city: String<32>,
+    /// 定位结果的位置参数（心知天气接受城市名；无坐标时留空）
     pub latlon: String<32>,
 }
 
-/// 通过 IP 接口定位当前经纬度与城市，返回 "lat:lon"（心知天气 location 参数可直接使用）
+/// 通过 IP 接口定位当前城市
 pub async fn locate() -> Option<LocateResult> {
     println!("start locate");
     let stack = match use_wifi().await {
@@ -32,80 +37,30 @@ pub async fn locate() -> Option<LocateResult> {
     let json_str = core::str::from_utf8(&response.data[..response.length]).ok()?;
     println!("locate response: {}", json_str);
 
-    let json = match parse_json(json_str) {
-        Ok(j) => j,
-        Err(e) => {
-            println!("locate parse failed: {:?}", e);
-            return None;
-        }
-    };
+    // location 数组：["国家","省","市","区县","运营商"] → 取第 3 个字段（城市）
+    let loc_pos = json_str.find("\"location\"")?;
+    let arr_pos = json_str[loc_pos..].find('[')? + loc_pos;
+    let rest = &json_str[arr_pos + 1..];
 
-    let status_ok = json
-        .get("status")
-        .and_then(|v| v.get_string())
-        .map(|s| s.as_str() == "success")
-        .unwrap_or(true);
-    if !status_ok {
-        println!("locate failed status");
+    let mut fields: [&str; 3] = ["", "", ""];
+    let mut pos = 0usize;
+    for field in fields.iter_mut() {
+        let open = rest[pos..].find('"')? + pos;
+        let close = rest[open + 1..].find('"')? + open + 1;
+        *field = &rest[open + 1..close];
+        pos = close + 1;
+    }
+    let city_raw = fields[2];
+    if city_raw.is_empty() {
+        println!("locate city empty");
         return None;
     }
 
-    let lat = json.get("lat").and_then(|v| v.get_number())?;
-    let lon = json.get("lon").and_then(|v| v.get_number())?;
-    let city_raw = json
-        .get("city")
-        .and_then(|v| v.get_string())
-        .map(|s| s.as_str())
-        .unwrap_or("");
-
+    let mut city: String<32> = String::new();
+    city.push_str(city_raw).ok();
+    // 国内 IP 接口无经纬度：位置参数直接用城市名（心知天气支持）
     let mut latlon: String<32> = String::new();
-    latlon.push_str(&format_coord(lat)).ok();
-    latlon.push(':').ok();
-    latlon.push_str(&format_coord(lon)).ok();
-
-    let city: String<32> = city_raw.chars().collect();
-    println!("located: {} {}", city, latlon);
+    latlon.push_str(city_raw).ok();
+    println!("located: {}", city);
     Some(LocateResult { city, latlon })
-}
-
-/// 将坐标格式化为 4 位小数的字符串
-fn format_coord(v: f64) -> String<12> {
-    let neg = v < 0.0;
-    let abs = if neg { -v } else { v };
-    let int_part = abs as u32;
-    let mut frac = ((abs - int_part as f64) * 10000.0) as u32;
-    if frac > 9999 {
-        frac = 9999;
-    }
-
-    let mut s: String<12> = String::new();
-    if neg {
-        s.push('-').ok();
-    }
-    s.push_str(&uint_to_string(int_part)).ok();
-    s.push('.').ok();
-    let fs = uint_to_string(frac);
-    for _ in 0..4usize.saturating_sub(fs.len()) {
-        s.push('0').ok();
-    }
-    s.push_str(&fs).ok();
-    s
-}
-
-fn uint_to_string(mut n: u32) -> String<12> {
-    if n == 0 {
-        return String::from_str("0").unwrap();
-    }
-    let mut tmp = [0u8; 10];
-    let mut pos = 10;
-    while n > 0 {
-        pos -= 1;
-        tmp[pos] = (n % 10) as u8 + b'0';
-        n /= 10;
-    }
-    let mut s: String<12> = String::new();
-    for i in pos..10 {
-        s.push(tmp[i] as char).ok();
-    }
-    s
 }
