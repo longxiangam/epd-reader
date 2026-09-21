@@ -86,13 +86,15 @@ where
         }
     }
 
-    // 日历 + 时钟
+    // 日历 + 时钟（时钟显示受设置页"时间显示"开关控制）
     if data.time_synced {
         if let Some(clock) = data.current_date {
             let hour = clock.hour();
             let minute = clock.minute();
-            let time_str = format_args!("{:02}:{:02}", hour, minute).to_string();
-            draw_clock(display, time_str.as_str());
+            if data.show_time {
+                let time_str = format_args!("{:02}:{:02}", hour, minute).to_string();
+                draw_clock(display, time_str.as_str());
+            }
 
             let calendar_rect = Rectangle::new(
                 Point::new(0, 0),

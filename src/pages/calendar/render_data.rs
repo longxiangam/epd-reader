@@ -13,4 +13,6 @@ pub struct CalendarRenderData<'a> {
     pub weather_synced: bool,
     pub holiday_synced: bool,
     pub time_synced: bool,
+    /// 时间显示开关（设置页控制；关 → 不绘制时钟）
+    pub show_time: bool,
 }

@@ -22,7 +22,7 @@ use crate::widgets::list_widget::ListWidget;
 use crate::wifi::{IP_ADDRESS, WIFI_MODEL, WifiModel};
 use crate::web_service::{web_service,STOP_WEB_SERVICE};
 
-const SETTINGS_COUNT: usize = 10;
+const SETTINGS_COUNT: usize = 11;
 const READ_SLEEP_MIN: u64 = 10;
 const WEATHER_SLEEP_MIN: u64 = 5;
 const SLEEP_STEP: u64 = 5;
@@ -59,6 +59,8 @@ pub struct SettingPage {
     weather_sleep_seconds: u64,
     /// 7网络对时 / 8更新节假日 的执行状态：0空闲 1执行中 2成功 3失败
     sync_status: u8,
+    /// 列表导航长按连发的上次移动时刻（ms），节流用
+    last_nav_ms: u64,
     stock_edit_selected: u8,
     home_edit: i32,
     full_refresh_edit: u32,
@@ -232,6 +234,12 @@ impl SettingPage {
                     }
                 }
                 9 => {
+                    // 时间显示：切换开关并持久化
+                    let on = crate::storage::SyncStampStorage::show_time();
+                    crate::storage::SyncStampStorage::set_show_time(!on);
+                    self.need_render = true;
+                }
+                10 => {
                     // 返回：STA 退出设置页回到主菜单；AP（首次配网）返回二维码根界面
                     match self.wifi_model {
                         Some(WifiModel::STA) => { self.running = false; }
@@ -352,16 +360,52 @@ impl SettingPage {
             format!("更新节假日: {}", fmt_stamp(h_stamp).as_str())
         };
 
+        // 时间显示项：开关状态（设置页控制天气/日历是否显示时间）
+        let show_time_str = if select == 9 {
+            let on = crate::storage::SyncStampStorage::show_time();
+            if editing && select == 9 {
+                format!("时间显示: >>{}<<", if on { "开" } else { "关" })
+            } else {
+                format!("时间显示: {}", if on { "开" } else { "关" })
+            }
+        } else {
+            format!("时间显示")
+        };
+
+        // 自动定位条目：后面追加定位状态（从未/定位中/成功 城市/失败）
+        let locate_tag = match &self.locate_state {
+            LocateState::Requesting => format!(": >>定位中<<"),
+            LocateState::Success { city, .. } => format!(": 成功 {}", city),
+            LocateState::Failed => format!(": 失败"),
+            LocateState::Idle => match &self.last_location {
+                Some((city, _)) if !city.is_empty() => format!(": {}", city),
+                _ => format!(": 未定位"),
+            },
+        };
+
+        // 自动定位条目：后面追加定位状态（从未/定位中/成功 城市/失败）
+        let locate_tag = match &self.locate_state {
+            LocateState::Requesting => format!(": >>定位中<<"),
+            LocateState::Success { city, .. } => format!(": 成功 {}", city),
+            LocateState::Failed => format!(": 失败"),
+            LocateState::Idle => match &self.last_location {
+                Some((city, _)) if !city.is_empty() => format!(": {}", city),
+                _ => format!(": 未定位"),
+            },
+        };
+        let locate_str = format!("自动定位{}", locate_tag);
+
         let mut items: Vec<&str, 20> = Vec::new();
         let _ = items.push(read_str.as_str());
         let _ = items.push(weather_str.as_str());
-        let _ = items.push("自动定位");
+        let _ = items.push(locate_str.as_str());
         let _ = items.push("web配置");
         let _ = items.push(stock_str.as_str());
         let _ = items.push(home_str.as_str());
         let _ = items.push(refresh_str.as_str());
         let _ = items.push(time_sync_str.as_str());
         let _ = items.push(holiday_sync_str.as_str());
+        let _ = items.push(show_time_str.as_str());
         let _ = items.push("返回");
 
         let mut list_widget = ListWidget::new(
@@ -436,12 +480,15 @@ impl SettingPage {
             Some(r) => {
                 let city = r.city.clone();
                 let latlon = r.latlon.clone();
-                // 将 "lat:lon" 写入天气配置的城市字段（心知天气 location 参数可直接使用）
+                // 城市名写入天气配置（心知天气 location 支持城市名；跨重启保留，
+                // 菜单"自动定位"条目的状态显示也从这里读）
                 let mut ws = crate::storage::WeatherStorage::read().unwrap_or_default();
-                ws.city = latlon.clone();
+                ws.city = city.clone();
                 let _ = ws.write();
-                // 立即用新坐标拉取一次天气
+                // 立即用新城市拉取一次天气
                 let _ = crate::weather::Weather::request().await;
+                // 同步到 last_location：菜单条目与定位界面的状态显示用
+                self.last_location = Some((city.clone(), latlon.clone()));
                 self.locate_state = LocateState::Success { city, latlon };
             }
             None => {
@@ -451,17 +498,13 @@ impl SettingPage {
         self.need_render = true;
     }
 
-    /// 从存储读取已保存的定位信息（城市名 + 坐标），用于定位界面展示
+    /// 从存储读取已保存的定位城市（ws.city = 定位成功写入的城市名），用于展示
     fn load_last_location(&mut self) {
         self.last_location = None;
         if let Ok(ws) = crate::storage::WeatherStorage::read() {
             if !ws.city.is_empty() {
-                let city: String<32> = ws
-                    .weather_data
-                    .as_ref()
-                    .map(|d| d.location.name.chars().collect())
-                    .unwrap_or_default();
-                self.last_location = Some((city, ws.city.clone()));
+                let city: String<32> = ws.city.chars().collect();
+                self.last_location = Some((city.clone(), ws.city.clone()));
             }
         }
     }
@@ -494,6 +537,7 @@ impl Page for SettingPage {
             weather_sleep_seconds: if sleep_storage.weather_sleep_seconds > 0 { sleep_storage.weather_sleep_seconds } else { 60 },
             stock_edit_selected: 0,
             home_edit: 1,
+            last_nav_ms: 0,
             full_refresh_edit: crate::display::get_full_refresh_times(),
             sync_status: 0,
         }
@@ -588,9 +632,14 @@ impl Page for SettingPage {
     }
 
     async fn run(&mut self, spawner: Spawner) {
-        crate::display::QUICKLY_LUT_CHANNEL.send(false).await;
+        crate::display::QUICKLY_LUT_CHANNEL.send(true).await;
         self.running = true;
         self.need_render = true;
+        // 进入页面时加载一次已保存的定位城市（菜单"自动定位"条目状态显示用）
+        if !self.last_location_loaded {
+            self.load_last_location();
+            self.last_location_loaded = true;
+        }
         match  *WIFI_MODEL.lock().await {
             Some(WifiModel::AP) => {
                 // 首次配网：默认显示二维码与地址，保持原有行为不受影响
@@ -608,7 +657,6 @@ impl Page for SettingPage {
         }
 
         let mut has_ip = false;
-        let mut first_render = true;
         loop {
             if !self.running {
                 break;
@@ -652,13 +700,9 @@ impl Page for SettingPage {
                 }
             }
             self.render().await;
-            // 首屏全刷清晰显示后，列表导航切换为快刷；二维码界面保持全刷
-            if first_render {
-                first_render = false;
-                if matches!(self.mode, SettingMode::Settings { .. }) {
-                    crate::display::QUICKLY_LUT_CHANNEL.send(true).await;
-                }
-            }
+            // 设置界面始终快刷：重置全刷计数，防止到达阈值触发全刷
+            //（全刷期间长按连发照常累计，表现为一次跳过好几行）
+            crate::display::reset_render_times();
             Timer::after(Duration::from_millis(1000)).await;
         }
 
@@ -755,6 +799,15 @@ impl Page for SettingPage {
                     Timer::after(Duration::from_millis(200)).await;
                     return;
                 }
+                // 列表导航：长按 1 连续下移（与短按1同方向），400ms 节流
+                if matches!(mut_ref.mode, SettingMode::Settings { .. }) {
+                    let now = Instant::now().as_millis() as u64;
+                    if now.saturating_sub(mut_ref.last_nav_ms) >= 400 {
+                        mut_ref.last_nav_ms = now;
+                        mut_ref.settings_key_down();
+                    }
+                    return;
+                }
                 // 重置只在二维码界面生效，列表界面长按左键无效
                 if !matches!(mut_ref.mode, SettingMode::QrCode) {
                     return;
@@ -781,6 +834,15 @@ impl Page for SettingPage {
                 if matches!(mut_ref.mode, SettingMode::Settings { editing: true, .. }) {
                     mut_ref.settings_key_down();
                     Timer::after(Duration::from_millis(200)).await;
+                    return;
+                }
+                // 列表导航：长按 2 连续上移（与短按2同方向），同 400ms 节流
+                if matches!(mut_ref.mode, SettingMode::Settings { .. }) {
+                    let now = Instant::now().as_millis() as u64;
+                    if now.saturating_sub(mut_ref.last_nav_ms) >= 400 {
+                        mut_ref.last_nav_ms = now;
+                        mut_ref.settings_key_up();
+                    }
                 }
             });
         }).await;

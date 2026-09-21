@@ -15,4 +15,6 @@ pub struct WeatherRenderData<'a> {
     pub time_synced: bool,
     /// 设备最后一次成功请求天气接口的 unix 时间戳（用于显示“更新 HH:MM”）
     pub weather_sync_second: u64,
+    /// 时间显示开关（设置页控制；关 → 不绘制时钟与时间区域）
+    pub show_time: bool,
 }

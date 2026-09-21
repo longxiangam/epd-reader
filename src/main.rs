@@ -128,8 +128,8 @@ async fn main(spawner: Spawner) -> ! {
 
     // v22 诊断：rtc_fast 状态自增——跨深睡唤醒保持递增 = 保留正常。
     // 先等 3 秒：唤醒重启后 USB 重枚举需要时间，不等则最开始的打印会丢。
-    esp_hal::delay::Delay::new().delay_millis(3000);
-    crate::board::print_boot_diag();
+    //esp_hal::delay::Delay::new().delay_millis(3000);
+    //crate::board::print_boot_diag();
 
     // RTC
     let rtc = esp_hal::rtc_cntl::Rtc::new(peripherals.LPWR);
@@ -165,7 +165,10 @@ async fn main(spawner: Spawner) -> ! {
         OutputConfig::default(),
     );
     let mut sd_pwr_ctrl = Output::new(peripherals.GPIO1, Level::Low, OutputConfig::default());
-    crate::sleep::EINK_PWER_PIN.lock().await.replace(eink_pwr_ctrl);
+    crate::sleep::EINK_PWER_PIN
+        .lock()
+        .await
+        .replace(eink_pwr_ctrl);
     crate::sleep::SD_PWER_PIN.lock().await.replace(sd_pwr_ctrl);
 
     let sdcard_cs = Output::new(peripherals.GPIO5, Level::High, OutputConfig::default());
@@ -370,7 +373,12 @@ async fn main(spawner: Spawner) -> ! {
             println!("Current_time: {} {}", clock.get_date_str().await, str);
         }
 
-        to_sleep_tips(Duration::from_secs(0), crate::sleep::idle_for(Duration::from_secs(180)), true).await;
+        to_sleep_tips(
+            Duration::from_secs(0),
+            crate::sleep::idle_for(Duration::from_secs(180)),
+            true,
+        )
+        .await;
         Timer::after(Duration::from_secs(5)).await;
     }
 }

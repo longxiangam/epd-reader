@@ -71,9 +71,11 @@ where
     let chart_margin_y: i32 = 6;
 
     // 顶栏：时钟 + 状态图标 + 电量
-    if let Some(clock) = data.current_date {
-        let time_str = format_args!("{:02}:{:02}", clock.hour(), clock.minute()).to_string();
-        let _ = draw_clock(display, time_str.as_str(), Point::new(0, 2));
+    if data.show_time {
+        if let Some(clock) = data.current_date {
+            let time_str = format_args!("{:02}:{:02}", clock.hour(), clock.minute()).to_string();
+            let _ = draw_clock(display, time_str.as_str(), Point::new(0, 2));
+        }
     }
 
     let bat_y: i32 = 2;

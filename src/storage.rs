@@ -234,17 +234,18 @@ impl Default for ReadingSettings {
     }
 }
 
-/// 手动对时 / 节假日更新的时间戳（Unix 秒；0 = 从未）。
+/// 手动对时 / 节假日更新的时间戳（Unix 秒；0 = 从未）+ 时间显示开关。
 /// 占用原 ADC 校准槽（该机制已随固定阈值按键方案移除）。
 #[derive(Debug, Default, Clone, Copy)]
 pub struct SyncStampStorage {
-    pub magic: u32, // "SYNC"
+    pub magic: u32, // "SYND"（v2：+show_time 字段）
     pub time_sync_sec: u64,
     pub holiday_sync_sec: u64,
+    pub show_time: u8, // 1 = 天气/日历显示时间
 }
 
 impl SyncStampStorage {
-    pub const MAGIC: u32 = 0x5359_4E43;
+    pub const MAGIC: u32 = 0x5359_4E44;
 
     /// 读取两个时间戳；magic 无效 → (0, 0)（从未同步）
     pub fn read_stamps() -> (u64, u64) {
@@ -254,23 +255,52 @@ impl SyncStampStorage {
         }
     }
 
-    pub fn write_stamps(time_sync_sec: u64, holiday_sync_sec: u64) {
+    /// 时间显示开关（存储无效/未设置 → 默认开启）
+    pub fn show_time() -> bool {
+        match Self::read() {
+            Ok(s) if s.magic == Self::MAGIC => s.show_time != 0,
+            _ => true,
+        }
+    }
+
+    pub fn set_show_time(v: bool) {
+        let (t, h) = Self::read_stamps();
         let s = Self {
             magic: Self::MAGIC,
-            time_sync_sec,
-            holiday_sync_sec,
+            time_sync_sec: t,
+            holiday_sync_sec: h,
+            show_time: if v { 1 } else { 0 },
         };
         let _ = s.write();
     }
 
     pub fn write_time_stamp(sec: u64) {
-        let (t, h) = Self::read_stamps();
-        Self::write_stamps(sec, h);
+        let (t, h, st) = Self::read_all();
+        Self::write_all(t, h, st);
     }
 
     pub fn write_holiday_stamp(sec: u64) {
-        let (t, _) = Self::read_stamps();
-        Self::write_stamps(t, sec);
+        let (t, h, st) = Self::read_all();
+        Self::write_all(t, sec, st);
+    }
+
+    fn read_all() -> (u64, u64, u8) {
+        match Self::read() {
+            Ok(s) if s.magic == Self::MAGIC => {
+                (s.time_sync_sec, s.holiday_sync_sec, s.show_time)
+            }
+            _ => (0, 0, 1),
+        }
+    }
+
+    fn write_all(time_sync_sec: u64, holiday_sync_sec: u64, show_time: u8) {
+        let s = Self {
+            magic: Self::MAGIC,
+            time_sync_sec,
+            holiday_sync_sec,
+            show_time,
+        };
+        let _ = s.write();
     }
 }
 

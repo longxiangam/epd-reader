@@ -203,6 +203,8 @@ where
             .into_styled(separator_style.clone())
             .draw(display);
 
+        // 时间显示开关（设置页）：关 → 整个时间区域（时钟/年月日/农历/节气）不绘制
+        if data.show_time {
         if let Some(clock) = data.current_date {
             // 时间区域底部对齐：把时钟 + 三行文字整块下移到面板底部，消除下方空白。
             // 块高 = 时钟段(56) + 年月日(16) + 农历(16) + 星座节气(16)
@@ -253,6 +255,7 @@ where
                 FontColor::Transparent(Black),
                 display,
             );
+        }
         }
     }
 

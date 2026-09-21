@@ -93,6 +93,7 @@ impl Page for WeatherPage {
                     holiday_synced,
                     time_synced,
                     weather_sync_second: unsafe { crate::weather::WEATHER_SYNC_SECOND },
+                    show_time: crate::storage::SyncStampStorage::show_time(),
                 };
 
                 let _ = super::draw(display, &data);
@@ -198,14 +199,27 @@ impl Page for WeatherPage {
             self.render().await;
             if sync_time_success() && sync_weather_success() {
                 let sleep_storage = crate::storage::SleepStorage::read().unwrap_or_default();
-                let weather_sleep_seconds = if sleep_storage.weather_sleep_seconds > 0 {
+                let min_sleep = if sleep_storage.weather_sleep_seconds > 0 {
                     sleep_storage.weather_sleep_seconds
                 } else {
                     15
                 };
+                // 睡眠时长：时间显示开 → 对齐下一分钟边界（唤醒即分钟跳变）；
+                // 关 → 按配置间隔睡（刷新天气用，不关心分钟对齐）
+                let show_time = crate::storage::SyncStampStorage::show_time();
+                let d = if show_time {
+                    let sec_in_min = get_clock().unwrap().now().await.second() as u64;
+                    let mut d = 60 - sec_in_min % 60;
+                    while d < min_sleep as u64 {
+                        d += 60;
+                    }
+                    d
+                } else {
+                    min_sleep as u64
+                };
                 to_sleep_tips(
-                    Duration::from_secs(60),
-                    crate::sleep::idle_for(Duration::from_secs(weather_sleep_seconds)),
+                    Duration::from_secs(d),
+                    crate::sleep::idle_for(Duration::from_secs(min_sleep)),
                     true,
                 )
                 .await;

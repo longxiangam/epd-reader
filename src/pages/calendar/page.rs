@@ -92,6 +92,7 @@ impl Page for CalendarPage {
                     weather_synced,
                     holiday_synced,
                     time_synced,
+                    show_time: crate::storage::SyncStampStorage::show_time(),
                 };
 
                 let _ = super::draw(display, &data);
@@ -181,8 +182,20 @@ impl Page for CalendarPage {
                 } else {
                     15
                 };
+                // 睡眠时长：时间显示开 → 对齐分钟边界；关 → 按配置间隔
+                let show_time = crate::storage::SyncStampStorage::show_time();
+                let d = if show_time {
+                    let sec_in_min = get_clock().unwrap().now().await.second() as u64;
+                    let mut d = 60 - sec_in_min % 60;
+                    while d < calendar_sleep_seconds as u64 {
+                        d += 60;
+                    }
+                    d
+                } else {
+                    calendar_sleep_seconds as u64
+                };
                 to_sleep_tips(
-                    Duration::from_secs(60),
+                    Duration::from_secs(d),
                     crate::sleep::idle_for(Duration::from_secs(calendar_sleep_seconds)),
                     true,
                 )
