@@ -89,6 +89,22 @@ const REG_CTRL2: u8 = 0x01; // bit2 TF / bit3 AF / bit0 TIE
 const REG_TIMER_CTRL: u8 = 0x0E; // bit7 TE，bits1:0 TD
 const REG_TIMER_A: u8 = 0x0F;
 
+/// 深睡前布防倒计时定时器：count 分钟后 INT 拉低（1/60Hz 分频，最大 255 分钟 ≈ 4.25 小时）。
+/// 适合天气刷新等长周期定时唤醒。
+pub async fn arm_timer_minutes(count: u8) -> bool {
+    // 停定时器 → 装载倒计时 → 清 TF/AF + 使能 TIE → 启动（TE=1，TD=1/60Hz）
+    if i2c_bus::write(ADDR, &[REG_TIMER_CTRL, 0x00]).await.is_err() {
+        return false;
+    }
+    if i2c_bus::write(ADDR, &[REG_TIMER_A, count]).await.is_err() {
+        return false;
+    }
+    if i2c_bus::write(ADDR, &[REG_CTRL2, 0x01]).await.is_err() {
+        return false;
+    }
+    i2c_bus::write(ADDR, &[REG_TIMER_CTRL, 0x83]).await.is_ok()
+}
+
 /// 深睡前布防倒计时定时器：count 秒后 INT 拉低（经 GPIO4 唤醒 CPU）。
 /// count: 1..=255（1Hz 倒计时，最长 4 分 15 秒）。
 pub async fn arm_timer_secs(count: u8) -> bool {
