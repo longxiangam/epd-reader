@@ -142,6 +142,19 @@ impl Weather {
         unsafe { now_sec - *addr_of!(WEATHER_SYNC_SECOND) > 3600 * 5 }
     }
 
+    /// 距天气数据过期还剩的秒数（0 = 已过期 / 从未同步 / 无时钟）。
+    /// 与 weather_stale 的 5h 阈值同源：天气/日历页定时唤醒睡到"该刷新"那一刻。
+    pub async fn stale_in_secs() -> u64 {
+        if !sync_weather_success() {
+            return 0;
+        }
+        let Some(clock) = get_clock() else {
+            return 0;
+        };
+        let now_sec = clock.now().await.unix_timestamp() as u64;
+        (unsafe { *addr_of!(WEATHER_SYNC_SECOND) } + 3600 * 5).saturating_sub(now_sec)
+    }
+
     pub async fn sync_weather(){
 
         if unsafe { *addr_of!(WEATHER_SYNC_SECOND) } == 0 {

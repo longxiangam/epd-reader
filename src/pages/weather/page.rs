@@ -205,9 +205,9 @@ impl Page for WeatherPage {
                     15
                 };
                 // 睡眠时长：时间显示开 → 对齐下一分钟边界（唤醒即分钟跳变）；
-                // 关 → 按配置间隔睡（刷新天气用，不关心分钟对齐）
-                let show_time = crate::storage::SyncStampStorage::show_time();
-                let d = if show_time {
+                // 关 → 距天气数据过期的剩余时间（与接口 5h 同步间隔一致，睡到
+                // 该刷新才醒）；已过期（如本轮同步失败）→ 至少 60s 后醒再试。
+                let d = if crate::storage::SyncStampStorage::show_time() {
                     let sec_in_min = get_clock().unwrap().now().await.second() as u64;
                     let mut d = 60 - sec_in_min % 60;
                     while d < min_sleep as u64 {
@@ -215,7 +215,7 @@ impl Page for WeatherPage {
                     }
                     d
                 } else {
-                    min_sleep as u64
+                    crate::weather::Weather::stale_in_secs().await.max(60)
                 };
                 to_sleep_tips(
                     Duration::from_secs(d),

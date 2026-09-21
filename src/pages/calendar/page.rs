@@ -182,9 +182,9 @@ impl Page for CalendarPage {
                 } else {
                     15
                 };
-                // 睡眠时长：时间显示开 → 对齐分钟边界；关 → 按配置间隔
-                let show_time = crate::storage::SyncStampStorage::show_time();
-                let d = if show_time {
+                // 睡眠时长：时间显示开 → 对齐下一分钟边界；关 → 距天气数据过期
+                // 的剩余时间（睡到该刷新才醒）；已过期 → 至少 60s 后醒再试。
+                let d = if crate::storage::SyncStampStorage::show_time() {
                     let sec_in_min = get_clock().unwrap().now().await.second() as u64;
                     let mut d = 60 - sec_in_min % 60;
                     while d < calendar_sleep_seconds as u64 {
@@ -192,7 +192,7 @@ impl Page for CalendarPage {
                     }
                     d
                 } else {
-                    calendar_sleep_seconds as u64
+                    crate::weather::Weather::stale_in_secs().await.max(60)
                 };
                 to_sleep_tips(
                     Duration::from_secs(d),
