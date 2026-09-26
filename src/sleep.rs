@@ -23,10 +23,19 @@ static mut TIMED_WAKE: bool = false;
 /// 定时唤醒的数据刷新窗口截止时刻（ms）：窗口内 to_sleep_tips 不放行睡眠
 /// （仅天气数据过期需要联网刷新时启用；数据新鲜则无窗口，读完温度立刻睡）
 static mut TIMED_HOLD_OFF_UNTIL: u64 = 0;
+/// 定时唤醒后用户是否按过键：置位后退出"刷完即睡"，回退普通空闲流程。
+/// 开机（set_timed_wake）清零，event::run 每次实体按键置位。
+static mut USER_TOUCHED: bool = false;
+
+/// 实体按键事件（event::run 每次按键）调用。
+pub fn mark_user_touch() {
+    unsafe { USER_TOUCHED = true; }
+}
 
 pub fn set_timed_wake(timed: bool, hold_off_ms: u64) {
     unsafe {
         TIMED_WAKE = timed;
+        USER_TOUCHED = false; // 每次开机重置：本次会话还没按过键
         TIMED_HOLD_OFF_UNTIL = if timed && hold_off_ms > 0 {
             Instant::now().as_millis() as u64 + hold_off_ms
         } else {
@@ -66,10 +75,22 @@ pub async fn to_sleep_tips(sleep_time:Duration, idle_time:Duration, show_sleep:b
     if timed_hold_off() {
         return;
     }
-    if *LAST_ACTIVE_TIME.lock().await == Instant::MAX {
-        return;
+    // 定时唤醒且用户没碰过按键：带 sleep_time>0（定时唤醒时长）的调用来自
+    // 刷新+渲染已完成的页面 → 立刻入睡，不再等空闲时间（hold-off 窗口已保证
+    // 刷新机会）。main 循环/网格页传 sleep_time=0，永不走此捷径，防止误杀
+    // 同步中的页面；用户碰过键或按钮唤醒则回退普通空闲流程。
+    let immediate = unsafe { TIMED_WAKE && !USER_TOUCHED && sleep_time.as_secs() > 0 };
+    if !immediate {
+        if *LAST_ACTIVE_TIME.lock().await == Instant::MAX {
+            return;
+        }
+        if Instant::now().duration_since(*LAST_ACTIVE_TIME.lock().await) <= idle_time {
+            return;
+        }
     }
-    if Instant::now().duration_since(*LAST_ACTIVE_TIME.lock().await) > idle_time  {
+    if immediate
+        || Instant::now().duration_since(*LAST_ACTIVE_TIME.lock().await) > idle_time
+    {
         force_stop_wifi().await;
 
         let wakeup_pins = unsafe { core::ptr::addr_of_mut!(WAKEUP_PINS).as_mut().unwrap() };

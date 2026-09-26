@@ -93,6 +93,7 @@ pub async fn run(key2: esp_hal::peripherals::GPIO4<'static>){
         }
         key_detection(&mut key_all, num).await;
         refresh_active_time().await;
+        crate::sleep::mark_user_touch();
         Timer::after_millis(10).await;
     }
 }
