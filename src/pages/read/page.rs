@@ -101,11 +101,13 @@ fn truncate_name(name: &str, max_w: i32) -> alloc::string::String {
 }
 
 // 菜单项：0=返回书单 1=收藏书签 2=打开书签 3=删除书签 4=跳转进度
-//         5=排版 6=字体 7=旋转屏幕 8=睡眠 else=取消
+//         5=排版 6=字体 7=旋转屏幕 8=睡眠 9=方向键互换 else=取消
 const MENU_ITEMS: &[&str] = &[
     "返回书单", "收藏书签", "打开书签", "删除书签", "跳转进度",
-    "排版", "字体", "旋转屏幕", "睡眠", "取消",
+    "排版", "字体", "旋转屏幕", "睡眠", "方向键互换", "取消",
 ];
+/// “方向键互换”项的菜单索引（动态显示 开/关 状态）
+const MENU_IDX_SWAP: usize = 9;
 
 enum MenuState {
     Closed,
@@ -153,6 +155,8 @@ pub struct ReadPage {
     bookmark_preview: String<ONE_PAGE_CONTENT_LEN>,
     /// 屏幕旋转状态（0..3，相对默认依次向右 +90°）。
     rotate: u8,
+    /// 阅读功能内按键 1/2 方向互换（翻页/菜单/列表全换，flash 持久化）。
+    swap_keys: bool,
     exit_selected: bool,
     jump_accel: u32,
     book_progress: Vec<String<16>, 40>,
@@ -206,6 +210,249 @@ impl ReadPage {
         let n = bytes.len().min(s.font_name.len());
         s.font_name[..n].copy_from_slice(&bytes[..n]);
         let _ = s.write();
+    }
+
+    /// 方向键短按统一入口（down=Key1 语义：向下/+1/下一页/下一本）。
+    /// “方向键互换”开启时由 bind_event 把两条物理键的 down 取值对调，
+    /// 阅读功能内（翻页/菜单/跳转/排版/字体/书签/书单）方向整体互换。
+    async fn dir_key_short(&mut self, down: bool) {
+        match self.menu_state {
+            MenuState::Popup { ref mut menu_index } => {
+                *menu_index = if down {
+                    (*menu_index + 1) % MENU_ITEMS.len() as u32
+                } else {
+                    (*menu_index + MENU_ITEMS.len() as u32 - 1) % MENU_ITEMS.len() as u32
+                };
+                self.need_render = true;
+            }
+            MenuState::JumpInput { ref mut input_pct } => {
+                if down {
+                    *input_pct = (*input_pct + 1).min(100);
+                } else {
+                    *input_pct = input_pct.saturating_sub(1);
+                }
+                self.jump_accel = 0;
+                self.need_render = true;
+            }
+            MenuState::Layout { ref mut cursor, ref mut editing } => {
+                if *editing {
+                    match *cursor {
+                        0 => {
+                            let np = if down {
+                                (self.ttf_px - 1.0).max(12.0)
+                            } else {
+                                (self.ttf_px + 1.0).min(40.0)
+                            };
+                            self.ttf_px = np;
+                            if let Some(ws) = self.ttf_ws.as_mut() {
+                                crate::ttf_sd::cache_clear(ws, np);
+                            }
+                        }
+                        1 => {
+                            self.line_gap = if down {
+                                (self.line_gap - 1).max(0)
+                            } else {
+                                (self.line_gap + 1).min(10)
+                            };
+                        }
+                        _ => {}
+                    }
+                    self.need_text_render = true;
+                } else {
+                    *cursor = if down {
+                        (*cursor + 1) % 3
+                    } else {
+                        (*cursor + 3 - 1) % 3
+                    };
+                }
+                self.need_render = true;
+            }
+            MenuState::FontList { ref mut font_index } => {
+                let max = self.font_list.len() as u32;
+                if max > 0 {
+                    *font_index = if down {
+                        (*font_index + 1) % max
+                    } else {
+                        (*font_index + max - 1) % max
+                    };
+                    self.need_render = true;
+                }
+            }
+            MenuState::BookmarkList { ref mut bm_index, .. } => {
+                let bm_count = self
+                    .log_vec
+                    .as_ref()
+                    .map(|lv| if lv.len() > 0 { lv.len() - 1 } else { 0 })
+                    .unwrap_or(0) as u32;
+                if (down && *bm_index < bm_count) || (!down && *bm_index > 0) {
+                    if down {
+                        *bm_index += 1;
+                    } else {
+                        *bm_index -= 1;
+                    }
+                    self.need_load_preview = true;
+                    self.need_render = true;
+                }
+            }
+            MenuState::Closed => {
+                if self.reading {
+                    self.do_change_page(down).await;
+                } else if down {
+                    if self.exit_selected {
+                        self.exit_selected = false;
+                        self.choose_index = 0;
+                    } else {
+                        let max = self.menus.as_ref().map(|m| m.len()).unwrap_or(0);
+                        if max > 0 {
+                            if self.choose_index < (max - 1) as u32 {
+                                self.choose_index += 1;
+                            } else {
+                                self.exit_selected = true;
+                            }
+                        }
+                    }
+                    self.need_render = true;
+                } else {
+                    if self.exit_selected {
+                        let max = self.menus.as_ref().map(|m| m.len()).unwrap_or(0);
+                        if max > 0 {
+                            self.exit_selected = false;
+                            self.choose_index = (max - 1) as u32;
+                        }
+                    } else if self.choose_index > 0 {
+                        self.choose_index -= 1;
+                    } else {
+                        self.exit_selected = true;
+                    }
+                    self.need_render = true;
+                }
+            }
+        }
+    }
+
+    /// 方向键长按连发统一入口（down=Key1 语义）。注意：排版编辑时长按的
+    /// 字号/行距增减方向与短按相反——原有行为，保持不变。
+    async fn dir_key_long(&mut self, down: bool) {
+        match self.menu_state {
+            MenuState::Popup { ref mut menu_index } => {
+                *menu_index = if down {
+                    (*menu_index + 1) % MENU_ITEMS.len() as u32
+                } else {
+                    (*menu_index + MENU_ITEMS.len() as u32 - 1) % MENU_ITEMS.len() as u32
+                };
+                self.need_render = true;
+                Timer::after_millis(200).await;
+            }
+            MenuState::JumpInput { ref mut input_pct } => {
+                let step = accel_step(self.jump_accel);
+                self.jump_accel += 1;
+                if down {
+                    let np = (*input_pct as u32).saturating_add(step).min(100);
+                    *input_pct = np as u8;
+                } else {
+                    let np = (*input_pct as u32).saturating_sub(step);
+                    *input_pct = np as u8;
+                }
+                self.need_render = true;
+                Timer::after_millis(75).await;
+            }
+            MenuState::Layout { ref cursor, ref editing } => {
+                if *editing {
+                    match *cursor {
+                        0 => {
+                            let np = if down {
+                                (self.ttf_px + 1.0).min(40.0)
+                            } else {
+                                (self.ttf_px - 1.0).max(12.0)
+                            };
+                            self.ttf_px = np;
+                            if let Some(ws) = self.ttf_ws.as_mut() {
+                                crate::ttf_sd::cache_clear(ws, np);
+                            }
+                        }
+                        1 => {
+                            self.line_gap = if down {
+                                (self.line_gap + 1).min(10)
+                            } else {
+                                (self.line_gap - 1).max(0)
+                            };
+                        }
+                        _ => {}
+                    }
+                    self.need_text_render = true;
+                    self.need_render = true;
+                    Timer::after_millis(150).await;
+                }
+            }
+            MenuState::FontList { ref mut font_index } => {
+                let max = self.font_list.len() as u32;
+                if max > 0 {
+                    *font_index = if down {
+                        (*font_index + 1) % max
+                    } else {
+                        (*font_index + max - 1) % max
+                    };
+                    self.need_render = true;
+                    Timer::after_millis(150).await;
+                }
+            }
+            MenuState::BookmarkList { ref mut bm_index, .. } => {
+                let bm_count = self
+                    .log_vec
+                    .as_ref()
+                    .map(|lv| if lv.len() > 0 { lv.len() - 1 } else { 0 })
+                    .unwrap_or(0) as u32;
+                if (down && *bm_index < bm_count) || (!down && *bm_index > 0) {
+                    if down {
+                        *bm_index += 1;
+                    } else {
+                        *bm_index -= 1;
+                    }
+                    self.need_load_preview = true;
+                    self.need_render = true;
+                    Timer::after_millis(200).await;
+                }
+            }
+            MenuState::Closed => {
+                if !self.reading {
+                    if down {
+                        if self.exit_selected {
+                            self.exit_selected = false;
+                            self.choose_index = 0;
+                        } else {
+                            let max = self.menus.as_ref().map(|m| m.len()).unwrap_or(0);
+                            if max > 0 && self.choose_index < (max - 1) as u32 {
+                                self.choose_index += 1;
+                            } else if max > 0 {
+                                self.exit_selected = true;
+                            }
+                        }
+                        display::reset_render_times();
+                        self.need_render = true;
+                        Timer::after_millis(200).await;
+                    } else if self.exit_selected {
+                        let max = self.menus.as_ref().map(|m| m.len()).unwrap_or(0);
+                        if max > 0 {
+                            self.exit_selected = false;
+                            self.choose_index = (max - 1) as u32;
+                            display::reset_render_times();
+                            self.need_render = true;
+                            Timer::after_millis(200).await;
+                        }
+                    } else if self.choose_index > 0 {
+                        self.choose_index -= 1;
+                        display::reset_render_times();
+                        self.need_render = true;
+                        Timer::after_millis(200).await;
+                    } else {
+                        self.exit_selected = true;
+                        display::reset_render_times();
+                        self.need_render = true;
+                        Timer::after_millis(200).await;
+                    }
+                }
+            }
+        }
     }
 
     /// 跳到指定字节偏移（跳转进度/书签）。清历史、保存续读偏移、触发渲染。
@@ -555,7 +802,15 @@ impl ReadPage {
                 .draw(display)
                 .ok();
 
-                for (i, label) in MENU_ITEMS.iter().enumerate() {
+                // “方向键互换”项动态拼接当前开关状态，其余项用静态文案
+                let labels: [&str; MENU_ITEMS.len()] = core::array::from_fn(|i| {
+                    if i == MENU_IDX_SWAP {
+                        if self.swap_keys { "方向键互换: 开" } else { "方向键互换: 关" }
+                    } else {
+                        MENU_ITEMS[i]
+                    }
+                });
+                for (i, label) in labels.iter().enumerate() {
                     let item_y = menu_y + menu_padding as i32 + (i as u32 * menu_item_height) as i32;
                     let is_selected = i as u32 == menu_index;
                     if is_selected {
@@ -1231,6 +1486,7 @@ impl Page for ReadPage {
         let ttf_px = settings.ttf_px.max(12).min(40) as f32;
         let line_gap = (settings.line_gap as i32).max(0).min(10);
         let rotate = settings.rotate % 4;
+        let swap_keys = crate::storage::read_reading_swap_keys();
         let mut font_name: String<32> = String::new();
         let fname = settings.font_name_str();
         if is_ttf(fname) || is_bitmap(fname) {
@@ -1256,6 +1512,7 @@ impl Page for ReadPage {
             need_reload_progress: false,
             bookmark_preview: String::new(),
             rotate,
+            swap_keys,
             exit_selected: false,
             jump_accel: 0,
             book_progress: Vec::new(),
@@ -2051,7 +2308,14 @@ impl Page for ReadPage {
                                 crate::sleep::to_sleep_tips(Duration::from_secs(0), Duration::from_secs(0), true).await;
                                 return;
                             }
-                            _ => {} // 9 = 取消
+                            9 => {
+                                // 方向键互换：切换开关，保持菜单打开便于确认状态
+                                mut_ref.swap_keys = !mut_ref.swap_keys;
+                                crate::storage::write_reading_swap_keys(mut_ref.swap_keys);
+                                mut_ref.need_render = true;
+                                return;
+                            }
+                            _ => {} // 10 = 取消
                         }
                         mut_ref.menu_state = MenuState::Closed;
                         mut_ref.need_render = true;
@@ -2144,310 +2408,42 @@ impl Page for ReadPage {
         })
         .await;
 
-        // Key1 long hold: 向下滚动 / 加速跳转 / 下一项
+        // Key1 long hold: 向下滚动 / 加速跳转 / 下一项（“方向键互换”开 → 向上）
         event::on_target(EventType::KeyLongIng(1), Self::mut_to_ptr(self), move |info| {
             return Box::pin(async move {
                 let mut_ref: &mut Self = Self::mut_by_ptr(info.ptr).unwrap();
-                match mut_ref.menu_state {
-                    MenuState::Popup { ref mut menu_index } => {
-                        *menu_index = (*menu_index + 1) % MENU_ITEMS.len() as u32;
-                        mut_ref.need_render = true;
-                        Timer::after_millis(200).await;
-                    }
-                    MenuState::JumpInput { ref mut input_pct } => {
-                        let step = accel_step(mut_ref.jump_accel);
-                        mut_ref.jump_accel += 1;
-                        let np = (*input_pct as u32).saturating_add(step).min(100);
-                        *input_pct = np as u8;
-                        mut_ref.need_render = true;
-                        Timer::after_millis(75).await;
-                    }
-                    MenuState::Layout { ref cursor, ref editing } => {
-                        if *editing {
-                            match *cursor {
-                                0 => {
-                                    let np = (mut_ref.ttf_px + 1.0).min(40.0);
-                                    mut_ref.ttf_px = np;
-                                    if let Some(ws) = mut_ref.ttf_ws.as_mut() {
-                                        crate::ttf_sd::cache_clear(ws, np);
-                                    }
-                                }
-                                1 => { mut_ref.line_gap = (mut_ref.line_gap + 1).min(10); }
-                                _ => {}
-                            }
-                            mut_ref.need_text_render = true;
-                            mut_ref.need_render = true;
-                            Timer::after_millis(150).await;
-                        }
-                    }
-                    MenuState::FontList { ref mut font_index } => {
-                        let max = mut_ref.font_list.len() as u32;
-                        if max > 0 {
-                            *font_index = (*font_index + 1) % max;
-                            mut_ref.need_render = true;
-                            Timer::after_millis(150).await;
-                        }
-                    }
-                    MenuState::BookmarkList { ref mut bm_index, deleting } => {
-                        let bm_count = mut_ref
-                            .log_vec
-                            .as_ref()
-                            .map(|lv| if lv.len() > 0 { lv.len() - 1 } else { 0 })
-                            .unwrap_or(0) as u32;
-                        if *bm_index < bm_count {
-                            *bm_index += 1;
-                            mut_ref.need_load_preview = true;
-                            mut_ref.need_render = true;
-                            Timer::after_millis(200).await;
-                        }
-                    }
-                    MenuState::Closed => {
-                        if !mut_ref.reading {
-                            if mut_ref.exit_selected {
-                                mut_ref.exit_selected = false;
-                                mut_ref.choose_index = 0;
-                            } else {
-                                let max = mut_ref.menus.as_ref().map(|m| m.len()).unwrap_or(0);
-                                if max > 0 && mut_ref.choose_index < (max - 1) as u32 {
-                                    mut_ref.choose_index += 1;
-                                } else if max > 0 {
-                                    mut_ref.exit_selected = true;
-                                }
-                            }
-                            display::reset_render_times();
-                            mut_ref.need_render = true;
-                            Timer::after_millis(200).await;
-                        }
-                    }
-                }
+                let down = !mut_ref.swap_keys;
+                mut_ref.dir_key_long(down).await;
             });
         })
         .await;
 
-        // Key2 long hold: 向上滚动 / 加速跳转 / 上一项
+        // Key2 long hold: 向上滚动 / 加速跳转 / 上一项（“方向键互换”开 → 向下）
         event::on_target(EventType::KeyLongIng(2), Self::mut_to_ptr(self), move |info| {
             return Box::pin(async move {
                 let mut_ref: &mut Self = Self::mut_by_ptr(info.ptr).unwrap();
-                match mut_ref.menu_state {
-                    MenuState::Popup { ref mut menu_index } => {
-                        *menu_index = (*menu_index + MENU_ITEMS.len() as u32 - 1) % MENU_ITEMS.len() as u32;
-                        mut_ref.need_render = true;
-                        Timer::after_millis(200).await;
-                    }
-                    MenuState::JumpInput { ref mut input_pct } => {
-                        let step = accel_step(mut_ref.jump_accel);
-                        mut_ref.jump_accel += 1;
-                        let np = (*input_pct as u32).saturating_sub(step);
-                        *input_pct = np as u8;
-                        mut_ref.need_render = true;
-                        Timer::after_millis(75).await;
-                    }
-                    MenuState::Layout { ref cursor, ref editing } => {
-                        if *editing {
-                            match *cursor {
-                                0 => {
-                                    let np = (mut_ref.ttf_px - 1.0).max(12.0);
-                                    mut_ref.ttf_px = np;
-                                    if let Some(ws) = mut_ref.ttf_ws.as_mut() {
-                                        crate::ttf_sd::cache_clear(ws, np);
-                                    }
-                                }
-                                1 => { mut_ref.line_gap = (mut_ref.line_gap - 1).max(0); }
-                                _ => {}
-                            }
-                            mut_ref.need_text_render = true;
-                            mut_ref.need_render = true;
-                            Timer::after_millis(150).await;
-                        }
-                    }
-                    MenuState::FontList { ref mut font_index } => {
-                        let max = mut_ref.font_list.len() as u32;
-                        if max > 0 {
-                            *font_index = (*font_index + max - 1) % max;
-                            mut_ref.need_render = true;
-                            Timer::after_millis(150).await;
-                        }
-                    }
-                    MenuState::BookmarkList { ref mut bm_index, deleting } => {
-                        if *bm_index > 0 {
-                            *bm_index -= 1;
-                            mut_ref.need_load_preview = true;
-                            mut_ref.need_render = true;
-                            Timer::after_millis(200).await;
-                        }
-                    }
-                    MenuState::Closed => {
-                        if !mut_ref.reading {
-                            if mut_ref.exit_selected {
-                                let max = mut_ref.menus.as_ref().map(|m| m.len()).unwrap_or(0);
-                                if max > 0 {
-                                    mut_ref.exit_selected = false;
-                                    mut_ref.choose_index = (max - 1) as u32;
-                                    display::reset_render_times();
-                                    mut_ref.need_render = true;
-                                    Timer::after_millis(200).await;
-                                }
-                            } else if mut_ref.choose_index > 0 {
-                                mut_ref.choose_index -= 1;
-                                display::reset_render_times();
-                                mut_ref.need_render = true;
-                                Timer::after_millis(200).await;
-                            } else {
-                                mut_ref.exit_selected = true;
-                                display::reset_render_times();
-                                mut_ref.need_render = true;
-                                Timer::after_millis(200).await;
-                            }
-                        }
-                    }
-                }
+                let down = mut_ref.swap_keys;
+                mut_ref.dir_key_long(down).await;
             });
         })
         .await;
 
-        // Key1 short: 向下 / +1 / 下一页 / 下一本
+        // Key1 short: 向下 / +1 / 下一页 / 下一本（“方向键互换”开 → 向上）
         event::on_target(EventType::KeyShort(1), Self::mut_to_ptr(self), move |info| {
             return Box::pin(async move {
                 let mut_ref: &mut Self = Self::mut_by_ptr(info.ptr).unwrap();
-                match mut_ref.menu_state {
-                    MenuState::Popup { ref mut menu_index } => {
-                        *menu_index = (*menu_index + 1) % MENU_ITEMS.len() as u32;
-                        mut_ref.need_render = true;
-                    }
-                    MenuState::JumpInput { ref mut input_pct } => {
-                        *input_pct = (*input_pct + 1).min(100);
-                        mut_ref.jump_accel = 0;
-                        mut_ref.need_render = true;
-                    }
-                    MenuState::Layout { ref mut cursor, ref mut editing } => {
-                        if *editing {
-                            match *cursor {
-                                0 => {
-                                    let np = (mut_ref.ttf_px - 1.0).max(12.0);
-                                    mut_ref.ttf_px = np;
-                                    if let Some(ws) = mut_ref.ttf_ws.as_mut() {
-                                        crate::ttf_sd::cache_clear(ws, np);
-                                    }
-                                }
-                                1 => { mut_ref.line_gap = (mut_ref.line_gap - 1).max(0); }
-                                _ => {}
-                            }
-                            mut_ref.need_text_render = true;
-                        } else {
-                            *cursor = (*cursor + 1) % 3; // Key1=下：0→1→2→0
-                        }
-                        mut_ref.need_render = true;
-                    }
-                    MenuState::FontList { ref mut font_index } => {
-                        let max = mut_ref.font_list.len() as u32;
-                        if max > 0 {
-                            *font_index = (*font_index + 1) % max;
-                            mut_ref.need_render = true;
-                        }
-                    }
-                    MenuState::BookmarkList { ref mut bm_index, deleting } => {
-                        let bm_count = mut_ref
-                            .log_vec
-                            .as_ref()
-                            .map(|lv| if lv.len() > 0 { lv.len() - 1 } else { 0 })
-                            .unwrap_or(0) as u32;
-                        if *bm_index < bm_count {
-                            *bm_index += 1;
-                            mut_ref.need_load_preview = true;
-                            mut_ref.need_render = true;
-                        }
-                    }
-                    MenuState::Closed => {
-                        if mut_ref.reading {
-                            mut_ref.do_change_page(true).await;
-                        } else if mut_ref.exit_selected {
-                            mut_ref.exit_selected = false;
-                            mut_ref.choose_index = 0;
-                            mut_ref.need_render = true;
-                        } else {
-                            let max = mut_ref.menus.as_ref().map(|m| m.len()).unwrap_or(0);
-                            if max > 0 {
-                                if mut_ref.choose_index < (max - 1) as u32 {
-                                    mut_ref.choose_index += 1;
-                                } else {
-                                    mut_ref.exit_selected = true;
-                                }
-                            }
-                            mut_ref.need_render = true;
-                        }
-                    }
-                }
+                let down = !mut_ref.swap_keys;
+                mut_ref.dir_key_short(down).await;
             });
         })
         .await;
 
-        // Key2 short: 向上 / -1 / 上一页 / 上一本
+        // Key2 short: 向上 / -1 / 上一页 / 上一本（“方向键互换”开 → 向下）
         event::on_target(EventType::KeyShort(2), Self::mut_to_ptr(self), move |info| {
             return Box::pin(async move {
                 let mut_ref: &mut Self = Self::mut_by_ptr(info.ptr).unwrap();
-                match mut_ref.menu_state {
-                    MenuState::Popup { ref mut menu_index } => {
-                        *menu_index = (*menu_index + MENU_ITEMS.len() as u32 - 1) % MENU_ITEMS.len() as u32;
-                        mut_ref.need_render = true;
-                    }
-                    MenuState::JumpInput { ref mut input_pct } => {
-                        *input_pct = input_pct.saturating_sub(1);
-                        mut_ref.jump_accel = 0;
-                        mut_ref.need_render = true;
-                    }
-                    MenuState::Layout { ref mut cursor, ref mut editing } => {
-                        if *editing {
-                            match *cursor {
-                                0 => {
-                                    let np = (mut_ref.ttf_px + 1.0).min(40.0);
-                                    mut_ref.ttf_px = np;
-                                    if let Some(ws) = mut_ref.ttf_ws.as_mut() {
-                                        crate::ttf_sd::cache_clear(ws, np);
-                                    }
-                                }
-                                1 => { mut_ref.line_gap = (mut_ref.line_gap + 1).min(10); }
-                                _ => {}
-                            }
-                            mut_ref.need_text_render = true;
-                        } else {
-                            *cursor = (*cursor + 3 - 1) % 3; // Key2=上：0→2→1→0
-                        }
-                        mut_ref.need_render = true;
-                    }
-                    MenuState::FontList { ref mut font_index } => {
-                        let max = mut_ref.font_list.len() as u32;
-                        if max > 0 {
-                            *font_index = (*font_index + max - 1) % max;
-                            mut_ref.need_render = true;
-                        }
-                    }
-                    MenuState::BookmarkList { ref mut bm_index, deleting } => {
-                        if *bm_index > 0 {
-                            *bm_index -= 1;
-                            mut_ref.need_load_preview = true;
-                            mut_ref.need_render = true;
-                        }
-                    }
-                    MenuState::Closed => {
-                        if mut_ref.reading {
-                            mut_ref.do_change_page(false).await;
-                        } else if mut_ref.exit_selected {
-                            let max = mut_ref.menus.as_ref().map(|m| m.len()).unwrap_or(0);
-                            if max > 0 {
-                                mut_ref.exit_selected = false;
-                                mut_ref.choose_index = (max - 1) as u32;
-                            }
-                            mut_ref.need_render = true;
-                        } else {
-                            if mut_ref.choose_index > 0 {
-                                mut_ref.choose_index -= 1;
-                            } else {
-                                mut_ref.exit_selected = true;
-                            }
-                            mut_ref.need_render = true;
-                        }
-                    }
-                }
+                let down = mut_ref.swap_keys;
+                mut_ref.dir_key_short(down).await;
             });
         })
         .await;

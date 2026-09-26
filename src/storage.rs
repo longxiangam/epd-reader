@@ -377,6 +377,38 @@ pub fn write_sleep_page(page: i32) {
     let _ = sp.write();
 }
 
+/// 阅读页按键偏好（追加在存储链末尾；勿改动既有结构——那会挪动后续偏移）
+#[derive(Debug, Clone, Copy)]
+pub struct ReadingFlagsStorage {
+    pub magic: u32,    // 0x50475357 = "PGSW"
+    pub swap_keys: u8, // 1 = 阅读功能内按键 1/2 方向互换
+}
+
+impl Default for ReadingFlagsStorage {
+    fn default() -> Self {
+        Self { magic: 0, swap_keys: 0 }
+    }
+}
+
+impl ReadingFlagsStorage {
+    pub const MAGIC: u32 = 0x5047_5357;
+}
+
+const READING_FLAGS_OFFSET: usize = SLEEP_PAGE_OFFSET + size_of::<SleepPageStorage>();
+impl_storage!(ReadingFlagsStorage, READING_FLAGS_OFFSET);
+
+/// 阅读时按键 1/2 翻页方向是否互换
+pub fn read_reading_swap_keys() -> bool {
+    matches!(ReadingFlagsStorage::read(), Ok(s) if s.magic == ReadingFlagsStorage::MAGIC && s.swap_keys != 0)
+}
+
+pub fn write_reading_swap_keys(v: bool) {
+    let mut s = ReadingFlagsStorage::read().unwrap_or_default();
+    s.magic = ReadingFlagsStorage::MAGIC;
+    s.swap_keys = if v { 1 } else { 0 };
+    let _ = s.write();
+}
+
 // 为 HolidayStorage 手动实现 NvsStorage，使用分块写入避免栈溢出
 impl NvsStorage for HolidayStorage {
     fn read() -> Result<Self, FlashStorageError> {
