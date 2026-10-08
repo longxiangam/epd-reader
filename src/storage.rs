@@ -397,6 +397,41 @@ impl ReadingFlagsStorage {
 const READING_FLAGS_OFFSET: usize = SLEEP_PAGE_OFFSET + size_of::<SleepPageStorage>();
 impl_storage!(ReadingFlagsStorage, READING_FLAGS_OFFSET);
 
+/// 阅读排版·笔画加粗系数（追加在存储链末尾；勿动既有结构——那会挪动后续偏移）
+#[derive(Debug, Clone, Copy)]
+pub struct StrokeConfigStorage {
+    pub magic: u32,    // 0x53544B45 = "STKE"
+    pub weight_x10: u8, // 加粗系数 ×10（10..=30 即 ×1.0~×3.0，默认 10；像素判定 覆盖率×系数≥0.35）
+}
+
+impl Default for StrokeConfigStorage {
+    fn default() -> Self {
+        Self { magic: 0, weight_x10: 10 }
+    }
+}
+
+impl StrokeConfigStorage {
+    pub const MAGIC: u32 = 0x5354_4B45;
+}
+
+const STROKE_CONFIG_OFFSET: usize = READING_FLAGS_OFFSET + size_of::<ReadingFlagsStorage>();
+impl_storage!(StrokeConfigStorage, STROKE_CONFIG_OFFSET);
+
+/// 读笔画加粗系数（×10；无效/未设置 → 10）
+pub fn read_stroke_weight() -> u8 {
+    match StrokeConfigStorage::read() {
+        Ok(s) if s.magic == StrokeConfigStorage::MAGIC && (10..=30).contains(&s.weight_x10) => s.weight_x10,
+        _ => 10,
+    }
+}
+
+pub fn write_stroke_weight(weight_x10: u8) {
+    let mut s = StrokeConfigStorage::read().unwrap_or_default();
+    s.magic = StrokeConfigStorage::MAGIC;
+    s.weight_x10 = weight_x10.clamp(10, 30);
+    let _ = s.write();
+}
+
 /// 阅读时按键 1/2 翻页方向是否互换
 pub fn read_reading_swap_keys() -> bool {
     matches!(ReadingFlagsStorage::read(), Ok(s) if s.magic == ReadingFlagsStorage::MAGIC && s.swap_keys != 0)

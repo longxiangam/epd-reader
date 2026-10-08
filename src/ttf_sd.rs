@@ -516,6 +516,20 @@ fn parse_glyph(
 
 // ── 光栅化（ab_glyph_rasterizer：自适应贝塞尔展平 + 精确像素覆盖率）──
 
+/// 笔画加粗系数（≥1）：像素置位判定为 `覆盖率 × 系数 ≥ 0.35`。
+/// 乘法对低覆盖度的细笔画（横线/细横）提升显著——修复断墨；
+/// 大片墨区早已饱和不受影响，边缘只轻微增宽。默认 1.0（原始 0.35 阈值）。
+/// 排版菜单"笔画"项可调，存 StrokeConfigStorage。
+static mut STROKE_WEIGHT: f32 = 1.0;
+
+pub fn set_stroke_weight(w: f32) {
+    unsafe { STROKE_WEIGHT = w.clamp(1.0, 3.0) };
+}
+
+fn stroke_weight() -> f32 {
+    unsafe { STROKE_WEIGHT }
+}
+
 /// 字形像素度量：font-unit 包围盒 → 像素 `(gw, gh, yoff)` + 缩放系数 `sc`。
 /// `yoff` = 位图 top 相对行顶的偏移，用于基线对齐：
 /// CJK（字形顶≈升部）→ yoff≈0 贴行顶；标点（顶小）→ 下沉到基线。
@@ -618,7 +632,7 @@ fn rasterize_to_bitmap(
     build_outline(&mut ras, ws, npt, ncon, bbox, sc);
     let mut bmp = [0u8; MAX_SLOT_BYTES];
     ras.for_each_pixel_2d(|x, y, coverage| {
-        if coverage >= 0.35 {
+        if coverage * stroke_weight() >= 0.35 {
             bmp[y as usize * rowbytes + x as usize / 8] |= 0x80u8 >> (x % 8);
         }
     });
@@ -636,7 +650,7 @@ fn rasterize_to_display<D: DrawTarget<Color = BinaryColor>>(
     build_outline(&mut ras, ws, npt, ncon, bbox, sc);
     let oy = row_top + yoff as i32;
     ras.for_each_pixel_2d(|x, y, coverage| {
-        if coverage >= 0.35 {
+        if coverage * stroke_weight() >= 0.35 {
             let _ = display.draw_iter(core::iter::once(Pixel(
                 Point::new(ox + x as i32, oy + y as i32), color,
             )));
