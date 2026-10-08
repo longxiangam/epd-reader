@@ -105,14 +105,14 @@ fn truncate_name(name: &str, max_w: i32) -> alloc::string::String {
     out
 }
 
-// 菜单项：0=返回书单 1=书签 2=跳转进度 3=排版 4=字体 5=旋转屏幕 6=睡眠
-//         7=方向键互换 else=取消
+// 菜单项：0=返回书单 1=书签 2=跳转进度 3=排版 4=字体 5=旋转屏幕
+//         6=方向键互换 7=睡眠 else=取消
 const MENU_ITEMS: &[&str] = &[
     "返回书单", "书签", "跳转进度",
-    "排版", "字体", "旋转屏幕", "睡眠", "方向键互换", "取消",
+    "排版", "字体", "旋转屏幕", "方向键互换", "睡眠", "取消",
 ];
 /// “方向键互换”项的菜单索引（动态显示 开/关 状态）
-const MENU_IDX_SWAP: usize = 7;
+const MENU_IDX_SWAP: usize = 6;
 
 enum MenuState {
     Closed,
@@ -2773,15 +2773,15 @@ impl Page for ReadPage {
                                 return;
                             }
                             6 => {
-                                crate::sleep::refresh_active_time().await;
-                                crate::sleep::to_sleep_tips(Duration::from_secs(0), Duration::from_secs(0), true).await;
-                                return;
-                            }
-                            7 => {
                                 // 方向键互换：切换开关，保持菜单打开便于确认状态
                                 mut_ref.swap_keys = !mut_ref.swap_keys;
                                 crate::storage::write_reading_swap_keys(mut_ref.swap_keys);
                                 mut_ref.need_render = true;
+                                return;
+                            }
+                            7 => {
+                                crate::sleep::refresh_active_time().await;
+                                crate::sleep::to_sleep_tips(Duration::from_secs(0), Duration::from_secs(0), true).await;
                                 return;
                             }
                             _ => {} // 8 = 取消
