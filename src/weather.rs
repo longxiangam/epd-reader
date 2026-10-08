@@ -218,12 +218,33 @@ impl HolidayInfo {
                 let mut request = RequestClient::new(v).await;
                 println!("开始请求节假日");
                 let current_year =  get_clock().unwrap().now().await.year() as u32;
+                // 境内直连 raw.githubusercontent.com 会被 SNI 阻断（TLS 握手即被 RST，
+                // 表现为 TlsError(Io(ConnectionReset))）。先走 jsDelivr CDN 镜像（同一份
+                // holiday-cn 数据），全部失败再回落源站（境外设备仍可用）。
+                let urls = [
+                    format!("https://cdn.jsdelivr.net/gh/NateScarlet/holiday-cn@master/{}.json", current_year),
+                    format!("https://fastly.jsdelivr.net/gh/NateScarlet/holiday-cn@master/{}.json", current_year),
+                    format!("https://raw.githubusercontent.com/NateScarlet/holiday-cn/master/{}.json", current_year),
+                ];
                 crate::wifi::set_request_loading(true);
-                let result = request.send_request(format!("https://raw.githubusercontent.com/NateScarlet/holiday-cn/master/{}.json",current_year).as_str()).await;
+                let mut response = None;
+                let mut last_err = None;
+                for url in urls.iter() {
+                    match request.send_request(url.as_str()).await {
+                        Ok(resp) => {
+                            response = Some(resp);
+                            break;
+                        }
+                        Err(e) => {
+                            println!("节假日源 {} 失败: {:?}", url, e);
+                            last_err = Some(e);
+                        }
+                    }
+                }
                 crate::wifi::set_request_loading(false);
-            
-                match result {
-                    Ok(response) => {
+
+                match response {
+                    Some(response) => {
                         let holiday_result = form_json_each(&response.data[..response.length]);
 
                         if let Some(mut v) = holiday_result {
@@ -242,9 +263,9 @@ impl HolidayInfo {
                             Err(())
                         }
                     }
-                    Err(e) => {
+                    None => {
                         finish_wifi().await;
-                        println!("节假日请求失败{:?}", e);
+                        println!("节假日请求失败{:?}", last_err);
                         Err(())
                     }
                 }
