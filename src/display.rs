@@ -298,6 +298,12 @@ pub fn reset_render_times(){
 }
 
 /// 读取并复位冷启动清屏标记（仅冷启动首帧返回 true）
+/// 强制下一帧全刷：非定时唤醒（按钮/上电）进入程序时调用，
+/// 清掉上一会话留在面板上的残影；定时唤醒保持快刷（闪烁小、省电）。
+pub fn mark_need_clear() {
+    unsafe { core::ptr::addr_of_mut!(NEED_CLEAR).write(true); }
+}
+
 pub fn take_need_clear() -> bool {
     unsafe {
         let v = core::ptr::addr_of!(NEED_CLEAR).read();

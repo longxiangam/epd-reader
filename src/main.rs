@@ -202,6 +202,11 @@ async fn main(spawner: Spawner) -> ! {
     // 数据新鲜则无窗口：读完温度重绘后立刻回睡
     let stale = crate::weather::Weather::weather_stale().await;
     crate::sleep::set_timed_wake(timed_wake, if stale { 8_000 } else { 0 });
+    // 非定时唤醒（按钮/上电）进入程序：首帧强制全刷，清上一会话残影；
+    // 定时唤醒保持快刷（分钟级唤醒每次全刷会闪烁+耗电）。
+    if !timed_wake {
+        crate::display::mark_need_clear();
+    }
     println!(
         "[wake] pcf timer={} timed_wake={} stale={} reason={:?}",
         timed_wake, timed_wake, stale, wake_reason
