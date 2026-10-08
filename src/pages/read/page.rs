@@ -105,14 +105,14 @@ fn truncate_name(name: &str, max_w: i32) -> alloc::string::String {
     out
 }
 
-// 菜单项：0=返回书单 1=收藏书签 2=打开书签 3=删除书签 4=跳转进度
-//         5=排版 6=字体 7=旋转屏幕 8=睡眠 9=方向键互换 else=取消
+// 菜单项：0=返回书单 1=书签 2=跳转进度 3=排版 4=字体 5=旋转屏幕 6=睡眠
+//         7=方向键互换 else=取消
 const MENU_ITEMS: &[&str] = &[
-    "返回书单", "收藏书签", "打开书签", "删除书签", "跳转进度",
+    "返回书单", "书签", "跳转进度",
     "排版", "字体", "旋转屏幕", "睡眠", "方向键互换", "取消",
 ];
 /// “方向键互换”项的菜单索引（动态显示 开/关 状态）
-const MENU_IDX_SWAP: usize = 9;
+const MENU_IDX_SWAP: usize = 7;
 
 enum MenuState {
     Closed,
@@ -121,7 +121,10 @@ enum MenuState {
     /// 排版：cursor 0=字号 1=行距 2=返回；editing=true 时上下键改值。
     Layout { cursor: u8, editing: bool },
     FontList { font_index: u32 },
-    BookmarkList { bm_index: u32, deleting: bool },
+    /// 书签列表：bm_index 0=收藏书签 1..=n=书签 n+1=取消
+    BookmarkList { bm_index: u32 },
+    /// 书签操作弹层：bm_index=列表行号（书签序号+1），action 0=打开 1=删除
+    BookmarkAction { bm_index: u32, action: u32 },
 }
 
 /// 菜单状态→id（只区分变体，不区分内部 cursor/index）。
@@ -134,6 +137,7 @@ fn menu_state_id(s: &MenuState) -> u8 {
         MenuState::Layout { .. } => 3,
         MenuState::FontList { .. } => 4,
         MenuState::BookmarkList { .. } => 5,
+        MenuState::BookmarkAction { .. } => 6,
     }
 }
 
@@ -214,6 +218,8 @@ pub struct ReadPage {
     ttf_px: f32,
     /// 行间距（像素，叠加在 fi.line_height 之上）。
     line_gap: i32,
+    /// 笔画加粗系数 ×10（10~30 即 ×1.0~×3.0）：修细笔画断墨。
+    stroke_w: u8,
     /// TTF 渲染工作区（堆分配，进阅读创建、退出释放）。
     ttf_ws: Option<&'static mut crate::ttf_sd::TtfWs>,
     /// 续读标志：get_page_vec 据此保留预置的 ttf_offset（不清零），
@@ -289,14 +295,27 @@ impl ReadPage {
                                 (self.line_gap + 1).min(10)
                             };
                         }
+                        2 => {
+                            // 笔画加粗系数：修复细笔画断墨，调高整体增粗
+                            self.stroke_w = if down {
+                                self.stroke_w.saturating_sub(1).max(10)
+                            } else {
+                                (self.stroke_w + 1).min(30)
+                            };
+                            crate::ttf_sd::set_stroke_weight(self.stroke_w as f32 / 10.0);
+                            if let Some(ws) = self.ttf_ws.as_mut() {
+                                crate::ttf_sd::cache_clear(ws, self.ttf_px);
+                            }
+                            crate::storage::write_stroke_weight(self.stroke_w);
+                        }
                         _ => {}
                     }
                     self.need_text_render = true;
                 } else {
                     *cursor = if down {
-                        (*cursor + 1) % 3
+                        (*cursor + 1) % 5
                     } else {
-                        (*cursor + 3 - 1) % 3
+                        (*cursor + 5 - 1) % 5
                     };
                 }
                 self.need_render = true;
@@ -318,7 +337,8 @@ impl ReadPage {
                     .as_ref()
                     .map(|lv| if lv.len() > 0 { lv.len() - 1 } else { 0 })
                     .unwrap_or(0) as u32;
-                if (down && *bm_index < bm_count) || (!down && *bm_index > 0) {
+                let max_row = bm_count + 1; // 收藏(0) + 书签(1..=n) + 取消(n+1)
+                if (down && *bm_index < max_row) || (!down && *bm_index > 0) {
                     if down {
                         *bm_index += 1;
                     } else {
@@ -327,6 +347,11 @@ impl ReadPage {
                     self.need_load_preview = true;
                     self.need_render = true;
                 }
+            }
+            MenuState::BookmarkAction { ref mut action, .. } => {
+                // 打开/删除 两行循环
+                *action = 1 - *action;
+                self.need_render = true;
             }
             MenuState::Closed => {
                 if self.reading {
@@ -411,6 +436,18 @@ impl ReadPage {
                                 (self.line_gap - 1).max(-10)
                             };
                         }
+                        2 => {
+                            self.stroke_w = if down {
+                                (self.stroke_w + 1).min(30)
+                            } else {
+                                self.stroke_w.saturating_sub(1).max(10)
+                            };
+                            crate::ttf_sd::set_stroke_weight(self.stroke_w as f32 / 10.0);
+                            if let Some(ws) = self.ttf_ws.as_mut() {
+                                crate::ttf_sd::cache_clear(ws, self.ttf_px);
+                            }
+                            crate::storage::write_stroke_weight(self.stroke_w);
+                        }
                         _ => {}
                     }
                     self.need_text_render = true;
@@ -436,7 +473,8 @@ impl ReadPage {
                     .as_ref()
                     .map(|lv| if lv.len() > 0 { lv.len() - 1 } else { 0 })
                     .unwrap_or(0) as u32;
-                if (down && *bm_index < bm_count) || (!down && *bm_index > 0) {
+                let max_row = bm_count + 1; // 收藏(0) + 书签(1..=n) + 取消(n+1)
+                if (down && *bm_index < max_row) || (!down && *bm_index > 0) {
                     if down {
                         *bm_index += 1;
                     } else {
@@ -446,6 +484,12 @@ impl ReadPage {
                     self.need_render = true;
                     Timer::after_millis(200).await;
                 }
+            }
+            MenuState::BookmarkAction { ref mut action, .. } => {
+                // 打开/删除 两行循环
+                *action = 1 - *action;
+                self.need_render = true;
+                Timer::after_millis(150).await;
             }
             MenuState::Closed => {
                 if !self.reading {
@@ -795,10 +839,13 @@ impl ReadPage {
             let ff: &mut ActualFile = unsafe { &mut *font_ptr };
             match crate::ttf_sd::open_font(ff, ws) {
                 Some(fi) => {
+                    // 负行距整体上移，首行顶距同步收紧；预算等量加回，末行墨迹约束不变
+                    let shift = line_gap.min(0);
+                    let text_area_t = text_area_h - shift;
                     let ink_h = fi.line_height(ttf_px);
                     let base_h = (ink_h + line_gap).max(1);
-                    let max_lines = fit_max_lines(text_area_h, ink_h, base_h);
-                    let line_h = text_area_h / max_lines as i32;
+                    let max_lines = fit_max_lines(text_area_t, ink_h, base_h);
+                    let line_h = text_area_t / max_lines as i32;
                     Some(crate::ttf_sd::find_prev_start(
                         &mut bf, ff, &fi, ws, cur, file_len, ttf_px, mw, line_h, max_lines,
                     ))
@@ -851,10 +898,13 @@ impl ReadPage {
                 let ff: &mut ActualFile = unsafe { &mut *font_ptr };
                 if let Some(fi) = crate::ttf_sd::open_font(ff, ws) {
                     let text_area_h = page_text_area_h();
+                    // 与绘制同款负行距上移，行数/行高保持一致
+                    let shift = line_gap.min(0);
+                    let text_area_t = text_area_h - shift;
                     let ink_h = fi.line_height(ttf_px);
                     let base_h = (ink_h + line_gap).max(1);
-                    let max_lines = fit_max_lines(text_area_h, ink_h, base_h);
-                    let line_h = text_area_h / max_lines as i32;
+                    let max_lines = fit_max_lines(text_area_t, ink_h, base_h);
+                    let line_h = text_area_t / max_lines as i32;
                     crate::ttf_sd::preload_glyphs(
                         ff, &fi, ws, n, ttf_px,
                         super::text_width() as i32, line_h, max_lines,
@@ -1039,7 +1089,7 @@ impl ReadPage {
                 }
             }
             MenuState::Layout { cursor, editing } => {
-                let h: u32 = 130;
+                let h: u32 = 148;
                 let x = ((vw - menu_width) / 2) as i32;
                 let y = ((vh - h) / 2) as i32;
                 let cx = x + menu_width as i32 / 2;
@@ -1064,8 +1114,8 @@ impl ReadPage {
                 )
                 .ok();
 
-                // 三行选项：0=字号 1=行距 2=返回
-                let items: [(&str, heapless::String<24>); 3] = [
+                // 五行选项：0=字号 1=行距 2=笔画 3=重置 4=返回
+                let items: [(&str, heapless::String<24>); 5] = [
                     ("字号", {
                         let mut s: heapless::String<24> = heapless::String::new();
                         let _ = core::fmt::write(&mut s, format_args!("{}", self.ttf_px as i32));
@@ -1076,6 +1126,15 @@ impl ReadPage {
                         let _ = core::fmt::write(&mut s, format_args!("{}", self.line_gap));
                         s
                     }),
+                    ("笔画", {
+                        let mut s: heapless::String<24> = heapless::String::new();
+                        let _ = core::fmt::write(
+                            &mut s,
+                            format_args!("x{}.{}", self.stroke_w / 10, self.stroke_w % 10),
+                        );
+                        s
+                    }),
+                    ("重置", heapless::String::new()),
                     ("返回", heapless::String::new()),
                 ];
                 for (i, (label, val)) in items.iter().enumerate() {
@@ -1220,7 +1279,7 @@ impl ReadPage {
                 )
                 .ok();
             }
-            MenuState::BookmarkList { bm_index, deleting } => {
+            MenuState::BookmarkList { bm_index } => {
                 let bookmarks: Vec<u32, LOG_VEC_MAX> = self
                     .log_vec
                     .as_ref()
@@ -1231,9 +1290,14 @@ impl ReadPage {
                 let margin: i32 = 8;
                 let gap: i32 = 6;
                 let total_h = vh as i32 - margin * 2;
-                // 列表为主体（原 list=1/3 时只看得到 1 个书签），预览缩到约 1/3
-                let preview_h = total_h / 3;
+                // 小屏（vh<200，如 v1 旧板 2.9/2.7）：预览占一半、行高 12、行高收紧——
+                // 固定 16px 行高 + 1/3 预览在 128/176 高的屏上只放得下 2 行
+                let compact_bm = vh < 200;
+                let preview_h = if compact_bm { total_h / 2 } else { total_h / 3 };
                 let list_h = total_h - preview_h - gap;
+                let title_h: i32 = if compact_bm { 14 } else { 18 };
+                let bm_item_h: i32 = if compact_bm { 14 } else { menu_item_height as i32 };
+                let bm_line_h: i32 = if compact_bm { 12 } else { 16 };
                 let list_x = ((vw as i32 - menu_width as i32) / 2) as i32;
                 let list_y = margin;
                 let list_right = list_x + menu_width as i32;
@@ -1255,8 +1319,7 @@ impl ReadPage {
                 .draw(display)
                 .ok();
 
-                let title_h: i32 = 18;
-                let title = if deleting { "删除书签" } else { "书签列表" };
+                let title = "书签";
                 font.render_aligned(
                     title,
                     Point::new(list_x + menu_width as i32 / 2, list_y + 4 + title_h / 2),
@@ -1272,13 +1335,41 @@ impl ReadPage {
                     .draw(display)
                     .ok();
 
+                // 顶部固定行：收藏书签（bm_index 0）——确认后把当前进度入列
+                let add_top = sep_y + 2;
+                let add_h = bm_item_h;
+                let is_add_selected = bm_index == 0;
+                if is_add_selected {
+                    RoundedRectangle::new(
+                        Rectangle::new(
+                            Point::new(list_x + 3, add_top),
+                            Size::new(menu_width - 6, bm_item_h as u32),
+                        ),
+                        corners,
+                    )
+                    .into_styled(PrimitiveStyleBuilder::new().fill_color(Black).build())
+                    .draw(display)
+                    .ok();
+                }
+                let add_color = if is_add_selected { FontColor::Transparent(White) } else { FontColor::Transparent(Black) };
+                let add_prefix = if is_add_selected { "> " } else { "  " };
+                font.render_aligned(
+                    format_args!("{}收藏书签", add_prefix),
+                    Point::new(list_x + menu_padding as i32, add_top + add_h / 2),
+                    VerticalPosition::Center,
+                    HorizontalAlignment::Left,
+                    add_color,
+                    display,
+                )
+                .ok();
+
                 // 取消行（固定底部）
-                let cancel_h: i32 = menu_item_height as i32;
+                let cancel_h: i32 = bm_item_h;
                 let cancel_y = list_y + list_h - 4 - cancel_h;
-                let is_cancel_selected = bm_index >= bm_count;
+                let is_cancel_selected = bm_index > bm_count;
                 if is_cancel_selected {
                     RoundedRectangle::new(
-                        Rectangle::new(Point::new(list_x + 3, cancel_y), Size::new(menu_width - 6, menu_item_height)),
+                        Rectangle::new(Point::new(list_x + 3, cancel_y), Size::new(menu_width - 6, bm_item_h as u32)),
                         corners,
                     )
                     .into_styled(PrimitiveStyleBuilder::new().fill_color(Black).build())
@@ -1298,24 +1389,30 @@ impl ReadPage {
                 .ok();
 
                 // 书签滚动区
-                let scroll_top = sep_y + 2;
+                let scroll_top = add_top + add_h;
                 let scroll_bottom = cancel_y - 2;
                 let scroll_h = (scroll_bottom - scroll_top).max(0);
-                let item_h_i = menu_item_height as i32;
+                let item_h_i = bm_item_h;
                 let sb_w: i32 = 3;
                 let sb_x = list_right - sb_w - 4;
                 let text_left = list_x + menu_padding as i32;
                 let text_right = sb_x - 4;
                 let max_visible = if item_h_i > 0 { (scroll_h / item_h_i) as u32 } else { 1 }.max(1);
 
+                // 选中书签序号（收藏/取消行时夹到列表端点，滚动跟随）
+                let sel_bm = if bm_index >= 1 && bm_index <= bm_count {
+                    bm_index - 1
+                } else if bm_index > bm_count {
+                    bm_count
+                } else {
+                    0
+                };
                 let scroll_offset: u32 = if bm_count <= max_visible {
                     0
-                } else if is_cancel_selected {
+                } else if sel_bm > bm_count - max_visible {
                     bm_count - max_visible
-                } else if bm_index > bm_count - max_visible {
-                    bm_count - max_visible
-                } else if bm_index >= max_visible {
-                    bm_index - max_visible + 1
+                } else if sel_bm >= max_visible {
+                    sel_bm - max_visible + 1
                 } else {
                     0
                 };
@@ -1327,7 +1424,7 @@ impl ReadPage {
                     }
                     let off = bookmarks[bi as usize];
                     let item_y = scroll_top + (vi as i32) * item_h_i;
-                    let is_selected = bi == bm_index;
+                    let is_selected = bi + 1 == bm_index;
                     if is_selected {
                         RoundedRectangle::new(
                             Rectangle::new(
@@ -1342,10 +1439,9 @@ impl ReadPage {
                     }
                     let text_color = if is_selected { FontColor::Transparent(White) } else { FontColor::Transparent(Black) };
                     let prefix = if is_selected { "> " } else { "  " };
-                    let delete_mark = if deleting && is_selected { " ×" } else { "" };
                     let p = if self.ttf_file_len > 0 { off as u64 * 10000 / self.ttf_file_len as u64 } else { 0 };
                     font.render_aligned(
-                        format_args!("{}{}.{:02}%{}", prefix, p / 100, p % 100, delete_mark),
+                        format_args!("{}{}.{:02}%", prefix, p / 100, p % 100),
                         Point::new(text_left, item_y + item_h_i / 2),
                         VerticalPosition::Center,
                         HorizontalAlignment::Left,
@@ -1399,25 +1495,23 @@ impl ReadPage {
                 .ok();
 
                 if bm_count > 0
-                    && bm_index < bm_count
+                    && bm_index >= 1
+                    && bm_index <= bm_count
                     && !self.bookmark_preview.is_empty()
                     && preview_h > 12
                 {
-                    use embedded_graphics::draw_target::DrawTargetExt;
+                    // 注意：不使用 display.clipped() 视图——旋转屏下 DrawTarget 的
+                    // bounding_box 是物理尺寸（高 300），clip 会在 y=300 被静默截断，
+                    // 预览只能显示前两行（历史 bug）。改为直接绘制，行数按预览区
+                    // 底边截断（下方 break），行内容本身不会超出面板。
                     let pad_x = preview_x + 4;
                     let top = preview_y + 4;
                     let bottom = top + (preview_h as i32) - 8;
-                    let clip = Rectangle::new(
-                        Point::new(pad_x, top),
-                        Size::new(vw - 8, (preview_h - 8) as u32),
-                    );
-                    let mut clipped_display = display.clipped(&clip);
                     // 手动折行 + render_aligned 逐行绘制（与正文一致的渲染方式）：
-                    // TextBox 在 u8g2 字体下行高/基线会让每行顶部被裁。
                     // 宽度按等宽近似（CJK≈15、ASCII≈8），略高估以免右侧贴边被裁。
                     let full_w: i32 = 15;
                     let half_w: i32 = 8;
-                    let line_h: i32 = 16;
+                    let line_h: i32 = bm_line_h;
                     let max_w = (vw as i32) - 8;
                     let mut emit = |s: &str, y: i32| {
                         let _ = font.render_aligned(
@@ -1426,9 +1520,13 @@ impl ReadPage {
                             VerticalPosition::Center,
                             HorizontalAlignment::Left,
                             FontColor::Transparent(Black),
-                            &mut clipped_display,
+                            display,
                         );
                     };
+                    println!(
+                        "[bm_prev] vy={} vh={} pv_h={} top={} bot={} max_w={} blen={}",
+                        preview_y, vh, preview_h, top, bottom, max_w, self.bookmark_preview.len()
+                    );
                     let bytes = self.bookmark_preview.as_bytes();
                     let mut y_center = top + line_h / 2;
                     let mut line_start = 0usize;
@@ -1447,6 +1545,10 @@ impl ReadPage {
                         let clen = clen.min(bytes.len() - i);
                         let cw = if b < 0x80 { half_w } else { full_w };
                         if is_nl || w + cw > max_w {
+                            // 下一行起点超出预览区底边 → 停止绘制（替代 clipped 裁剪）
+                            if y_center - line_h / 2 >= bottom {
+                                break;
+                            }
                             if line_start < i {
                                 if let Ok(s) = core::str::from_utf8(&bytes[line_start..i]) {
                                     emit(s, y_center);
@@ -1470,6 +1572,85 @@ impl ReadPage {
                         }
                     }
                 }
+            }
+            MenuState::BookmarkAction { bm_index, action } => {
+                // 书签操作弹层：打开（默认）/删除
+                let h: u32 = 96;
+                let x = ((vw - menu_width) / 2) as i32;
+                let y = ((vh - h) / 2) as i32;
+                let cx = x + menu_width as i32 / 2;
+                let row_h: i32 = 22;
+                let y0 = y + 26;
+
+                RoundedRectangle::new(
+                    Rectangle::new(Point::new(x, y), Size::new(menu_width, h)),
+                    corners,
+                )
+                .into_styled(box_style)
+                .draw(display)
+                .ok();
+
+                // 标题：书签进度（与列表同格式）
+                if let Some(off) = self
+                    .log_vec
+                    .as_ref()
+                    .and_then(|lv| {
+                        lv.iter().skip(1).nth(bm_index.saturating_sub(1) as usize).copied()
+                    })
+                {
+                    let p = if self.ttf_file_len > 0 {
+                        off as u64 * 10000 / self.ttf_file_len as u64
+                    } else {
+                        0
+                    };
+                    font.render_aligned(
+                        format_args!("书签 {}.{:02}%", p / 100, p % 100),
+                        Point::new(cx, y + 15),
+                        VerticalPosition::Center,
+                        HorizontalAlignment::Center,
+                        FontColor::Transparent(Black),
+                        display,
+                    )
+                    .ok();
+                }
+
+                let items = ["打开", "删除"];
+                for (i, label) in items.iter().enumerate() {
+                    let ry = y0 + i as i32 * row_h;
+                    let is_sel = i as u32 == action;
+                    if is_sel {
+                        let strip = Rectangle::new(
+                            Point::new(x + 4, ry),
+                            Size::new(menu_width - 8, row_h as u32 - 2),
+                        );
+                        let _ = strip
+                            .into_styled(PrimitiveStyleBuilder::new().fill_color(Black).build())
+                            .draw(display);
+                    }
+                    let lbl_color = if is_sel {
+                        FontColor::Transparent(White)
+                    } else {
+                        FontColor::Transparent(Black)
+                    };
+                    font.render_aligned(
+                        *label,
+                        Point::new(cx, ry + row_h / 2),
+                        VerticalPosition::Center,
+                        HorizontalAlignment::Center,
+                        lbl_color,
+                        display,
+                    )
+                    .ok();
+                }
+                font.render_aligned(
+                    "1/2选择 3确认 长按返回",
+                    Point::new(cx, y + h as i32 - 12),
+                    VerticalPosition::Center,
+                    HorizontalAlignment::Center,
+                    FontColor::Transparent(Black),
+                    display,
+                )
+                .ok();
             }
             MenuState::Closed => {}
         }
@@ -1656,6 +1837,8 @@ impl Page for ReadPage {
         let line_gap = (settings.line_gap as i32).max(-10).min(10);
         let rotate = settings.rotate % 4;
         let swap_keys = crate::storage::read_reading_swap_keys();
+        let stroke_w = crate::storage::read_stroke_weight();
+        crate::ttf_sd::set_stroke_weight(stroke_w as f32 / 10.0);
         let mut font_name: String<32> = String::new();
         let fname = settings.font_name_str();
         if is_ttf(fname) || is_bitmap(fname) {
@@ -1698,6 +1881,7 @@ impl Page for ReadPage {
             ttf_last_hint: false,
             ttf_px,
             line_gap,
+            stroke_w,
             ttf_ws: None,
             ttf_resume: false,
             font_name,
@@ -1919,13 +2103,17 @@ impl Page for ReadPage {
                                 } else if !font_ptr.is_null() {
                                     let ff: &mut ActualFile = unsafe { &mut *font_ptr };
                                     if let Some(fi) = crate::ttf_sd::open_font(ff, ws) {
+                                        // 负行距首行整体上移（顶距同步收紧），起点随 shift；
+                                        // 预算等量加回，末行墨迹约束不变
+                                        let shift = line_gap.min(0);
+                                        let text_area_t = text_area_h - shift;
                                         let ink_h = fi.line_height(ttf_px);
-                                    let base_h = (ink_h + line_gap).max(1);
-                                        let max_lines = fit_max_lines(text_area_h, ink_h, base_h);
-                                        let line_h = text_area_h / max_lines as i32;
+                                        let base_h = (ink_h + line_gap).max(1);
+                                        let max_lines = fit_max_lines(text_area_t, ink_h, base_h);
+                                        let line_h = text_area_t / max_lines as i32;
                                         let consumed = crate::ttf_sd::paginate_render(
                                             ff, &fi, ws, display, n, ttf_px,
-                                            Point::new(super::text_left_margin(), 2),
+                                            Point::new(super::text_left_margin(), 2 + shift),
                                             super::text_width() as i32, line_h, max_lines,
                                         );
                                         result = Some(consumed as u32);
@@ -2232,7 +2420,8 @@ impl Page for ReadPage {
                                                 MenuState::BookmarkList { bm_index, .. } => bm_index,
                                                 _ => 0,
                                             } as usize;
-                                            let del_idx = bm_idx + 1;
+                                            // 行号 i → log 下标 i（log[0] 是当前进度）
+                                            let del_idx = bm_idx;
                                             if del_idx < lv.len() {
                                                 lv.remove(del_idx);
                                                 let book_name = self.menus.as_ref().unwrap()[self.choose_index as usize].clone();
@@ -2245,10 +2434,12 @@ impl Page for ReadPage {
                                                     TxtReader::save_log_raw(&mut f, lv);
                                                     f.close();
                                                 }
-                                                let new_bm_count = if lv.len() > 1 { lv.len() - 1 } else { 0 };
                                                 if let MenuState::BookmarkList { ref mut bm_index, .. } = self.menu_state {
-                                                    if *bm_index as usize >= new_bm_count && *bm_index > 0 {
+                                                    // 光标回退到前一行（行 1 删除后回收藏行）
+                                                    if *bm_index > 1 {
                                                         *bm_index -= 1;
+                                                    } else {
+                                                        *bm_index = 0;
                                                     }
                                                 }
                                             }
@@ -2266,7 +2457,13 @@ impl Page for ReadPage {
                                             MenuState::BookmarkList { bm_index, .. } => self
                                                 .log_vec
                                                 .as_ref()
-                                                .and_then(|lv| lv.iter().skip(1).nth(bm_index as usize).copied()),
+                                                // 行号 0=收藏行无预览；行 i → 书签 i-1 → log 下标 i
+                                                .and_then(|lv| {
+                                                    lv.iter()
+                                                        .skip(1)
+                                                        .nth(bm_index.saturating_sub(1) as usize)
+                                                        .copied()
+                                                }),
                                             _ => None,
                                         };
                                         if let Some(off) = bm_off {
@@ -2464,6 +2661,16 @@ impl Page for ReadPage {
                         mut_ref.menu_state = MenuState::Closed;
                         mut_ref.need_render = true;
                     }
+                    MenuState::BookmarkAction { bm_index, .. } => {
+                        // 书签操作弹层长按 3：回到书签列表
+                        mut_ref.menu_state = MenuState::BookmarkList { bm_index: bm_index };
+                        mut_ref.need_render = true;
+                    }
+                    MenuState::BookmarkList { .. } => {
+                        // 书签列表长按 3：回主菜单（停在“书签”项）
+                        mut_ref.menu_state = MenuState::Popup { menu_index: 1 };
+                        mut_ref.need_render = true;
+                    }
                     _ => {
                         // 菜单未打开（Closed）时长按 3：返回书单
                         if mut_ref.reading {
@@ -2524,21 +2731,12 @@ impl Page for ReadPage {
                                 mut_ref.need_reload_progress = true;
                             }
                             1 => {
-                                mut_ref.save_bookmark_flag = true;
+                                // 书签：收藏/打开/删除 合并入书签界面
+                                mut_ref.menu_state = MenuState::BookmarkList { bm_index: 0 };
+                                mut_ref.need_render = true;
+                                return;
                             }
                             2 => {
-                                mut_ref.menu_state = MenuState::BookmarkList { bm_index: 0, deleting: false };
-                                mut_ref.need_load_preview = true;
-                                mut_ref.need_render = true;
-                                return;
-                            }
-                            3 => {
-                                mut_ref.menu_state = MenuState::BookmarkList { bm_index: 0, deleting: true };
-                                mut_ref.need_load_preview = true;
-                                mut_ref.need_render = true;
-                                return;
-                            }
-                            4 => {
                                 // 跳转进度（百分比）
                                 let pct = if mut_ref.ttf_file_len > 0 {
                                     mut_ref.ttf_offset.min(mut_ref.ttf_file_len) * 100 / mut_ref.ttf_file_len
@@ -2550,18 +2748,18 @@ impl Page for ReadPage {
                                 mut_ref.need_render = true;
                                 return;
                             }
-                            5 => {
+                            3 => {
                                 // 排版：快照当前值供“长按取消”还原
                                 mut_ref.menu_state = MenuState::Layout { cursor: 0, editing: false };
                                 mut_ref.need_render = true;
                                 return;
                             }
-                            6 => {
+                            4 => {
                                 mut_ref.menu_state = MenuState::FontList { font_index: 0 };
                                 mut_ref.need_render = true;
                                 return;
                             }
-                            7 => {
+                            5 => {
                                 // 旋转屏幕：保持菜单打开，便于连续旋转（再按 Key3 继续转，
                                 // 移走光标或选“取消”关闭菜单）
                                 mut_ref.rotate = (mut_ref.rotate + 1) % 4;
@@ -2574,19 +2772,19 @@ impl Page for ReadPage {
                                 mut_ref.need_render = true;
                                 return;
                             }
-                            8 => {
+                            6 => {
                                 crate::sleep::refresh_active_time().await;
                                 crate::sleep::to_sleep_tips(Duration::from_secs(0), Duration::from_secs(0), true).await;
                                 return;
                             }
-                            9 => {
+                            7 => {
                                 // 方向键互换：切换开关，保持菜单打开便于确认状态
                                 mut_ref.swap_keys = !mut_ref.swap_keys;
                                 crate::storage::write_reading_swap_keys(mut_ref.swap_keys);
                                 mut_ref.need_render = true;
                                 return;
                             }
-                            _ => {} // 10 = 取消
+                            _ => {} // 8 = 取消
                         }
                         mut_ref.menu_state = MenuState::Closed;
                         mut_ref.need_render = true;
@@ -2610,8 +2808,22 @@ impl Page for ReadPage {
                             }
                         } else {
                             match *cursor {
-                                0 | 1 => { *editing = true; }
-                                2 => {
+                                0 | 1 | 2 => { *editing = true; }
+                                3 => {
+                                    // 重置排版参数为默认值（字号20/行距1/笔画x1.0）
+                                    mut_ref.ttf_px = 20.0;
+                                    mut_ref.line_gap = 1;
+                                    mut_ref.stroke_w = 10;
+                                    crate::ttf_sd::set_stroke_weight(1.0);
+                                    if let Some(ws) = mut_ref.ttf_ws.as_mut() {
+                                        crate::ttf_sd::cache_clear(ws, mut_ref.ttf_px);
+                                    }
+                                    crate::storage::write_stroke_weight(10);
+                                    mut_ref.save_reading_settings();
+                                    mut_ref.need_text_render = true;
+                                    mut_ref.need_render = true;
+                                }
+                                4 => {
                                     // 返回
                                     mut_ref.save_reading_settings();
                                     mut_ref.menu_state = MenuState::Closed;
@@ -2631,26 +2843,46 @@ impl Page for ReadPage {
                         mut_ref.menu_state = MenuState::Closed;
                         mut_ref.need_render = true;
                     }
-                    MenuState::BookmarkList { bm_index, deleting } => {
+                    MenuState::BookmarkList { bm_index } => {
                         let bm_count = mut_ref
                             .log_vec
                             .as_ref()
                             .map(|lv| if lv.len() > 0 { lv.len() - 1 } else { 0 })
                             .unwrap_or(0) as u32;
-                        if bm_index >= bm_count {
-                            // 取消
-                            mut_ref.menu_state = MenuState::Popup { menu_index: 0 };
+                        if bm_index == 0 {
+                            // 收藏书签：当前进度入列
+                            mut_ref.save_bookmark_flag = true;
+                            mut_ref.need_render = true;
+                        } else if bm_index <= bm_count {
+                            // 选中书签 → 打开/删除弹层（默认打开）
+                            mut_ref.menu_state =
+                                MenuState::BookmarkAction { bm_index: bm_index, action: 0 };
+                            mut_ref.need_render = true;
+                            return;
+                        } else {
+                            // 取消 → 回主菜单“书签”项
+                            mut_ref.menu_state = MenuState::Popup { menu_index: 1 };
                             mut_ref.bookmark_preview.clear();
                             mut_ref.need_render = true;
-                        } else if deleting {
-                            mut_ref.delete_bookmark_flag = true;
-                            mut_ref.need_render = true;
-                        } else if let Some(ref lv) = mut_ref.log_vec {
-                            let bookmarks: Vec<u32, LOG_VEC_MAX> = lv.iter().skip(1).copied().collect();
-                            if (bm_index as usize) < bookmarks.len() {
-                                mut_ref.jump_to_offset(bookmarks[bm_index as usize] as u64);
+                        }
+                    }
+                    MenuState::BookmarkAction { bm_index, action } => {
+                        if action == 0 {
+                            // 打开：行号 i → log_vec[i]（log[0] 是当前进度，书签从 1 起；
+                            // bit31 是“已到末页”标记，偏移取低 31 位）
+                            let bi = bm_index as usize;
+                            if let Some(ref lv) = mut_ref.log_vec {
+                                if bi > 0 && bi < lv.len() {
+                                    mut_ref.jump_to_offset((lv[bi] & 0x7FFF_FFFF) as u64);
+                                }
                             }
                             mut_ref.menu_state = MenuState::Closed;
+                            mut_ref.bookmark_preview.clear();
+                            mut_ref.need_render = true;
+                        } else {
+                            // 删除：回列表态并交由 run 循环的 delete 块执行
+                            mut_ref.delete_bookmark_flag = true;
+                            mut_ref.menu_state = MenuState::BookmarkList { bm_index: bm_index };
                             mut_ref.need_render = true;
                         }
                     }
