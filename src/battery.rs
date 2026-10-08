@@ -63,9 +63,14 @@ pub async fn test_bat_adc() {
                                 v.percent = percent;
                                 unsafe { *core::ptr::addr_of_mut!(LAST_BATTERY_PERCENT) = percent; }
 
-                                println!("ADC原始值: {}", adc_value);
-                                println!("电压: {} mV", v.voltage);
-                                println!("电量: {}%", v.percent);
+                                // 诊断换算：pin = 11dB 衰减理论满量程（2500mV/4095）下的
+                                // 引脚电压估计，供与万用表实测分压中点对比；bat = 现
+                                // 行 raw×2 估的电池电压（两者差 2 倍即分压比）。
+                                let pin_mv = (adc_value as u32 * 2500) / 4095;
+                                println!(
+                                    "[bat] raw={} pin≈{}mV bat≈{}mV 电量{}%",
+                                    adc_value, pin_mv, v.voltage, v.percent
+                                );
 
                                 if v.percent < 20 {
                                     println!("警告：电量低 ({}%)", v.percent);
