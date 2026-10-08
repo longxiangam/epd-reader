@@ -161,6 +161,42 @@ impl SdMount{
 
     }
 
+    /// 列出目录下的子目录（一级，供书单二级目录用）。
+    /// 跳过隐藏项与 . / ..；名字 LFN 优先，SFN 回退取 base_name。
+    pub fn get_subdirs(dir: &mut ActualDirectory) -> Result<Vec<String<BOOK_NAME_MAX>, 20>, SdError> {
+        let mut dirs: Vec<String<BOOK_NAME_MAX>, 20> = Vec::new();
+
+        let mut storage = [0u8; 512];
+        let mut lfn_buffer = LfnBuffer::new(&mut storage);
+        dir.iterate_dir_lfn(&mut lfn_buffer, |directory, lfn| {
+            if !directory.attributes.is_directory() {
+                return ControlFlow::Continue(());
+            }
+            match lfn {
+                Some(n) => {
+                    if !n.starts_with('.') && n.len() <= BOOK_NAME_MAX {
+                        if let Ok(s) = String::from_str(n) {
+                            let _ = dirs.push(s);
+                        }
+                    }
+                }
+                None => {
+                    // SFN 回退：目录无扩展名，base_name 即名字（. / .. 以 '.' 开头，跳过）
+                    let base = directory.name.base_name();
+                    if !base.is_empty() && base[0] != b'.' && base.len() <= BOOK_NAME_MAX {
+                        if let Ok(s) = String::from_utf8(Vec::try_from(base).unwrap()) {
+                            let _ = dirs.push(s);
+                        }
+                    }
+                }
+            }
+            ControlFlow::Continue(())
+        })
+        .unwrap();
+
+        Ok(dirs)
+    }
+
     pub fn get_images(images_dir:&mut ActualDirectory)->Result<Vec<String<BOOK_NAME_MAX>,40>,SdError>
     {
         let mut images:Vec<String<BOOK_NAME_MAX>,40> = Vec::new();

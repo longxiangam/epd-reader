@@ -967,8 +967,8 @@ async fn handle_configure_reading(socket: &mut TcpSocket<'_>, req: &httparse::Re
         if let Some(px) = get("px").parse::<u8>().ok() {
             s.ttf_px = px.max(12).min(40);
         }
-        if let Some(gap) = get("gap").parse::<u8>().ok() {
-            s.line_gap = gap.min(10);
+        if let Some(gap) = get("gap").parse::<i8>().ok() {
+            s.line_gap = gap.max(-10).min(10);
         }
         if let Some(rot) = get("rotate").parse::<u8>().ok() {
             s.rotate = rot % 4;

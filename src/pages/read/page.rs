@@ -71,29 +71,34 @@ fn is_bitmap(name: &str) -> bool {
 /// 按 wqy16 像素宽度（中文16、英文/数字8）截断字符串，超出加 "…"。
 /// 用于书单：长书名在窄屏（2.7寸）会延伸到右侧与进度"%"重叠。
 /// 只截断显示用副本，打开书仍用 menus 里的全名。
+/// 书单书名截断：按 wqy16 的**实际渲染宽度**逐字累加（get_rendered_dimensions
+/// 的 advance），超出 max_w 截断补 "…"。此前按全/半宽 16/8px 估算，wqy16 的
+/// 比例宽拉丁（W/m/% 等）与全角标点会低估，书名右缘压到右侧进度百分比。
 fn truncate_name(name: &str, max_w: i32) -> alloc::string::String {
-    const FULL: i32 = 16;
-    const HALF: i32 = 8;
-    let mut w = 0i32;
+    let font: FontRenderer = FontRenderer::new::<fonts::u8g2_font_wqy16_t_gb2312>();
+    let origin = Point::new(0, 0);
+    let w_of = |s: &str| -> i32 {
+        font.get_rendered_dimensions(s, origin, VerticalPosition::Top)
+            .map(|d| d.advance.x)
+            .unwrap_or(0)
+    };
+    let ellipsis_w = w_of("…").max(8);
+
     let mut out: alloc::string::String = alloc::string::String::new();
     let mut cut = false;
     for ch in name.chars() {
-        let cw = if (ch as u32) < 0x80 { HALF } else { FULL };
-        if w + cw > max_w {
+        let mut probe = out.clone();
+        let _ = probe.push(ch);
+        if w_of(probe.as_str()) > max_w {
             cut = true;
             break;
         }
-        w += cw;
-        let _ = out.push(ch);
+        out = probe;
     }
     if cut {
-        // 腾出 "…"（按全宽计）的位置
-        while w + FULL > max_w {
-            if out.pop().is_some() {
-                w -= FULL; // 近似（末字可能半宽，偏保守，宁短勿 overlap）
-            } else {
-                break;
-            }
+        // 腾出 "…" 的实际宽度
+        while !out.is_empty() && w_of(out.as_str()) + ellipsis_w > max_w {
+            out.pop();
         }
         let _ = out.push('…');
     }
@@ -132,6 +137,29 @@ fn menu_state_id(s: &MenuState) -> u8 {
     }
 }
 
+/// 正文文本区高度（正文从 y=2 画起）。
+/// 底部状态区实际占位 = 进度条带(PROGRESS_AREA_HEIGHT) + 状态行(电量图标
+/// 9px + 间隔 2px) + 1px 呼吸 = PROGRESS_AREA_HEIGHT + 12。此前只扣
+/// PROGRESS_AREA_HEIGHT + 2，而状态行顶边在 vh-16——正文末行会侵入状态区，
+/// 与电量/时间/进度条重叠（与行距正负无关的历史问题）。
+fn page_text_area_h() -> i32 {
+    super::visual_height() as i32 - super::PROGRESS_AREA_HEIGHT as i32 - 12
+}
+
+/// 页内可容纳的行数：负行距只压缩行间空隙，不压缩墨迹——末行的墨迹
+/// （一份完整行高，未加行距）必须完整落在文本区内，否则会压到底部状态栏。
+/// 预算先扣掉一份墨迹高，再按"行槽"（行高+行距）均分。正/反向分页与
+/// 预加载三处必须用同一函数，保证行数一致。
+fn fit_max_lines(text_area_h: i32, ink_h: i32, base_h: i32) -> u32 {
+    if text_area_h <= 0 || ink_h <= 0 || base_h <= 0 {
+        return 1;
+    }
+    if text_area_h <= ink_h {
+        return 1;
+    }
+    ((text_area_h - ink_h) / base_h) as u32 + 1
+}
+
 pub struct ReadPage {
     running: bool,
     reading: bool,
@@ -143,6 +171,10 @@ pub struct ReadPage {
     last_menu_state_id: u8,
     choose_index: u32,
     menus: Option<Vec<String<BOOK_NAME_MAX>, 40>>,
+    /// 二级目录：当前所在 books 子目录名（None=books 根目录）。
+    cur_subdir: Option<String<BOOK_NAME_MAX>>,
+    /// 当前层子目录列表（仅 books 根层扫描填充；二级内不再嵌套）。
+    subdirs: Vec<String<BOOK_NAME_MAX>, 20>,
     log_vec: Option<Vec<u32, LOG_VEC_MAX>>,
     menu_state: MenuState,
     save_bookmark_flag: bool,
@@ -163,6 +195,8 @@ pub struct ReadPage {
     /// run() 里 books_dir 的裸指针（绕过 Page::render 无参 trait 限制）。
     /// 仅在 run() 作用域内有效（设置于打开 books_dir 后、退出前置空）。
     books_dir_ptr: *mut ActualDirectory<'static>,
+    /// SD 根目录句柄裸指针（run() 作用域内有效；书单"返回上级"重开 books/ 用）。
+    sd_root_ptr: *mut ActualDirectory<'static>,
     /// 字体文件句柄的裸指针（整个阅读会话复用同一句柄，换字体时重开）。
     font_file_ptr: *mut ActualFile<'static>,
     /// TTF 动态分页状态：按字节偏移即时分页。
@@ -202,7 +236,7 @@ impl ReadPage {
     fn save_reading_settings(&self) {
         let mut s = crate::storage::ReadingSettings {
             ttf_px: ((self.ttf_px as i32).max(12).min(40)) as u8,
-            line_gap: self.line_gap.max(0).min(255) as u8,
+            line_gap: self.line_gap.max(-10).min(10) as i8,
             rotate: self.rotate,
             font_name: [0u8; 32],
         };
@@ -250,7 +284,7 @@ impl ReadPage {
                         }
                         1 => {
                             self.line_gap = if down {
-                                (self.line_gap - 1).max(0)
+                                (self.line_gap - 1).max(-10)
                             } else {
                                 (self.line_gap + 1).min(10)
                             };
@@ -302,7 +336,7 @@ impl ReadPage {
                         self.exit_selected = false;
                         self.choose_index = 0;
                     } else {
-                        let max = self.menus.as_ref().map(|m| m.len()).unwrap_or(0);
+                        let max = self.list_len();
                         if max > 0 {
                             if self.choose_index < (max - 1) as u32 {
                                 self.choose_index += 1;
@@ -314,7 +348,7 @@ impl ReadPage {
                     self.need_render = true;
                 } else {
                     if self.exit_selected {
-                        let max = self.menus.as_ref().map(|m| m.len()).unwrap_or(0);
+                        let max = self.list_len();
                         if max > 0 {
                             self.exit_selected = false;
                             self.choose_index = (max - 1) as u32;
@@ -374,7 +408,7 @@ impl ReadPage {
                             self.line_gap = if down {
                                 (self.line_gap + 1).min(10)
                             } else {
-                                (self.line_gap - 1).max(0)
+                                (self.line_gap - 1).max(-10)
                             };
                         }
                         _ => {}
@@ -420,7 +454,7 @@ impl ReadPage {
                             self.exit_selected = false;
                             self.choose_index = 0;
                         } else {
-                            let max = self.menus.as_ref().map(|m| m.len()).unwrap_or(0);
+                            let max = self.list_len();
                             if max > 0 && self.choose_index < (max - 1) as u32 {
                                 self.choose_index += 1;
                             } else if max > 0 {
@@ -431,7 +465,7 @@ impl ReadPage {
                         self.need_render = true;
                         Timer::after_millis(200).await;
                     } else if self.exit_selected {
-                        let max = self.menus.as_ref().map(|m| m.len()).unwrap_or(0);
+                        let max = self.list_len();
                         if max > 0 {
                             self.exit_selected = false;
                             self.choose_index = (max - 1) as u32;
@@ -542,6 +576,79 @@ impl ReadPage {
         unsafe {
             *core::ptr::addr_of_mut!(TTF_RESUME_OFFSET) = self.ttf_offset;
         }
+    }
+
+    /// 列表视图中目录项个数：二级内的"..返回上级"（1）+ 根层的子目录列表。
+    /// 列表视图 choose_index 覆盖 [目录项..., 书...]，书下标 = choose_index - 此值。
+    /// 进书后 choose_index 重基为书下标，此时本值不再被使用。
+    fn list_dir_items(&self) -> usize {
+        (self.cur_subdir.is_some() as usize) + self.subdirs.len()
+    }
+
+    /// 列表可选行数（不含"退出"行）。
+    fn list_len(&self) -> usize {
+        self.list_dir_items() + self.menus.as_ref().map(|m| m.len()).unwrap_or(0)
+    }
+
+    /// 书单目录项确认：进入子目录 / 返回上级。
+    /// 进入走 change_dir 原位换目录（fork 自动关旧句柄）；返回上级经 SD 根重开
+    /// books/ 并 replace+close 旧句柄（释放 VolumeManager 的目录槽位）。
+    /// 换层后重扫子目录/书列表/进度，光标归零。
+    async fn list_navigate(&mut self, ci: usize) {
+        let bd_ptr = self.books_dir_ptr;
+        if bd_ptr.is_null() {
+            return;
+        }
+        let in_sub = self.cur_subdir.is_some();
+        if in_sub && ci == 0 {
+            // 返回上级
+            let root_ptr = self.sd_root_ptr;
+            if root_ptr.is_null() {
+                return;
+            }
+            unsafe {
+                let root: &mut ActualDirectory<'_> = &mut *root_ptr;
+                match root.open_dir("books") {
+                    Ok(mut new_dir) => {
+                        // 句柄是位拷贝结构：按 books_dir_ptr 的既有做法抹掉生命周期
+                        let new_static: *mut ActualDirectory<'static> =
+                            &mut new_dir as *mut _ as *mut ActualDirectory<'static>;
+                        let old = core::ptr::replace(bd_ptr, core::ptr::read(new_static));
+                        core::mem::forget(new_dir); // 已被 read 复制，防 Drop 重复释放句柄
+                        let _ = old.close();
+                    }
+                    Err(_) => return,
+                }
+            }
+            self.cur_subdir = None;
+        } else {
+            // 进入子目录：LFN 目录名经 find_entry_by_name 拿盘上 SFN 别名再 change_dir
+            let idx = ci - (in_sub as usize);
+            let Some(name) = self.subdirs.get(idx).cloned() else {
+                return;
+            };
+            let bd: &mut ActualDirectory<'_> = unsafe { &mut *bd_ptr };
+            let entered = SdMount::find_entry_by_name(bd, name.as_str())
+                .map(|e| bd.change_dir(&e.name).is_ok())
+                .unwrap_or(false);
+            if !entered {
+                return;
+            }
+            self.cur_subdir = Some(name);
+        }
+        // 换层完成：二级内无子目录，根层重扫子目录
+        if self.cur_subdir.is_some() {
+            self.subdirs.clear();
+        } else {
+            let bd: &mut ActualDirectory<'_> = unsafe { &mut *bd_ptr };
+            self.subdirs = SdMount::get_subdirs(bd).unwrap_or_default();
+        }
+        let bd: &mut ActualDirectory<'_> = unsafe { &mut *bd_ptr };
+        self.menus = Some(SdMount::get_books(bd).unwrap_or_default());
+        self.load_book_progress(bd);
+        self.choose_index = 0;
+        self.exit_selected = false;
+        self.need_render = true;
     }
 
     /// 书单每本书的阅读进度（字节偏移 ÷ .txt 长度 → "X%"）。
@@ -672,15 +779,15 @@ impl ReadPage {
         let Ok(mut bf) = bd.open_file_in_dir(sn, embedded_sdmmc::Mode::ReadOnly) else {
             return 0;
         };
-        let text_area_h =
-            super::visual_height() as i32 - super::PROGRESS_AREA_HEIGHT as i32 - 2;
+        let text_area_h = page_text_area_h();
         let mw = super::text_width() as i32;
         let prev = if let Some(cell) = bm_cell {
             // 点阵局部逆推（纯算术，无字体 I/O）
             let full_w = cell as i32;
             let half_w = (cell / 2) as i32;
-            let base_h = (cell as i32 + line_gap).max(1);
-            let max_lines = ((text_area_h / base_h) as u32).max(1);
+            let ink_h = cell as i32;
+            let base_h = (ink_h + line_gap).max(1);
+            let max_lines = fit_max_lines(text_area_h, ink_h, base_h);
             Some(super::bitmap::find_prev_start_bitmap(
                 &mut bf, &mut ws.book_buf, cur, file_len, mw, full_w, half_w, max_lines,
             ))
@@ -688,8 +795,9 @@ impl ReadPage {
             let ff: &mut ActualFile = unsafe { &mut *font_ptr };
             match crate::ttf_sd::open_font(ff, ws) {
                 Some(fi) => {
-                    let base_h = (fi.line_height(ttf_px) + line_gap).max(1);
-                    let max_lines = ((text_area_h / base_h) as u32).max(1);
+                    let ink_h = fi.line_height(ttf_px);
+                    let base_h = (ink_h + line_gap).max(1);
+                    let max_lines = fit_max_lines(text_area_h, ink_h, base_h);
                     let line_h = text_area_h / max_lines as i32;
                     Some(crate::ttf_sd::find_prev_start(
                         &mut bf, ff, &fi, ws, cur, file_len, ttf_px, mw, line_h, max_lines,
@@ -714,7 +822,6 @@ impl ReadPage {
         let line_gap = self.line_gap;
         let bd_ptr = self.books_dir_ptr;
         let font_ptr = self.font_file_ptr;
-        let vh = super::visual_height();
         let book_name = match self
             .menus
             .as_ref()
@@ -743,9 +850,10 @@ impl ReadPage {
             if n > 0 && !font_ptr.is_null() {
                 let ff: &mut ActualFile = unsafe { &mut *font_ptr };
                 if let Some(fi) = crate::ttf_sd::open_font(ff, ws) {
-                    let text_area_h = vh as i32 - super::PROGRESS_AREA_HEIGHT as i32 - 2;
-                    let base_h = (fi.line_height(ttf_px) + line_gap).max(1);
-                    let max_lines = ((text_area_h / base_h) as u32).max(1);
+                    let text_area_h = page_text_area_h();
+                    let ink_h = fi.line_height(ttf_px);
+                    let base_h = (ink_h + line_gap).max(1);
+                    let max_lines = fit_max_lines(text_area_h, ink_h, base_h);
                     let line_h = text_area_h / max_lines as i32;
                     crate::ttf_sd::preload_glyphs(
                         ff, &fi, ws, n, ttf_px,
@@ -1470,6 +1578,67 @@ impl ReadPage {
 #[ram(unstable(rtc_fast))]
 pub(crate) static mut PAGE_INDEX: Option<u32> = None;
 
+/// 续读的书所在二级目录（books 下的子目录名，utf8 零结尾；全 0 = books 根）。
+/// rtc_fast：跨深睡/reboot 保留，配合 PAGE_INDEX 在续读时重新进入子目录。
+#[ram(unstable(rtc_fast))]
+static mut RESUME_SUBDIR: [u8; BOOK_NAME_MAX] = [0; BOOK_NAME_MAX];
+
+fn subdir_from_buf(buf: &[u8; BOOK_NAME_MAX]) -> Option<String<BOOK_NAME_MAX>> {
+    let end = buf.iter().position(|&b| b == 0).unwrap_or(0);
+    if end == 0 {
+        return None;
+    }
+    match core::str::from_utf8(&buf[..end]) {
+        Ok(s) => String::from_str(s).ok(),
+        Err(_) => None,
+    }
+}
+
+fn subdir_into_buf(buf: &mut [u8; BOOK_NAME_MAX], name: Option<&str>) {
+    *buf = [0u8; BOOK_NAME_MAX];
+    if let Some(n) = name {
+        let bytes = n.as_bytes();
+        let n = bytes.len().min(BOOK_NAME_MAX - 1);
+        buf[..n].copy_from_slice(&bytes[..n]);
+    }
+}
+
+fn resume_subdir_get() -> Option<String<BOOK_NAME_MAX>> {
+    unsafe { subdir_from_buf(&core::ptr::addr_of!(RESUME_SUBDIR).read()) }
+}
+
+fn resume_subdir_set(name: Option<&str>) {
+    unsafe {
+        let mut buf = [0u8; BOOK_NAME_MAX];
+        subdir_into_buf(&mut buf, name);
+        core::ptr::addr_of_mut!(RESUME_SUBDIR).write(buf);
+    }
+}
+
+/// 书单层记忆：最后打开的书所在子目录 + 书下标。PAGE_INDEX 为 None（普通进入
+/// 书单，非续读）时据此恢复列表目录与光标。rtc_fast：跨深睡保留，断电归零。
+#[ram(unstable(rtc_fast))]
+static mut LIST_SUBDIR: [u8; BOOK_NAME_MAX] = [0; BOOK_NAME_MAX];
+#[ram(unstable(rtc_fast))]
+static mut LIST_BOOK_IDX: u32 = 0;
+
+fn list_memory_set(sub: Option<&str>, book_idx: u32) {
+    unsafe {
+        let mut buf = [0u8; BOOK_NAME_MAX];
+        subdir_into_buf(&mut buf, sub);
+        core::ptr::addr_of_mut!(LIST_SUBDIR).write(buf);
+        core::ptr::addr_of_mut!(LIST_BOOK_IDX).write(book_idx);
+    }
+}
+
+fn list_memory_get() -> (Option<String<BOOK_NAME_MAX>>, u32) {
+    unsafe {
+        let sub = subdir_from_buf(&core::ptr::addr_of!(LIST_SUBDIR).read());
+        let idx = core::ptr::addr_of!(LIST_BOOK_IDX).read();
+        (sub, idx)
+    }
+}
+
 /// 本次启动是否进阅读模式（true=跳过 WiFi，独占堆做 TTF）。
 /// rtc_fast：跨 reboot_sleep 深睡保留。
 #[ram(unstable(rtc_fast))]
@@ -1484,7 +1653,7 @@ impl Page for ReadPage {
         // 读取排版设置（clamp 防止 flash 未初始化时的乱码值）
         let settings = crate::storage::ReadingSettings::read().unwrap_or_default();
         let ttf_px = settings.ttf_px.max(12).min(40) as f32;
-        let line_gap = (settings.line_gap as i32).max(0).min(10);
+        let line_gap = (settings.line_gap as i32).max(-10).min(10);
         let rotate = settings.rotate % 4;
         let swap_keys = crate::storage::read_reading_swap_keys();
         let mut font_name: String<32> = String::new();
@@ -1503,6 +1672,8 @@ impl Page for ReadPage {
             last_menu_state_id: 0,
             choose_index: 0,
             menus: None,
+            cur_subdir: None,
+            subdirs: Vec::new(),
             log_vec: None,
             menu_state: MenuState::Closed,
             save_bookmark_flag: false,
@@ -1517,6 +1688,7 @@ impl Page for ReadPage {
             jump_accel: 0,
             book_progress: Vec::new(),
             books_dir_ptr: core::ptr::null_mut(),
+            sd_root_ptr: core::ptr::null_mut(),
             font_file_ptr: core::ptr::null_mut(),
             ttf_offset: 0,
             ttf_end: 0,
@@ -1540,6 +1712,14 @@ impl Page for ReadPage {
                 // 续读：恢复跨复位保存的字节偏移（重启分模式下从上次位置继续）
                 temp.ttf_offset = *core::ptr::addr_of!(TTF_RESUME_OFFSET);
                 temp.ttf_resume = true;
+                // 续读的书在二级目录里：恢复目录名（run() 扫描时据此 change_dir 进入）
+                temp.cur_subdir = resume_subdir_get();
+            } else {
+                // 书单层：恢复最后打开的书（目录 + 书下标）；choose_index 暂存书下标，
+                // run() 进入目录后重基为列表光标（目录项排在书前面）
+                let (sub, idx) = list_memory_get();
+                temp.cur_subdir = sub;
+                temp.choose_index = idx;
             }
         }
 
@@ -1586,13 +1766,42 @@ impl Page for ReadPage {
                 if !self.reading {
                     // 书单列表
                     if let Some(ref menus) = self.menus {
-                        // 截断过长书名，避免与右侧进度百分比重叠（窄屏尤甚）
-                        // max_w：书名从 x=15 起，右侧留 ~55px 给 "100%" 进度
-                        let max_w = vw as i32 - 70;
+                        // 截断过长书名，避免与右侧进度百分比重叠（窄屏尤甚）。
+                        // ListItemWidget 渲染书名时带一个前导空格（" {}", x+15 起），
+                        // 书名墨迹实际起于 x=15+空格宽；进度列左缘 = 右缘(vw-15) -
+                        // "100%"实测宽。宽度全部按 wqy16 实测（比例宽拉丁不再低估），
+                        // 名字与进度间留 8px 间隔。
+                        let measure_font: FontRenderer =
+                            FontRenderer::new::<fonts::u8g2_font_wqy16_t_gb2312>();
+                        let measure = |s: &str| -> i32 {
+                            measure_font
+                                .get_rendered_dimensions(s, Point::new(0, 0), VerticalPosition::Top)
+                                .map(|d| d.advance.x)
+                                .unwrap_or(0)
+                        };
+                        let progress_w = measure("100%").max(40);
+                        let space_w = measure(" ").max(8);
+                        let max_w = vw as i32 - 15 - progress_w - 15 - space_w - 8;
                         // names 须先于 all_items 声明（all_items 借用它，析构逆序要求被借者后释）
                         let mut names: Vec<alloc::string::String, 20> = Vec::new();
+                        // dir_names 须先于 all_items 声明（同 names：all_items 借用它，析构逆序）
+                        let mut dir_names: Vec<alloc::string::String, 24> = Vec::new();
                         let mut all_items: Vec<&str, 20> = Vec::new();
                         let _ = all_items.push("退出");
+                        // 目录项在前：二级里是".."返回上级，根层是各子目录（/ 后缀）
+                        if self.cur_subdir.is_some() {
+                            let _ = dir_names.push(alloc::string::String::from(".."));
+                        }
+                        for d in self.subdirs.iter() {
+                            // "/" 后缀占约半宽：预算里先扣掉
+                            let _ = dir_names
+                                .push(alloc::string::String::from(truncate_name(d.as_str(), max_w - 8)) + "/");
+                        }
+                        for n in dir_names.iter() {
+                            if all_items.push(n.as_str()).is_err() {
+                                break;
+                            }
+                        }
                         for item in menus.iter() {
                             if names.push(truncate_name(item.as_str(), max_w)).is_err() {
                                 break;
@@ -1615,7 +1824,9 @@ impl Page for ReadPage {
                             let font = font.with_ignore_unknown_chars(true);
                             let item_height: u32 = 20;
                             let scroll_width: u32 = 10;
-                            let total_widget_items = self.book_progress.len() + 1;
+                            // 行模型：[退出] + 目录项 + 书——进度列的行号要计入目录项
+                            let dir_items = self.list_dir_items();
+                            let total_widget_items = dir_items + self.book_progress.len() + 1;
                             let content_h = total_widget_items as u32 * item_height;
                             let scroll_offset: i32 = if content_h <= vh {
                                 0
@@ -1635,7 +1846,7 @@ impl Page for ReadPage {
                                 if self.book_progress[bi].is_empty() {
                                     continue;
                                 }
-                                let item_y = (bi as i32 + 1) * item_height as i32 - scroll_offset;
+                                let item_y = (bi as i32 + 1 + dir_items as i32) * item_height as i32 - scroll_offset;
                                 if item_y < 0 || item_y + item_height as i32 > vh as i32 {
                                     continue;
                                 }
@@ -1683,8 +1894,7 @@ impl Page for ReadPage {
                                 bf.close();
                             }
                             if n > 0 {
-                                let text_area_h = vh as i32
-                                    - super::PROGRESS_AREA_HEIGHT as i32 - 2;
+                                let text_area_h = page_text_area_h();
                                 if let Some(cell) = bm_cell {
                                     // 点阵路径：内置 u8g2 位图，固定单元格宽度（中文满宽/英文半宽）
                                     let bm_font = match cell {
@@ -1695,8 +1905,9 @@ impl Page for ReadPage {
                                     let bm_font = bm_font.with_ignore_unknown_chars(true);
                                     let full_w = cell as i32;
                                     let half_w = (cell / 2) as i32;
-                                    let base_h = (cell as i32 + line_gap).max(1);
-                                    let max_lines = ((text_area_h / base_h) as u32).max(1);
+                                    let ink_h = cell as i32;
+                                    let base_h = (ink_h + line_gap).max(1);
+                                    let max_lines = fit_max_lines(text_area_h, ink_h, base_h);
                                     let line_h = text_area_h / max_lines as i32;
                                     let consumed = super::bitmap::paginate_render_bitmap(
                                         &bm_font, &ws.book_buf, n, display,
@@ -1708,8 +1919,9 @@ impl Page for ReadPage {
                                 } else if !font_ptr.is_null() {
                                     let ff: &mut ActualFile = unsafe { &mut *font_ptr };
                                     if let Some(fi) = crate::ttf_sd::open_font(ff, ws) {
-                                        let base_h = (fi.line_height(ttf_px) + line_gap).max(1);
-                                        let max_lines = ((text_area_h / base_h) as u32).max(1);
+                                        let ink_h = fi.line_height(ttf_px);
+                                    let base_h = (ink_h + line_gap).max(1);
+                                        let max_lines = fit_max_lines(text_area_h, ink_h, base_h);
                                         let line_h = text_area_h / max_lines as i32;
                                         let consumed = crate::ttf_sd::paginate_render(
                                             ff, &fi, ws, display, n, ttf_px,
@@ -1812,7 +2024,7 @@ impl Page for ReadPage {
                 Ok(v) => {
                     let root_result = v.open_root_dir();
                     match root_result {
-                        Ok(root) => {
+                        Ok(mut root) => {
                             let books_dir_res = root.open_dir("books");
                             if let Ok(mut books_dir) = books_dir_res {
                                 let books = match SdMount::get_books(&mut books_dir) {
@@ -1826,6 +2038,40 @@ impl Page for ReadPage {
                                 self.load_book_progress(&mut books_dir);
                                 self.books_dir_ptr =
                                     core::ptr::addr_of_mut!(books_dir) as *mut ActualDirectory<'static>;
+                                self.sd_root_ptr =
+                                    core::ptr::addr_of_mut!(root) as *mut ActualDirectory<'static>;
+
+                                // 二级目录：扫 books 根层子目录；上次/续读的书在子目录里
+                                // 则先进入（cur_subdir：续读来自 RESUME_SUBDIR，书单来自
+                                // LIST_SUBDIR，均由 new() 恢复）
+                                self.subdirs = SdMount::get_subdirs(&mut books_dir).unwrap_or_default();
+                                if let Some(sub) = self.cur_subdir.clone() {
+                                    let entered =
+                                        SdMount::find_entry_by_name(&mut books_dir, sub.as_str())
+                                            .map(|e| books_dir.change_dir(&e.name).is_ok())
+                                            .unwrap_or(false);
+                                    if entered {
+                                        // 二级内不再嵌套子目录
+                                        self.subdirs.clear();
+                                        self.menus = Some(
+                                            SdMount::get_books(&mut books_dir).unwrap_or_default(),
+                                        );
+                                    } else {
+                                        self.cur_subdir = None;
+                                    }
+                                }
+                                // 书单层：把暂存的"书下标"重基为列表光标（目录项排在书前面），
+                                // 并夹到列表末项内（SD 内容可能已变）
+                                if !self.reading {
+                                    self.choose_index =
+                                        (self.list_dir_items() + self.choose_index as usize) as u32;
+                                    let len = self.list_len();
+                                    if len > 0 {
+                                        self.choose_index = self.choose_index.min(len as u32 - 1);
+                                    } else {
+                                        self.choose_index = 0;
+                                    }
+                                }
 
                                 // 字体独立放在 fonts/ 目录（不存在则仅用内置点阵字体）
                                 let mut fonts_dir_opt: Option<ActualDirectory<'_>> =
@@ -2225,8 +2471,22 @@ impl Page for ReadPage {
                             unsafe {
                                 core::ptr::addr_of_mut!(PAGE_INDEX).write(None);
                             }
+                            resume_subdir_set(None);
+                            // choose_index 从书下标重基回列表下标（同上：计入目录项并夹取）
+                            mut_ref.choose_index =
+                                (mut_ref.list_dir_items() as u32) + mut_ref.choose_index;
+                            let len = mut_ref.list_len() as u32;
+                            if len > 0 {
+                                mut_ref.choose_index = mut_ref.choose_index.min(len - 1);
+                            } else {
+                                mut_ref.choose_index = 0;
+                            }
                             mut_ref.need_reload_progress = true;
                             mut_ref.menu_state = MenuState::Closed;
+                            mut_ref.need_render = true;
+                        } else if mut_ref.cur_subdir.is_some() {
+                            // 书单二级目录内长按 3：返回上级（根层长按才是退出）
+                            mut_ref.list_navigate(0).await;
                             mut_ref.need_render = true;
                         } else {
                             mut_ref.back().await;
@@ -2249,6 +2509,17 @@ impl Page for ReadPage {
                                 mut_ref.reading = false;
                                 unsafe {
                                     core::ptr::addr_of_mut!(PAGE_INDEX).write(None);
+                                }
+                                resume_subdir_set(None);
+                                // choose_index 从书下标重基回列表下标（目录项排在书前面：
+                                // 根层加子目录数，二级里是".."占 1 行），并夹到末项内
+                                mut_ref.choose_index =
+                                    (mut_ref.list_dir_items() as u32) + mut_ref.choose_index;
+                                let len = mut_ref.list_len() as u32;
+                                if len > 0 {
+                                    mut_ref.choose_index = mut_ref.choose_index.min(len - 1);
+                                } else {
+                                    mut_ref.choose_index = 0;
                                 }
                                 mut_ref.need_reload_progress = true;
                             }
@@ -2390,17 +2661,32 @@ impl Page for ReadPage {
                         } else if mut_ref.exit_selected {
                             mut_ref.back().await;
                         } else {
-                            // 打开选中书：从头/上次位置开始
-                            mut_ref.reading = true;
-                            mut_ref.ttf_file_len = 0;
-                            mut_ref.ttf_offset = 0;
-                            mut_ref.ttf_end = 0;
-                            unsafe {
-                                core::ptr::addr_of_mut!(PAGE_INDEX).write(Some(mut_ref.choose_index));
-                                // 新书从头（清除上一本续读偏移）
-                                core::ptr::addr_of_mut!(TTF_RESUME_OFFSET).write(0);
+                            let dir_items = mut_ref.list_dir_items();
+                            let ci = mut_ref.choose_index as usize;
+                            if ci < dir_items {
+                                // 目录项：进入子目录 / 返回上级
+                                mut_ref.list_navigate(ci).await;
+                                mut_ref.need_render = true;
+                            } else {
+                                // 打开选中书：从头/上次位置开始
+                                // choose_index 重基为"当前目录内的书下标"——阅读期所有
+                                // menus[choose_index] 查找（书签/分页/进度）零改动
+                                let book_idx = ci - dir_items;
+                                mut_ref.reading = true;
+                                mut_ref.ttf_file_len = 0;
+                                mut_ref.ttf_offset = 0;
+                                mut_ref.ttf_end = 0;
+                                mut_ref.choose_index = book_idx as u32;
+                                unsafe {
+                                    core::ptr::addr_of_mut!(PAGE_INDEX).write(Some(book_idx as u32));
+                                    // 新书从头（清除上一本续读偏移）
+                                    core::ptr::addr_of_mut!(TTF_RESUME_OFFSET).write(0);
+                                    resume_subdir_set(mut_ref.cur_subdir.as_deref());
+                                }
+                                // 书单层记忆：下次普通进入书单时恢复目录并选中这本书
+                                list_memory_set(mut_ref.cur_subdir.as_deref(), book_idx as u32);
+                                mut_ref.need_render = true;
                             }
-                            mut_ref.need_render = true;
                         }
                     }
                 }

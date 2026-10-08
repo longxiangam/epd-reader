@@ -219,7 +219,7 @@ pub struct DisplayStorage{
 #[derive(Debug, Clone, Copy)]
 pub struct ReadingSettings {
     pub ttf_px: u8,
-    pub line_gap: u8,
+    pub line_gap: i8, // 行距，可为负收紧行间距（-10..10）；旧数据 0..10 按 i8 读一致
     pub rotate: u8,
     /// null 结尾的字体文件名（如 b"font.ttf\0..."）
     pub font_name: [u8; 32],
