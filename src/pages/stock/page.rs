@@ -23,6 +23,63 @@ use time::OffsetDateTime;
 #[ram(unstable(rtc_fast))]
 static mut STOCK_MODE: u8 = 4; // 默认分时（Minute=4）
 
+/// 是否交易日：周一~五；holiday-cn 已同步时按其修正（节假日休市、调休周末开市）。
+fn is_trading_day(dt: &OffsetDateTime, holidays: Option<&crate::model::holiday::HolidayResponse>) -> bool {
+    let mut work = dt.weekday().number_days_from_monday() <= 4;
+    if let Some(resp) = holidays {
+        let ymd = dt.year() as u32 * 10000 + dt.month() as u32 * 100 + dt.day() as u32;
+        if let Some(h) = resp.holidays.iter().find(|h| h.date == ymd) {
+            work = !h.is_off_day; // 数据直接裁定休市/调休
+        }
+    }
+    work
+}
+
+/// 盘中判定：交易日 9:15~11:31 / 12:55~15:01（含集合竞价与收盘，端点留 1 分钟余量）。
+fn market_open_now(
+    dt: &OffsetDateTime,
+    holidays: Option<&crate::model::holiday::HolidayResponse>,
+) -> bool {
+    if !is_trading_day(dt, holidays) {
+        return false;
+    }
+    let hm = dt.hour() as i32 * 60 + dt.minute() as i32;
+    (9 * 60 + 15..11 * 60 + 31).contains(&hm) || (12 * 60 + 55..15 * 60 + 1).contains(&hm)
+}
+
+/// 距下一个开盘时点的秒数：盘中/临近午休→当日剩余时段边界；
+/// 收盘后/周末/节假日→次交易日 9:25（扫 30 天，兜底 12h）。
+fn secs_until_next_open(
+    dt: &OffsetDateTime,
+    holidays: Option<&crate::model::holiday::HolidayResponse>,
+) -> u64 {
+    let now_ts = dt.unix_timestamp();
+    let day_start = dt.replace_time(time::Time::MIDNIGHT).unix_timestamp();
+    let at = |h: i32, m: i32, base: i64| base + (h as i64 * 3600 + m as i64 * 60);
+    let hm = dt.hour() as i32 * 60 + dt.minute() as i32;
+    if is_trading_day(dt, holidays) {
+        if hm < 9 * 60 + 25 {
+            return (at(9, 25, day_start) - now_ts).max(60) as u64;
+        }
+        if hm < 12 * 60 + 55 {
+            return (at(12, 55, day_start) - now_ts).max(60) as u64;
+        }
+    }
+    let mut ts = day_start + 86400;
+    for _ in 0..30 {
+        match OffsetDateTime::from_unix_timestamp(ts) {
+            Ok(next) => {
+                if is_trading_day(&next, holidays) {
+                    return (at(9, 25, ts) - now_ts).max(60) as u64;
+                }
+            }
+            Err(_) => break,
+        }
+        ts += 86400;
+    }
+    12 * 3600
+}
+
 /// 股票当前视图：0=总览，1=明细。存 rtc_fast，深睡唤醒后恢复到上次视图。
 #[ram(unstable(rtc_fast))]
 static mut STOCK_VIEW: u8 = 0;
@@ -497,6 +554,12 @@ impl Page for StockPage {
                 }
             }
         }
+        // 节假日数据（已同步才有效）：休市/调休判断用
+        let holidays = if crate::weather::sync_holiday_success() {
+            crate::weather::HolidayInfo::get_holiday().await
+        } else {
+            None
+        };
         loop {
             if !self.running {
                 break;
@@ -521,13 +584,25 @@ impl Page for StockPage {
             if self.need_render {
                 self.render().await;
             }
-            // 总览/分时实时模式每 2 分钟唤醒刷新；其它模式每 12 小时。
+            // 总览/分时实时模式：开盘时间内每 2 分钟唤醒刷新；非开盘（午休/盘前
+            // 盘后/周末/节假日）直接睡到下一个开盘时点。其它模式每 12 小时。
             // 深睡唤醒 = 重启 → run() 重入总览重新 fetch_overview()；
             // 模式经 rtc_fast(STOCK_MODE) 跨重启保留，故入睡时长仍正确。
-            let sleep_secs: u64 = if self.view == StockView::Overview || self.mode.is_realtime() {
-                120
-            } else {
+            let realtime = self.view == StockView::Overview || self.mode.is_realtime();
+            let sleep_secs: u64 = if !realtime {
                 12 * 3600
+            } else {
+                match crate::worldtime::get_clock() {
+                    Some(clock) => {
+                        let now = clock.local().await;
+                        if market_open_now(&now, holidays.as_ref()) {
+                            120
+                        } else {
+                            secs_until_next_open(&now, holidays.as_ref())
+                        }
+                    }
+                    None => 120, // 无时钟源无法判断，维持原频率
+                }
             };
             // 空闲多久入睡复用配置「天气睡眠时间」，与天气/日历页一致。
             let sleep_storage = crate::storage::SleepStorage::read().unwrap_or_default();
