@@ -64,6 +64,8 @@ epd2in9 = []
 epd2in7 = []
 epd4in2 = []
 enable_debug = []
+board_v2 = []
+board_v1 = []
 weather-openmeteo = []
 ttf_spike = ["dep:ab_glyph"]
 # 三个按键全部走 ADC 分压检测（GPIO2 单脚分压电阻梯），开机进按键校准，长按15秒任意键可重新校准

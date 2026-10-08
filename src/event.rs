@@ -78,7 +78,8 @@ pub async fn toggle_event(event_type: EventType,_ms:u64){
 
 
 #[embassy_executor::task]
-pub async fn run(key2: esp_hal::peripherals::GPIO4<'static>){
+#[cfg(feature = "board_v2")]
+pub async fn run(key2: crate::board::KeyLadderGpio){
     // 三键共用 GPIO4，按下都会拉到数字低电平（实测键1≈20mV/键2≈282mV/
     // 键3≈519mV，均低于数字低阈值）→ 下降沿检测按键，ADC 平均值仅用于区分键号
     let mut key_all = Input::new(key2, esp_hal::gpio::InputConfig::default().with_pull(Pull::Up));
@@ -98,8 +99,43 @@ pub async fn run(key2: esp_hal::peripherals::GPIO4<'static>){
     }
 }
 
-// 按键 ADC 引脚随 Key2Pin 走（板级定义）
-pub static ADC_PIN: Mutex<CriticalSectionRawMutex, Option<AdcPin<esp_hal::peripherals::GPIO4<'static>, esp_hal::peripherals::ADC1, AdcCalCurve<esp_hal::peripherals::ADC1>>>> = Mutex::new(None);
+/// 旧板（epd2in9/epd2in7）：数字键 GPIO9（键1）+ 三键梯 GPIO2（键2/3 走 ADC），
+/// 两路下降沿 select（master 行为，接入统一的 mark_user_touch）。
+#[embassy_executor::task]
+#[cfg(feature = "board_v1")]
+pub async fn run(
+    key1: esp_hal::peripherals::GPIO9<'static>,
+    key2: crate::board::KeyLadderGpio,
+){
+    let mut key1 = Input::new(key1, esp_hal::gpio::InputConfig::default().with_pull(Pull::Up));
+    let mut key2 = Input::new(key2, esp_hal::gpio::InputConfig::default().with_pull(Pull::Up));
+    loop {
+        match embassy_futures::select::select(
+            key1.wait_for_falling_edge(),
+            key2.wait_for_falling_edge(),
+        )
+        .await
+        {
+            embassy_futures::select::Either::First(_) => {
+                key_detection(&mut key1, 1).await;
+            }
+            embassy_futures::select::Either::Second(_) => {
+                let num = judge_adc_num().await;
+                if num == 0 {
+                    Timer::after_millis(10).await;
+                    continue;
+                }
+                key_detection(&mut key2, num).await;
+            }
+        }
+        refresh_active_time().await;
+        crate::sleep::mark_user_touch();
+        Timer::after_millis(10).await;
+    }
+}
+
+// 按键 ADC 引脚类型随板型走（见 board::KeyLadderGpio）
+pub static ADC_PIN: Mutex<CriticalSectionRawMutex, Option<AdcPin<crate::board::KeyLadderGpio, esp_hal::peripherals::ADC1, AdcCalCurve<esp_hal::peripherals::ADC1>>>> = Mutex::new(None);
 pub static ADC_PER: Mutex<CriticalSectionRawMutex, Option<Adc<'static, esp_hal::peripherals::ADC1, esp_hal::Blocking>>> = Mutex::new(None);
 
 pub static  ENABLE_DOUBLE:Mutex<CriticalSectionRawMutex,bool> = Mutex::new(false);
@@ -183,12 +219,7 @@ pub async fn key_detection<P:InputPin>(key: &mut P, key_num: usize)
 /// 键1 ≈ 44 / 键2 ≈ 409 / 键3 ≈ 645——按下都低于数字低阈值，故用边沿检测按键、
 /// ADC 平均值仅区分键号。阈值取相邻实测值的中点；明显高于键3 → 视为抖动忽略。
 async fn judge_adc_num() -> usize {
-    const SAMPLES: usize = 12;
-    const T_KEY1: u32 = 220; // < 220 → 键1（实测 ~25）
-    const T_KEY2: u32 = 520; // 220~520 → 键2（实测 ~409）
-    const T_KEY3: u32 = 900; // 520~900 → 键3（实测 ~645）
-
-    let mut buf = [0u16; SAMPLES];
+    let mut buf = [0u16; 12];
     for slot in buf.iter_mut() {
         loop {
             let v = {
@@ -208,15 +239,33 @@ async fn judge_adc_num() -> usize {
         }
     }
     buf.sort_unstable();
-    let mid = buf[SAMPLES / 2] as u32;
+    let mid = buf[6] as u32;
     println!("[adc_key] press median={}", mid);
-    if mid < T_KEY1 {
-        1
-    } else if mid < T_KEY2 {
-        2
-    } else if mid < T_KEY3 {
-        3
-    } else {
-        0
+
+    // 键号判定按板型分：梯上键位布局与阈值实测值不同
+    #[cfg(feature = "board_v2")]
+    {
+        // v2（GPIO4 梯，键1/2/3 都在梯上）：<220→键1（实测~25）；220~520→键2（~409）；520~900→键3（~645）
+        if mid < 220 {
+            1
+        } else if mid < 520 {
+            2
+        } else if mid < 900 {
+            3
+        } else {
+            0
+        }
+    }
+    #[cfg(feature = "board_v1")]
+    {
+        // v1（GPIO2 梯，只有键2/3 在梯上，键1 走 GPIO9 直连不进此函数）：
+        // <200→键2；200~1000→键3；>1000 抖动忽略（master 阈值）
+        if mid < 200 {
+            2
+        } else if mid > 1000 {
+            0
+        } else {
+            3
+        }
     }
 }

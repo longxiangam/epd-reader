@@ -21,8 +21,8 @@ impl  Battery{
 }
 
 pub static BATTERY:Mutex<CriticalSectionRawMutex,Option<Battery>> = Mutex::new(None);
-// 电池分压 ADC 引脚（板级定义：v22=GPIO2，其它板型=GPIO4）
-pub static ADC_PIN:Mutex<CriticalSectionRawMutex,Option<AdcPin<esp_hal::peripherals::GPIO2<'static>,esp_hal::peripherals::ADC1,esp_hal::analog::adc::AdcCalCurve<esp_hal::peripherals::ADC1>>>> = Mutex::new(None);
+// 电池分压 ADC 引脚（板级定义见 board::BatAdcGpio：v22=GPIO2，旧板=GPIO4）
+pub static ADC_PIN:Mutex<CriticalSectionRawMutex,Option<AdcPin<crate::board::BatAdcGpio,esp_hal::peripherals::ADC1,esp_hal::analog::adc::AdcCalCurve<esp_hal::peripherals::ADC1>>>> = Mutex::new(None);
 
 /// 最近一次电量百分比，RTC 内存保存，sleep_renderer 可同步读取
 #[ram(unstable(rtc_fast))]

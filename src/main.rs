@@ -109,17 +109,17 @@ async fn main(spawner: Spawner) -> ! {
     let config = HalConfig::default().with_cpu_clock(CpuClock::max());
     let mut peripherals = hal_init(config);
 
-    // 释放上次深睡布下的 pad hold（RTC 域跨深睡保留——不释放的话，
-    // GPIO1 的驱低上轨写不进去 → 轨断电 → 显示/SD 全灭）
-    esp_hal::peripherals::LPWR::regs()
-        .pad_hold()
-        .modify(|_, w| unsafe { w.bits(0) });
+    // pad hold：v22 释放上次深睡布下的 hold（不释放的话 GPIO1 的驱低上轨
+    // 写不进去 → 轨断电 → 显示/SD 全灭）；旧板给 GPIO1(SD 轨) 打 hold
+    crate::board::init_pad_hold(&mut peripherals);
 
     // I2C 总线（v22：GPIO9=SDA GPIO21=SCL，挂 AHT20 + PCF8563；旧板无）——
     // 在任何外设被 move 之前构造
     let i2c = crate::board::init_i2c(&mut peripherals);
     // MISO(GPIO10) 内部上拉（v22：SD 兼容；需在 SPI 占用 GPIO10 前配置）
     crate::board::sd_miso_pullup(&mut peripherals);
+    // 电源轨须在 EPD 等引脚 move 出 peripherals 之前初始化
+    crate::board::init_power_rails(&mut peripherals).await;
 
     // Timer for embassy runtime
     let timg0 = TimerGroup::new(peripherals.TIMG0);
@@ -157,20 +157,6 @@ async fn main(spawner: Spawner) -> ! {
     let epd_mosi = peripherals.GPIO0;
     let epd_miso = unsafe { peripherals.GPIO10.clone_unchecked() };
 
-    // ── 电源控制（master 结构；v22：IO1 单轨同时供 SD+EINK，低电平有效=开）──
-    // 两个槽都填同一轨的句柄：睡眠时统一置高断轨，与 master 双电源脚等价
-    let mut eink_pwr_ctrl = Output::new(
-        unsafe { peripherals.GPIO1.clone_unchecked() },
-        Level::Low,
-        OutputConfig::default(),
-    );
-    let mut sd_pwr_ctrl = Output::new(peripherals.GPIO1, Level::Low, OutputConfig::default());
-    crate::sleep::EINK_PWER_PIN
-        .lock()
-        .await
-        .replace(eink_pwr_ctrl);
-    crate::sleep::SD_PWER_PIN.lock().await.replace(sd_pwr_ctrl);
-
     let sdcard_cs = Output::new(peripherals.GPIO5, Level::High, OutputConfig::default());
 
     // SPI bus
@@ -185,10 +171,7 @@ async fn main(spawner: Spawner) -> ! {
     .with_miso(epd_miso)
     .with_mosi(epd_mosi);
 
-    // 按键梯（三键全部在 GPIO4）
-    let key2 = unsafe { peripherals.GPIO4.clone_unchecked() };
-
-    // ── I2C 总线（v22：GPIO9=SDA GPIO21=SCL，挂 AHT20 + PCF8563；旧板无）──
+    // 按键梯 + 数字直连键按板型取自 board（v22 仅梯；旧板另有 GPIO9 键1）
     if let Some(i2c) = i2c {
         crate::i2c_bus::I2C.lock().await.replace(i2c);
     }
@@ -212,15 +195,15 @@ async fn main(spawner: Spawner) -> ! {
         timed_wake, timed_wake, stale, wake_reason
     );
 
-    // ADC setup（按键梯 GPIO4 / 电池分压 GPIO2）
+    // ADC setup（按键梯 / 电池分压——引脚按板型见 board）
     let mut adc1_config = AdcConfig::new();
     let adc1_pin = adc1_config.enable_pin_with_cal::<_, AdcCalCurve<esp_hal::peripherals::ADC1>>(
-        unsafe { peripherals.GPIO4.clone_unchecked() },
+        crate::board::key_ladder_pin(),
         Attenuation::_11dB,
     );
     let bat_adc1_pin = adc1_config
         .enable_pin_with_cal::<_, AdcCalCurve<esp_hal::peripherals::ADC1>>(
-            peripherals.GPIO2,
+            crate::board::bat_pin(),
             Attenuation::_11dB,
         );
 
@@ -231,7 +214,7 @@ async fn main(spawner: Spawner) -> ! {
     // 按键脚数字输入 + 上拉——在 ADC 初始化之后再配一次（set_analog 会剥掉）
     {
         let k2_in = Input::new(
-            unsafe { peripherals.GPIO4.clone_unchecked() },
+            crate::board::key_ladder_pin(),
             InputConfig::default().with_pull(Pull::Up),
         );
         core::mem::forget(k2_in);
@@ -240,7 +223,17 @@ async fn main(spawner: Spawner) -> ! {
     // 板载传感器任务（AHT20 温湿度）
     crate::board::spawn_sensors(&spawner);
 
-    spawner.spawn(event::run(key2).unwrap());
+    // 按键任务：v22 单梯（GPIO4）；旧板 数字键 GPIO9 + 梯 GPIO2
+    #[cfg(feature = "board_v2")]
+    spawner.spawn(event::run(crate::board::key_ladder_pin()).unwrap());
+    #[cfg(feature = "board_v1")]
+    spawner.spawn(
+        event::run(
+            crate::board::key_direct_pin(),
+            crate::board::key_ladder_pin(),
+        )
+        .unwrap(),
+    );
 
     let battery = Battery::new();
     battery::BATTERY.lock().await.replace(battery);
@@ -310,7 +303,7 @@ async fn main(spawner: Spawner) -> ! {
 
     // RTC 唤醒键注册：必须在阅读分支之前——阅读模式睡眠(to_sleep_tips/reboot_sleep)
     // 也要靠这个 RTC IO 唤醒源，否则睡下唤不醒。
-    let rtc_io = static_cell::make_static!(unsafe { peripherals.GPIO4.clone_unchecked() });
+    let rtc_io = static_cell::make_static!(crate::board::key_ladder_pin());
     add_rtcio(rtc_io, WakeupLevel::Low).await;
 
     // 重启分模式：阅读模式启动时不初始化 WiFi，独占整块堆做 TTF（大字形缓存）。
