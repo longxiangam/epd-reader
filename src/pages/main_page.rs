@@ -138,17 +138,23 @@ impl MainPage {
 
 
     fn increase(&mut self){
-        if self.choose_index < (self.menus.as_mut().unwrap().len() - 1) as u32 {
-            self.choose_index += 1;
-            self.need_render = true;
+        let max = self.menus.as_mut().unwrap().len() as u32;
+        if max == 0 {
+            return;
         }
+        // 循环导航：最后一个继续往后 → 回到第一个图标
+        self.choose_index = if self.choose_index + 1 >= max { 0 } else { self.choose_index + 1 };
+        self.need_render = true;
     }
 
     fn decrease(&mut self){
-        if self.choose_index > 0 {
-            self.choose_index -= 1;
-            self.need_render = true;
+        let max = self.menus.as_mut().unwrap().len() as u32;
+        if max == 0 {
+            return;
         }
+        // 循环导航：第一个继续往前 → 回到最后一个图标
+        self.choose_index = if self.choose_index == 0 { max - 1 } else { self.choose_index - 1 };
+        self.need_render = true;
     }
 
     async fn back(&mut self){
