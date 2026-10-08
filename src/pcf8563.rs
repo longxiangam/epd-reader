@@ -85,8 +85,10 @@ pub fn ts_valid(ts: i64) -> bool {
 // 10=1Hz 11=1/60Hz）；0x0F Timer_A（倒计数值）。到 0 时 TF（Control_status_2
 // bit2）置位、INT 脚拉低（TIE=1 时）。TF 置位后保持，需软件写 0 清除。
 
-const REG_CTRL2: u8 = 0x01; // bit2 TF / bit3 AF / bit0 TIE
+const REG_CTRL2: u8 = 0x01; // bit1 AIE / bit2 TF / bit3 AF / bit0 TIE
 const REG_TIMER_CTRL: u8 = 0x0E; // bit7 TE，bits1:0 TD
+const REG_ALARM_MIN: u8 = 0x09; // 报警：分（bit7=1 禁用比较；BCD，写 0x09 起自动连写 0x0A~0x0C）
+const REG_ALARM_WD: u8 = 0x0C; // 报警：星期（禁用比较时写 0x80）
 const REG_TIMER_A: u8 = 0x0F;
 
 /// 深睡前布防倒计时定时器：count 分钟后 INT 拉低（1/60Hz 分频，最大 255 分钟 ≈ 4.25 小时）。
@@ -132,8 +134,42 @@ pub async fn disarm_timer() -> bool {
 pub async fn consume_timer_wake() -> bool {
     let mut b = [0u8; 1];
     let ok = i2c_bus::write_read(ADDR, &[REG_CTRL2], &mut b).await.is_ok();
-    // 清 TF/AF（写 0）+ 停定时器
-    let _ = i2c_bus::write(ADDR, &[REG_CTRL2, 0x01]).await;
+    // 清 TF/AF（写 0）+ 停定时器 + 关中断使能——报警布防遗留的 AIE 一并关闭，
+    // 否则运行期到点 INT 拉低 GPIO4 造成假按键
+    let _ = i2c_bus::write(ADDR, &[REG_CTRL2, 0x00]).await;
     let _ = i2c_bus::write(ADDR, &[REG_TIMER_CTRL, 0x00]).await;
-    ok && (b[0] & 0x04 != 0)
+    ok && (b[0] & (0x04 | 0x08) != 0) // TF（倒计时）或 AF（报警）
+}
+
+/// 深睡前布防绝对时间报警（PCF 自身走时，UTC 秒）：到点 INT 拉低唤醒。
+/// 用于超过倒计时上限（255 分钟）的长间隔——纽扣电池 32k 晶振走时精确，
+/// 主控深睡慢时钟漂移大。报警无月份寄存器：间隔 >28 天时会在次月同日
+/// 提前唤醒一次（醒来重新布防即可，无害）。
+pub async fn arm_alarm_at(ts: i64) -> bool {
+    let Ok(dt) = OffsetDateTime::from_unix_timestamp(ts) else {
+        return false;
+    };
+    // 停中断源并清 TF/AF（遗留标志会导致立即唤醒）
+    if i2c_bus::write(ADDR, &[REG_CTRL2, 0x00]).await.is_err() {
+        return false;
+    }
+    if i2c_bus::write(ADDR, &[REG_TIMER_CTRL, 0x00]).await.is_err() {
+        return false;
+    }
+    // 报警寄存器 0x09 起自动连写 0x0A~0x0C：分/时/日 BCD 比较使能，
+    // 星期寄存器写 0x80（bit7=1 禁用比较）
+    let ok = i2c_bus::write(
+        ADDR,
+        &[
+            REG_ALARM_MIN,
+            to_bcd(dt.minute() as u8),
+            to_bcd(dt.hour() as u8),
+            to_bcd(dt.day() as u8),
+            0x80,
+        ],
+    )
+    .await
+    .is_ok();
+    // 使能报警中断 AIE（bit1）
+    i2c_bus::write(ADDR, &[REG_CTRL2, 0x02]).await.is_ok() && ok
 }

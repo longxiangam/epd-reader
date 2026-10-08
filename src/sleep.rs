@@ -106,8 +106,9 @@ pub async fn to_sleep_tips(sleep_time:Duration, idle_time:Duration, show_sleep:b
         // 深睡电流更低。布防失败自动退回 ESP RTC 定时唤醒。sleep_time=0 → 不布防。
         if sleep_time.as_secs() > 0 {
             let total = sleep_time.as_secs();
-            // ≤255s 走 1Hz 秒档；≤255min 走 1/60Hz 分档（向上取整，最多多睡 59s）；
-            // 更长（股票跨天 12h）超出倒计时量程，退回 ESP RTC 定时唤醒。
+            // 有 PCF（v2）：≤255s 走 1Hz 秒档；≤255min 走 1/60Hz 分档（向上取整，
+            // 最多多睡 59s）；更长走绝对时间报警（纽扣电池走时精确，主控深睡慢
+            // 时钟漂移大，不用主控 RTC）。无 PCF（v1）一律 ESP RTC 定时。
             let armed = if total <= 255 {
                 println!("[sleep] pcf arm {}s (1Hz)", total);
                 crate::pcf8563::arm_timer_secs(total as u8).await
@@ -115,8 +116,20 @@ pub async fn to_sleep_tips(sleep_time:Duration, idle_time:Duration, show_sleep:b
                 let mins = ((total + 59) / 60) as u8;
                 println!("[sleep] pcf arm {}min (1/60Hz, ={}s)", mins, total);
                 crate::pcf8563::arm_timer_minutes(mins).await
+            } else if crate::board::HAS_PCF {
+                match crate::pcf8563::read_time().await {
+                    Some(pcf_now) => {
+                        // 报警按 PCF 自身走时设定（UTC），到点 INT 唤醒
+                        println!("[sleep] pcf arm alarm +{}s", total);
+                        crate::pcf8563::arm_alarm_at(pcf_now + total as i64).await
+                    }
+                    None => {
+                        println!("[sleep] pcf 走时无效 → esp rtc {}s", total);
+                        false
+                    }
+                }
             } else {
-                println!("[sleep] {}s 超 pcf 量程 → esp rtc 定时", total);
+                println!("[sleep] {}s 无 pcf → esp rtc 定时", total);
                 false
             };
             if !armed {
