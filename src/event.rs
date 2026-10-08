@@ -6,6 +6,7 @@ use core::future::Future;
 use core::pin::Pin;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::mutex::Mutex;
+use embassy_sync::signal::Signal;
 use embassy_time::{Duration, Instant, Timer};
 use embedded_hal::digital::InputPin;
 use esp_hal::analog::adc::{Adc, AdcCalCurve, AdcPin};
@@ -41,6 +42,10 @@ struct Listener{
 }
 
 static LISTENER:Mutex<CriticalSectionRawMutex,Vec<Listener,20>>  = Mutex::new(Vec::new()) ;
+
+/// 按键事件队列：容量 8。生产者=toggle_event（扫描/状态机），消费者=dispatch 任务。
+static EVENT_QUEUE:Mutex<CriticalSectionRawMutex,Vec<EventType,8>>  = Mutex::new(Vec::new()) ;
+static EVENT_READY:Signal<CriticalSectionRawMutex,()>  = Signal::new();
 pub async fn on<F>(event_type: EventType, callback: F)
 where F: FnMut(EventInfo) -> Pin<Box<dyn Future<Output=()>  + 'static>>  + Send + Sync + 'static,
 {
@@ -58,13 +63,52 @@ pub async fn on_fixed<F>(event_type: EventType,target_ptr:usize, callback: F)
 }
 
 pub async fn clear(){
-    let mut vec = LISTENER.lock().await;
-    vec.clear();
+    // fixed 项跨页面切换保留（on_fixed 的语义）；其余随页面重绑定清除
+    LISTENER.lock().await.retain(|l| l.fixed);
 }
 
 
+/// 事件入队（生产端）：扫描/状态机只管产出，派发由 dispatch 任务串行执行——
+/// 长回调期间扫描不停，按键不丢。KeyLongIng 连发在队尾合并；队列满丢最旧保最新。
 pub async fn toggle_event(event_type: EventType,_ms:u64){
     println!("event_type:{:?}",event_type);
+    let mut q = EVENT_QUEUE.lock().await;
+    if let EventType::KeyLongIng(k) = event_type {
+        if let Some(EventType::KeyLongIng(k2)) = q.last() {
+            if *k2 == k {
+                q.pop(); // 队尾同键连发 → 原位替换，不堆积
+            }
+        }
+    }
+    if q.len() >= q.capacity() {
+        q.remove(0); // 满：丢最旧保最新
+    }
+    q.push(event_type).ok();
+    drop(q);
+    EVENT_READY.signal(());
+}
+
+/// 事件派发任务：FIFO 串行派发到监听回调。
+/// 注意：派发期间持有 LISTENER 锁且回调串行执行——回调内禁止调用
+/// on/clear/on_fixed 重绑定事件（会死锁）；重绑定走页面 run 循环的约定不变。
+#[embassy_executor::task]
+pub async fn dispatch() {
+    loop {
+        EVENT_READY.wait().await;
+        loop {
+            let ev = {
+                let mut q = EVENT_QUEUE.lock().await;
+                if q.is_empty() { None } else { Some(q.remove(0)) }
+            };
+            match ev {
+                Some(ev) => dispatch_event(ev).await,
+                None => break,
+            }
+        }
+    }
+}
+
+async fn dispatch_event(event_type: EventType) {
     let mut vec = LISTENER.lock().await;
     for listener in vec.iter_mut() {
         if listener.event_type == event_type{

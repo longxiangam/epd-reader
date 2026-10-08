@@ -234,6 +234,8 @@ async fn main(spawner: Spawner) -> ! {
         )
         .unwrap(),
     );
+    // 事件派发任务：从事件队列串行派发到监听回调（扫描与派发解耦，长回调不丢键）
+    spawner.spawn(event::dispatch().unwrap());
 
     let battery = Battery::new();
     battery::BATTERY.lock().await.replace(battery);
