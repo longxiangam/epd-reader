@@ -246,6 +246,22 @@ async fn main(spawner: Spawner) -> ! {
     battery::BATTERY.lock().await.replace(battery);
     battery::ADC_PIN.lock().await.replace(bat_adc1_pin);
 
+    // GPIO2（电池分压脚）深睡隔离：slp_sel=1 + sleep 路径 IE/WPU/WPD 全 0。
+    // GPIO2 是 strapping 脚，硬件复位默认带内部上拉——深睡数字域掉电后 pad 若
+    // 回退到复位默认，会把分压中点（VBAT/2≈1.7V）抬到 ~3V，徒增漏电。显式
+    // sleep 配置在 RTC 域，深睡中强制高阻。运行期 pad 仍走 FUN_* 模拟配置，
+    // ADC 采样不受影响。set_analog 与 isolate_digital_gpio 都不碰这些位，
+    // 开机设一次终身有效。
+    {
+        let io_mux = esp_hal::peripherals::IO_MUX::regs();
+        io_mux.gpio(2).modify(|_, w| {
+            w.slp_sel().set_bit();
+            w.mcu_ie().clear_bit();
+            w.mcu_wpu().clear_bit();
+            w.mcu_wpd().clear_bit()
+        });
+    }
+
     // Shared SPI bus using critical section
     let shared_spi = CsMutex::new(RefCell::new(spi));
     let shared_spi_static = static_cell::make_static!(shared_spi);
