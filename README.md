@@ -1,8 +1,10 @@
 # EPD Reader
 
+> English | [README_EN.md](README_EN.md)
+
 基于 ESP32-C3 的电子墨水屏阅读器，使用 Rust `#![no_std]` 嵌入式开发。
 
-支持 WiFi 配网、NTP 时间同步、TXT 电子书阅读、天气预报、农历/节假日显示、沪深股票行情、BMP 图片浏览、IP 自动定位、自动休眠、Web 配置等功能。
+支持 WiFi 配网、NTP 时间同步、TXT/TTF 电子书阅读、天气预报、农历/节假日显示、沪深股票行情、BMP 图片浏览、IP 自动定位、硬件 RTC 走时、自动休眠、Web 配置等功能。
 
 硬件设计：https://oshwhub.com/longxiangam/epd_reader
 
@@ -36,13 +38,14 @@
 
 | 功能 | 说明 |
 |------|------|
-| 电子书阅读 | TXT 文件自动分页、书签管理、进度保存 |
-| 天气显示 | 心知天气 / OpenMeteo 双数据源，5 日预报 + 温度曲线，支持 IP 自动定位 |
+| 电子书阅读 | TXT 文件 TTF 矢量字体动态分页（SD 卡字体可选）+ 内置点阵字体，书签管理、书单二级目录、排版设置（字号/行距/笔画加粗/旋转/方向键互换）、进度保存 |
+| 天气显示 | 心知天气 / OpenMeteo 双数据源，5 日预报 + 温度曲线 + 室内温湿度（v2 板载 AHT20），支持 IP 自动定位 |
 | 农历日历 | 公历/农历对照，节气，节假日 + 补班标记，附 3 日天气 |
-| 股票行情 | 沪深股票分时 / 日K / 周K / 月K / 折线 + 实时盘口，多股切换、按周期自动刷新 |
+| 股票行情 | 沪深股票分时 / 日K / 周K / 月K / 折线 + 实时盘口，多股切换；开盘时段 2 分钟刷新，非开盘睡到下一开盘（节假日感知） |
 | 图片浏览 | BMP 图片查看，可设为待机壁纸 |
-| WiFi 配网 | AP 模式热点，手机扫码配网，Web 管理界面 |
-| NTP 时间 | 自动同步网络时间，深度睡眠后 RTC 恢复 |
+| WiFi 配网 | AP 模式热点，手机扫码配网，Web 管理界面（书籍/图片/壁纸上传与管理） |
+| NTP 时间 | 自动同步网络时间，对时结果写入硬件 RTC，唤醒优先从硬件 RTC 恢复 |
+| 硬件 RTC | PCF8563（v2 板载，CR2032 备电，UTC 走时）：系统时钟源 + 深睡定时唤醒（秒/分档倒计时与绝对时间报警） |
 | 电量与显示 | ADC 电池采样与百分比显示，全刷间隔 / 默认主页 / 各页睡眠时长可配置 |
 | 低功耗 | 自动深度睡眠，按键/定时器唤醒，外设电源独立控制 |
 | 错误日志 | 自定义 Panic Handler，崩溃信息写入 Flash |
@@ -53,43 +56,49 @@
 |------|------|
 | MCU | ESP32-C3 (RISC-V, 160MHz, 400KB SRAM, 4MB Flash) |
 | 显示屏 | Waveshare 4.2" (400×300) / 2.7" (264×176) / 2.9" (296×128) 电子墨水屏 |
-| 存储 | MicroSD 卡 (≤32GB, SD/SDHC, MBR 分区) |
-| 输入 | 按键 ×3 (其中一个通过 ADC 分压实现两键) |
+| 存储 | MicroSD 卡 (≤32GB, SD/SDHC, MBR 分区)，TTF 字体放卡根目录即可选用 |
+| 输入 | 按键 ×3（v1 旧板：键1 直连 GPIO9，键2/3 走 GPIO2 ADC 分压；v2 新板：三键全走 GPIO4 ADC 分压梯） |
+| 传感器 | v2 新板板载 AHT20 温湿度 + PCF8563 硬件 RTC（I2C）；v1 旧板无 |
 | 电源 | 锂电池 + ADC 电压检测 |
 
 ## 技术栈
 
 - **语言**: Rust Edition 2024 (nightly), `#![no_std]`
 - **目标**: `riscv32imc-unknown-none-elf`
-- **HAL**: esp-hal v1.1.0
+- **HAL**: esp-hal v1.1.1
 - **WiFi**: esp-radio v0.18.0
 - **异步**: Embassy (executor v0.10, net v0.9, sync v0.8)
 - **RTOS**: esp-rtos v0.3.0
 - **图形**: embedded-graphics v0.8
-- **字体**: u8g2-fonts (GB2312 中文)
-- **文件系统**: embedded-sdmmc v0.9.0
+- **字体**: u8g2-fonts (GB2312 点阵) + ab_glyph_rasterizer (TTF 矢量栅格化)
+- **文件系统**: embedded-sdmmc（[fork lfn-create 分支](https://github.com/longxiangam/embedded-sdmmc-rs)，支持中文文件名创建）
 - **HTTP/TLS**: reqwless v0.14 + embedded-tls v0.18
 
 ## 构建
 
 需要 nightly 工具链（见 `rust-toolchain.toml`）。固件体积已超过 debug 默认配置，**必须用 release 构建**（`Cargo.toml` 中 `[profile.release] opt-level = "s"`），否则链接时 `.text` 会溢出 3MB 应用分区。
 
+feature 为双维度：`epd_*` 选屏幕（`epd2in9` / `epd2in7` / `epd4in2`），`board_*` 选板型（`board_v1` 旧板 / `board_v2` v22 新板），一个设备 = epd + board 组合（v2 新板仅支持 `epd4in2`）。
+
 ```bash
 # 安装工具链
 rustup target add riscv32imc-unknown-none-elf
 cargo install espflash
 
-# 构建 4.2 寸版本并烧录（.cargo/config.toml 配置了 espflash 为 runner）
-cargo run --release --features epd4in2
+# 构建 v22 新板 4.2 寸版本并烧录（.cargo/config.toml 配置了 espflash 为 runner）
+cargo run --release --features epd4in2,board_v2
 
-# 构建 2.7 寸版本
-cargo run --release --features epd2in7
+# 构建 v1 旧板 4.2 寸版本
+cargo run --release --features epd4in2,board_v1
 
-# 构建 2.9 寸版本（天气/日历页为 296×128 横屏适配，视觉未精细调整）
-cargo run --release --features epd2in9
+# 构建 v1 旧板 2.7 寸版本
+cargo run --release --features epd2in7,board_v1
+
+# 构建 v1 旧板 2.9 寸版本（天气/日历页为 296×128 横屏适配，视觉未精细调整）
+cargo run --release --features epd2in9,board_v1
 
 # 带调试模式（启动时若 Flash 有错误日志则进入调试页）
-cargo run --release --features "epd4in2,enable_debug"
+cargo run --release --features "epd4in2,board_v2,enable_debug"
 ```
 
 > 三个尺寸都能编译。`epd2in9` 的天气/日历页布局是按 296×128 横屏适配的，功能正常但排版未针对该尺寸精细调整。
@@ -97,20 +106,25 @@ cargo run --release --features "epd4in2,enable_debug"
 `weather-openmeteo` feature 可切换天气数据源为 Open-Meteo（默认用心知天气 Seniverse）：
 
 ```bash
-cargo run --release --features "epd4in2,weather-openmeteo"
+cargo run --release --features "epd4in2,board_v2,weather-openmeteo"
 ```
 
 ## 项目结构
 
 ```
 src/
-├── main.rs              # 入口与硬件初始化
+├── main.rs              # 入口与硬件初始化（含阅读/正常重启分模式）
+├── board/               # 板级抽象（mod.rs 守卫+公共定义 / v1.rs 旧板 / v2.rs 新板）
 ├── display.rs           # 电子墨水屏渲染服务
-├── event.rs             # 事件系统（按键检测 + 发布-订阅）
+├── event.rs             # 事件系统（按键检测 + 事件队列 + 发布-订阅）
+├── pcf8563.rs           # PCF8563 硬件 RTC（走时 + 定时唤醒布防，v2）
+├── aht20.rs             # AHT20 温湿度传感器（v2）
+├── i2c_bus.rs           # I2C 总线容器（v2）
 ├── wifi.rs              # WiFi STA/AP 模式（esp-radio）
 ├── storage.rs           # Flash 持久化存储
-├── sleep.rs             # 深度睡眠与唤醒
-├── worldtime.rs         # NTP 时间同步
+├── sleep.rs             # 深度睡眠与唤醒（PCF 定时唤醒分档布防）
+├── ttf_sd.rs            # SD 卡 TTF 按需字形解析与栅格化
+├── worldtime.rs         # NTP 时间同步（对时结果写入 PCF8563）
 ├── weather.rs           # 天气数据服务
 ├── location.rs          # 基于 IP 的地理位置（自动定位天气城市）
 ├── request.rs           # HTTP/HTTPS 客户端
