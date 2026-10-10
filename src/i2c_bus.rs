@@ -1,4 +1,4 @@
-//! v22：I2C 总线容器（GPIO9=SDA，GPIO20=SCL，100kHz —— PCF8563 安全上限）。
+//! v22：I2C 总线容器（GPIO9=SDA，GPIO21=SCL，100kHz —— PCF8563 安全上限）。
 //! 挂载 AHT20（0x38）与 PCF8563（0x51），驱动经这里的助手函数访问总线。
 
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
