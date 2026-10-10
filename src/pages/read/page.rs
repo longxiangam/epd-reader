@@ -730,12 +730,12 @@ impl ReadPage {
                 let mut s: String<16> = String::new();
                 if total > 0 {
                     use core::fmt::Write;
-                    // bit31 = 已到末页（完成标记）→ 直接 100%；否则按字节偏移两位小数
+                    // bit31 = 已到末页（完成标记）→ 直接 100%；否则按字节偏移三位小数
                     if offset & (1u32 << 31) != 0 {
-                        let _ = write!(s, "100.00%");
+                        let _ = write!(s, "100.000%");
                     } else {
-                        let p = (offset as u64) * 10000 / total as u64;
-                        let _ = write!(s, "{}.{:02}%", p / 100, p % 100);
+                        let p = (offset as u64) * 100_000 / total as u64;
+                        let _ = write!(s, "{}.{:03}%", p / 1000, p % 1000);
                     }
                 }
                 let _ = self.book_progress.push(s);
@@ -1003,10 +1003,10 @@ impl ReadPage {
                     } else {
                         self.ttf_offset.min(self.ttf_file_len)
                     };
-                    let p = cur as u64 * 10000 / self.ttf_file_len as u64;
+                    let p = cur as u64 * 100_000 / self.ttf_file_len as u64;
                     let page_text_y = menu_y + menu_height as i32 - menu_padding as i32;
                     font.render_aligned(
-                        format_args!("{}.{:02}%", p / 100, p % 100),
+                        format_args!("{}.{:03}%", p / 1000, p % 1000),
                         Point::new(menu_x + menu_width as i32 - menu_padding as i32, page_text_y),
                         VerticalPosition::Bottom,
                         HorizontalAlignment::Right,
@@ -1439,9 +1439,9 @@ impl ReadPage {
                     }
                     let text_color = if is_selected { FontColor::Transparent(White) } else { FontColor::Transparent(Black) };
                     let prefix = if is_selected { "> " } else { "  " };
-                    let p = if self.ttf_file_len > 0 { off as u64 * 10000 / self.ttf_file_len as u64 } else { 0 };
+                    let p = if self.ttf_file_len > 0 { off as u64 * 100_000 / self.ttf_file_len as u64 } else { 0 };
                     font.render_aligned(
-                        format_args!("{}{}.{:02}%", prefix, p / 100, p % 100),
+                        format_args!("{}{}.{:03}%", prefix, p / 1000, p % 1000),
                         Point::new(text_left, item_y + item_h_i / 2),
                         VerticalPosition::Center,
                         HorizontalAlignment::Left,
@@ -1599,12 +1599,12 @@ impl ReadPage {
                     })
                 {
                     let p = if self.ttf_file_len > 0 {
-                        off as u64 * 10000 / self.ttf_file_len as u64
+                        off as u64 * 100_000 / self.ttf_file_len as u64
                     } else {
                         0
                     };
                     font.render_aligned(
-                        format_args!("书签 {}.{:02}%", p / 100, p % 100),
+                        format_args!("书签 {}.{:03}%", p / 1000, p % 1000),
                         Point::new(cx, y + 15),
                         VerticalPosition::Center,
                         HorizontalAlignment::Center,
@@ -1724,11 +1724,11 @@ impl ReadPage {
             );
         }
 
-        // 右：阅读进度（两位小数）
-        let v = (current as u64 * 10_000 / total as u64) as u32; // 百分比×100
+        // 右：阅读进度（三位小数）
+        let v = (current as u64 * 100_000 / total as u64) as u32; // 百分比×1000
         let mut pct_s: heapless::String<12> = heapless::String::new();
         use core::fmt::Write as _;
-        let _ = write!(pct_s, "{}.{:02}%", v / 100, v % 100);
+        let _ = write!(pct_s, "{}.{:03}%", v / 1000, v % 1000);
         let _ = font12.render_aligned(
             pct_s.as_str(),
             Point::new(vw as i32 - margin, icon_cy),
