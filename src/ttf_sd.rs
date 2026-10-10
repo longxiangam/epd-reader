@@ -916,7 +916,8 @@ pub fn find_prev_start(
 ///
 /// **async + 周期让出 CPU**：光栅化是软浮点重活（~10ms/字），一页 ~170 字要 ~1.8s。
 /// 若同步跑会卡死显示任务的墨水屏刷新（协作式调度，日志里 preload 堵在 begin render 之前）。
-/// 每 8 个字 await 一次，让显示任务能并行刷屏——翻页时屏幕先出图，预加载在后台跑完。
+/// 每 ≥10ms await 一次（按时间而非字数——单字耗时随字号平方涨），显示任务并行刷屏、
+/// 按键检测不被卡住——翻页时屏幕先出图，预加载在后台跑完。
 pub async fn preload_glyphs(
     f: &mut ActualFile<'_>, fi: &FontInfo, ws: &mut TtfWs,
     book_len: usize, px: f32, max_w: i32, line_h: i32, max_lines: u32,
@@ -933,7 +934,7 @@ pub async fn preload_glyphs(
     let mut pen_x = 0i32;
     let mut line = 0u32;
     let mut i = 0usize;
-    let mut since_yield = 0u32;
+    let mut last_yield = embassy_time::Instant::now();
     while i < book_len {
         let b0 = ws.book_buf[i];
         let clen = if b0 < 0x80 { 1 } else if b0 < 0xC0 { 1 }
@@ -967,10 +968,12 @@ pub async fn preload_glyphs(
         }
         pen_x += adv_f as i32;
         i += clen;
-        // 周期让出 CPU：让显示任务能并行刷墨水屏（preload 不再阻塞刷新）
-        since_yield += 1;
-        if since_yield >= 8 {
-            since_yield = 0;
+        // 周期让出 CPU：让显示任务能并行刷墨水屏，按键检测/事件派发不被卡住。
+        // 按时间驱动（≥10ms 一次）而非按字数——光栅化单字耗时随字号平方涨
+        // （16px ~4ms、40px ~40ms），按字数在在大字号下出让间隔会拉到几百 ms，
+        // 表现为翻页后长按连翻、菜单键长时间无响应。
+        if last_yield.elapsed() >= embassy_time::Duration::from_millis(10) {
+            last_yield = embassy_time::Instant::now();
             embassy_time::Timer::after(embassy_time::Duration::from_micros(1)).await;
         }
     }
