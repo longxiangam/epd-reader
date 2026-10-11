@@ -112,6 +112,9 @@ async fn main(spawner: Spawner) -> ! {
     // pad hold：v22 释放上次深睡布下的 hold（不释放的话 GPIO1 的驱低上轨
     // 写不进去 → 轨断电 → 显示/SD 全灭）；旧板给 GPIO1(SD 轨) 打 hold
     crate::board::init_pad_hold(&mut peripherals);
+    // 开机清 BOD 复位使能（v22 方案"开机清BOD"）：深睡唤醒瞬间电源有轻微
+    // 跌落，BOD 复位会把它放大成 POR。入睡路径在 sleep.rs 另有兜底。
+    crate::sleep::disable_bod_reset();
 
     // I2C 总线（v22：GPIO9=SDA GPIO21=SCL，挂 AHT20 + PCF8563；旧板无）——
     // 在任何外设被 move 之前构造
@@ -315,6 +318,22 @@ async fn main(spawner: Spawner) -> ! {
     if crate::storage::read_sleep_page() == Some(crate::storage::SleepPageStorage::PAGE_READING) {
         unsafe {
             core::ptr::addr_of_mut!(crate::pages::read::READING_MODE).write(true);
+        }
+        // v2 板深睡唤醒 rtc_fast 全丢（见 [wake-diag]）：从 NVS 续读快照恢复
+        // 书下标/偏移/子目录，ReadPage::new() 走既有续读路径直达原书原页；
+        // 无有效快照则 PAGE_INDEX=None → 退书单（与旧行为一致）。
+        if let Some(r) = crate::storage::read_reading_resume() {
+            let end = r.subdir.iter().position(|&b| b == 0).unwrap_or(0);
+            let sub = if end == 0 {
+                None
+            } else {
+                core::str::from_utf8(&r.subdir[..end]).ok()
+            };
+            crate::pages::read::restore_resume_state(r.book_index, r.offset, sub);
+            println!(
+                "[boot] NVS 续读快照恢复: book={} off={} subdir={:?}",
+                r.book_index, r.offset, sub
+            );
         }
         println!("[boot] NVS: 上次在阅读 → 恢复阅读模式");
     }

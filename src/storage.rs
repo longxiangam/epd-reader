@@ -417,6 +417,62 @@ impl StrokeConfigStorage {
 const STROKE_CONFIG_OFFSET: usize = READING_FLAGS_OFFSET + size_of::<ReadingFlagsStorage>();
 impl_storage!(StrokeConfigStorage, STROKE_CONFIG_OFFSET);
 
+/// 阅读续读快照（追加在存储链末尾；勿动既有结构——那会挪动后续偏移）。
+/// v2 板深睡唤醒 rtc_fast 全丢（实测 boot_seq 归 1），书下标/子目录/偏移落 NVS，
+/// 唤醒后 main 据此直接回到原书原页（无有效记录则退书单）。
+#[derive(Debug, Clone, Copy)]
+pub struct ReadingResumeStorage {
+    pub magic: u32, // 0x5244534D = "RDSM"
+    pub subdir: [u8; crate::sd_mount::BOOK_NAME_MAX], // books 子目录名（utf8 零结尾；全 0=根目录）
+    pub book_index: u32, // 书在当前目录列表中的下标
+    pub offset: u32,     // 续读字节偏移（页起点）
+}
+
+impl Default for ReadingResumeStorage {
+    fn default() -> Self {
+        Self {
+            magic: 0,
+            subdir: [0; crate::sd_mount::BOOK_NAME_MAX],
+            book_index: 0,
+            offset: 0,
+        }
+    }
+}
+
+impl ReadingResumeStorage {
+    pub const MAGIC: u32 = 0x5244_534D;
+    /// 记录有效性：magic + 书下标在书单容量（40）内
+    pub fn valid(&self) -> bool {
+        self.magic == Self::MAGIC && self.book_index < 40
+    }
+}
+
+const READING_RESUME_OFFSET: usize = STROKE_CONFIG_OFFSET + size_of::<StrokeConfigStorage>();
+impl_storage!(ReadingResumeStorage, READING_RESUME_OFFSET);
+
+/// 读续读快照（无效 → None）
+pub fn read_reading_resume() -> Option<ReadingResumeStorage> {
+    match ReadingResumeStorage::read() {
+        Ok(r) if r.valid() => Some(r),
+        _ => None,
+    }
+}
+
+/// 写续读快照（内容未变时跳过写入，避免磨损）
+pub fn write_reading_resume(subdir: &[u8; crate::sd_mount::BOOK_NAME_MAX], book_index: u32, offset: u32) {
+    if let Some(r) = read_reading_resume() {
+        if r.book_index == book_index && r.offset == offset && r.subdir == *subdir {
+            return;
+        }
+    }
+    let mut r = ReadingResumeStorage::read().unwrap_or_default();
+    r.magic = ReadingResumeStorage::MAGIC;
+    r.subdir = *subdir;
+    r.book_index = book_index;
+    r.offset = offset;
+    let _ = r.write();
+}
+
 /// 读笔画加粗系数（×10；无效/未设置 → 10）
 pub fn read_stroke_weight() -> u8 {
     match StrokeConfigStorage::read() {

@@ -620,6 +620,25 @@ impl ReadPage {
         unsafe {
             *core::ptr::addr_of_mut!(TTF_RESUME_OFFSET) = self.ttf_offset;
         }
+        // 续读快照落 NVS（v2 板深睡丢 rtc_fast，唤醒恢复靠它）；书单态不写
+        if self.reading {
+            self.save_resume_snapshot();
+        }
+    }
+
+    /// 阅读续读快照落 NVS：v2 板深睡唤醒 rtc_fast 全丢，书下标/子目录/偏移写 NVS，
+    /// 唤醒后 main 恢复（restore_resume_state）。进书还原偏移后与每次翻页/跳转后调用。
+    fn save_resume_snapshot(&self) {
+        if !self.reading || self.ttf_file_len == 0 {
+            return;
+        }
+        let mut buf = [0u8; BOOK_NAME_MAX];
+        subdir_into_buf(&mut buf, self.cur_subdir.as_deref());
+        crate::storage::write_reading_resume(
+            &buf,
+            self.choose_index,
+            self.ttf_offset.min(self.ttf_file_len),
+        );
     }
 
     /// 列表视图中目录项个数：二级内的"..返回上级"（1）+ 根层的子目录列表。
@@ -1764,6 +1783,16 @@ pub(crate) static mut PAGE_INDEX: Option<u32> = None;
 #[ram(unstable(rtc_fast))]
 static mut RESUME_SUBDIR: [u8; BOOK_NAME_MAX] = [0; BOOK_NAME_MAX];
 
+/// 唤醒恢复续读快照（rtc_fast 随深睡丢失时，main 从 NVS 快照调用）。
+/// 写回 PAGE_INDEX/TTF_RESUME_OFFSET/RESUME_SUBDIR，ReadPage::new() 走既有续读路径。
+pub(crate) fn restore_resume_state(book_index: u32, offset: u32, subdir: Option<&str>) {
+    unsafe {
+        core::ptr::addr_of_mut!(PAGE_INDEX).write(Some(book_index));
+        core::ptr::addr_of_mut!(TTF_RESUME_OFFSET).write(offset);
+    }
+    resume_subdir_set(subdir);
+}
+
 fn subdir_from_buf(buf: &[u8; BOOK_NAME_MAX]) -> Option<String<BOOK_NAME_MAX>> {
     let end = buf.iter().position(|&b| b == 0).unwrap_or(0);
     if end == 0 {
@@ -2541,6 +2570,8 @@ impl Page for ReadPage {
                                                 f.close();
                                             }
                                         }
+                                        // 续读快照同步落 NVS（.log 写完偏移已新鲜）
+                                        self.save_resume_snapshot();
                                     }
 
                                     // 仅在实际渲染后（翻页）预加载一次下一页字形

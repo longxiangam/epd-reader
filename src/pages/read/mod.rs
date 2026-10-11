@@ -3,6 +3,7 @@ pub(crate) mod bitmap;
 pub use page::ReadPage;
 pub(crate) use page::PAGE_INDEX;
 pub(crate) use page::READING_MODE;
+pub(crate) use page::restore_resume_state;
 
 #[cfg(feature = "epd2in7")]
 mod layout_176x264;

@@ -66,6 +66,19 @@ pub async fn refresh_active_time(){
      *LAST_ACTIVE_TIME.lock().await = Instant::now();
 }
 
+/// 关 BOD 复位使能（v22 方案"开机清BOD"）：深睡/唤醒瞬间的电源轻微跌落会被
+/// BOD 放大成 POR（实测按键唤醒 reset_reason=ChipPowerOn、bod_det=false——
+/// POR 把 BOD 状态也清了）。开机与每次入睡（to_sleep_tips/reboot_sleep）前
+/// 各设一次：跌落发生在深睡期间，起作用的是入睡时刻的配置；RTC_CNTL 寄存器
+/// 跨深睡保留（pad hold 同理），esp-hal 自身不碰 BOD，但 ROM 每次启动会恢复
+/// 默认使能，睡前兜底最稳。
+pub fn disable_bod_reset() {
+    esp_hal::peripherals::LPWR::regs().brown_out().modify(|_, w| {
+        w.brown_out_rst_ena().clear_bit();
+        w.brown_out_ana_rst_en().clear_bit()
+    });
+}
+
 pub async fn to_sleep(sleep_time:Duration, idle_time:Duration) {
     to_sleep_tips(sleep_time, idle_time, false).await;
 }
@@ -166,6 +179,8 @@ pub async fn to_sleep_tips(sleep_time:Duration, idle_time:Duration, show_sleep:b
 
         save_time_to_rtc().await;
 
+        // 入睡兜底：确保深睡期间的 BOD 配置是"不复位"（见 disable_bod_reset）
+        disable_bod_reset();
         RTC_MANGE.lock().await.as_mut().unwrap().sleep_deep(ws.as_slice());
     }
 }
@@ -195,6 +210,7 @@ pub async fn reboot_sleep() {
         p.set_high();
     }
 
+    disable_bod_reset();
     RTC_MANGE.lock().await.as_mut().unwrap().sleep_deep(ws.as_slice());
 }
 pub async fn get_sleep_ms()->u64{
