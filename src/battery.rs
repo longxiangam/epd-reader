@@ -21,6 +21,10 @@ impl  Battery{
 }
 
 pub static BATTERY:Mutex<CriticalSectionRawMutex,Option<Battery>> = Mutex::new(None);
+
+/// 11dB 衰减下 ADC 实际饱和电压（mV）：满电 4.2V 实测标定（raw=2937 ↔ 中点
+/// 2100mV → 4095 满量程 ≈2929mV）。比规格"可用范围"推荐值 2500mV 高。
+const PIN_FULL_SCALE_MV: f32 = 2929.0;
 // 电池分压 ADC 引脚（板级定义见 board::BatAdcGpio：v22=GPIO2，旧板=GPIO4）
 pub static ADC_PIN:Mutex<CriticalSectionRawMutex,Option<AdcPin<crate::board::BatAdcGpio,esp_hal::peripherals::ADC1,esp_hal::analog::adc::AdcCalCurve<esp_hal::peripherals::ADC1>>>> = Mutex::new(None);
 
@@ -47,7 +51,13 @@ pub async fn test_bat_adc() {
                         tries += 1;
                         match adc.read_oneshot(pin) {
                             Ok(adc_value) => {
-                                let voltage_mv = adc_value as f32 * 2.0;
+                                // raw(0..4095) → 分压中点电压 → ×2 还原电池电压
+                                //（100k/100k 分压）。满量程用实测标定值：满电 4.2V
+                                // 实测 raw=2937 ↔ 中点 2100mV → 饱和点 ≈2929mV——
+                                // C3 在 11dB 衰减下实际饱和点比理论 2500mV（可用范围
+                                // 推荐值）高。此前误写 raw×2（计数量当毫伏）恒 100%。
+                                let voltage_mv =
+                                    adc_value as f32 * (PIN_FULL_SCALE_MV * 2.0 / 4095.0);
                                 v.voltage = voltage_mv as u32;
 
                                 let percent = if voltage_mv > V_MAX as f32 {
@@ -63,10 +73,10 @@ pub async fn test_bat_adc() {
                                 v.percent = percent;
                                 unsafe { *core::ptr::addr_of_mut!(LAST_BATTERY_PERCENT) = percent; }
 
-                                // 诊断换算：pin = 11dB 衰减理论满量程（2500mV/4095）下的
-                                // 引脚电压估计，供与万用表实测分压中点对比；bat = 现
-                                // 行 raw×2 估的电池电压（两者差 2 倍即分压比）。
-                                let pin_mv = (adc_value as u32 * 2500) / 4095;
+                                // 诊断换算：pin = 分压中点电压估计（=电池电压/2），
+                                // 供与万用表实测对比。
+                                let pin_mv =
+                                    (adc_value as f32 * (PIN_FULL_SCALE_MV / 4095.0)) as u32;
                                 println!(
                                     "[bat] raw={} pin≈{}mV bat≈{}mV 电量{}%",
                                     adc_value, pin_mv, v.voltage, v.percent
